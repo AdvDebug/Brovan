@@ -3,82 +3,46 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:fillViewport="true"
     android:scrollbars="none">
 
     <LinearLayout
         android:id="@+id/page_column"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:paddingStart="24dp"
-        android:paddingEnd="24dp"
-        android:paddingTop="24dp"
-        android:paddingBottom="12dp">
+        style="@style/SetupColumn">
 
-        <FrameLayout
-            android:layout_width="match_parent"
-            android:layout_height="150dp"
-            android:background="@drawable/bg_feature_panel">
-
+        <FrameLayout style="@style/SetupArt">
             <ImageView
-                android:layout_width="180dp"
-                android:layout_height="96dp"
-                android:layout_gravity="center"
-                android:contentDescription="@null"
+                style="@style/SetupArtLayer"
                 android:src="@drawable/art_programs"
                 app:tint="@color/text_secondary" />
 
             <ImageView
                 android:id="@+id/page_art"
-                android:layout_width="180dp"
-                android:layout_height="96dp"
-                android:layout_gravity="center"
-                android:contentDescription="@null"
+                style="@style/SetupArtLayer"
                 android:src="@drawable/art_programs_anim"
                 app:tint="@color/accent" />
         </FrameLayout>
 
         <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="22dp"
-            android:text="@string/setup_program_title"
-            android:textColor="@color/text_primary"
-            android:textSize="30sp" />
+            style="@style/SetupTitle"
+            android:text="@string/setup_program_title" />
 
         <TextView
             android:id="@+id/program_state"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:lineSpacingExtra="3dp"
-            android:textColor="@color/text_secondary"
-            android:textSize="15sp" />
+            style="@style/SetupBody" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/program_folder"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="18dp"
+            style="@style/SetupAction"
             android:text="@string/library_add_folder" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/program_file"
-            style="@style/Widget.Material3.Button.TextButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:layout_marginTop="4dp"
+            style="@style/SetupLink"
             android:text="@string/library_add_file" />
 
         <com.google.android.material.progressindicator.LinearProgressIndicator
             android:id="@+id/program_progress"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:indeterminate="true"
-            android:visibility="gone"
-            app:trackCornerRadius="4dp"
-            app:trackThickness="6dp" />
+            style="@style/SetupProgress" />
     </LinearLayout>
 </ScrollView>

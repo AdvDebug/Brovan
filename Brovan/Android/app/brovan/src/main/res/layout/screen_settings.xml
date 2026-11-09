@@ -85,5 +85,25 @@
                 </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
+
+        <TextView style="@style/SectionLabel.Group" android:text="@string/settings_app" />
+        <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+            <LinearLayout style="@style/SettingsGroupBody">
+                <LinearLayout android:id="@+id/nav_theme" style="@style/SettingsSwitchRow">
+                    <LinearLayout style="@style/SettingsSwitchText">
+                        <TextView style="@style/SettingsRowTitle" android:text="@string/nav_theme" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_appearance_summary" />
+                    </LinearLayout>
+                    <ImageView style="@style/SettingsChevron" />
+                </LinearLayout>
+                <LinearLayout android:id="@+id/nav_about" style="@style/SettingsSwitchRow">
+                    <LinearLayout style="@style/SettingsSwitchText">
+                        <TextView style="@style/SettingsRowTitle" android:text="@string/nav_about" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_about_summary" />
+                    </LinearLayout>
+                    <ImageView style="@style/SettingsChevron" />
+                </LinearLayout>
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
 </ScrollView>

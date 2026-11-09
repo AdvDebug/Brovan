@@ -2,4 +2,8 @@
 <resources>
     <dimen name="debug_row_text">11sp</dimen>
     <dimen name="debug_row_padding">12dp</dimen>
+    <dimen name="nav_pill_width">64dp</dimen>
+    <dimen name="nav_pill_height">32dp</dimen>
+    <dimen name="nav_pill_radius">16dp</dimen>
+    <dimen name="nav_pill_top">8dp</dimen>
 </resources>

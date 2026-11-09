@@ -1,61 +1,74 @@
 <?xml version="1.0" encoding="utf-8"?>
 <com.google.android.material.card.MaterialCardView
     xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     style="@style/Widget.Brovan.Card"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:layout_margin="8dp"
     android:clickable="true"
-    android:focusable="true">
+    android:focusable="true"
+    app:strokeWidth="0dp">
 
-    <FrameLayout android:layout_width="match_parent" android:layout_height="wrap_content">
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingStart="14dp"
+        android:paddingTop="22dp"
+        android:paddingEnd="4dp"
+        android:paddingBottom="6dp">
+
+        <ImageView
+            android:id="@+id/icon"
+            android:layout_width="72dp"
+            android:layout_height="72dp"
+            android:layout_gravity="center_horizontal"
+            android:contentDescription="@null"
+            android:scaleType="fitCenter" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:padding="12dp">
+            android:layout_marginTop="14dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-            <dev.brovan.app.SquareFrameLayout
-                android:id="@+id/art"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content">
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
 
-                <ImageView
-                    android:id="@+id/icon"
+                <TextView
+                    android:id="@+id/name"
                     android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:contentDescription="@null"
-                    android:padding="26dp"
-                    android:scaleType="fitCenter" />
-            </dev.brovan.app.SquareFrameLayout>
+                    android:layout_height="wrap_content"
+                    android:ellipsize="end"
+                    android:maxLines="2"
+                    android:textColor="@color/text_primary"
+                    android:textSize="16sp" />
 
-            <TextView
-                android:id="@+id/name"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="14dp"
-                android:ellipsize="end"
-                android:gravity="center"
-                android:maxLines="2"
-                android:textColor="@color/text_primary"
-                android:textSize="16sp" />
+                <TextView
+                    android:id="@+id/detail"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:ellipsize="middle"
+                    android:maxLines="1"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp" />
+            </LinearLayout>
 
-            <TextView
-                android:id="@+id/detail"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:ellipsize="middle"
-                android:gravity="center"
-                android:maxLines="1"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
+            <ImageButton
+                android:id="@+id/actions"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:padding="10dp"
+                android:background="@drawable/bg_icon_press"
+                android:contentDescription="@string/library_more"
+                android:src="@drawable/ic_more_vert"
+                android:tint="@color/text_secondary" />
         </LinearLayout>
-        <ImageButton android:id="@+id/actions"
-            android:layout_width="48dp" android:layout_height="48dp"
-            android:layout_gravity="top|end" android:padding="15dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@string/library_more"
-            android:src="@drawable/ic_more_vert" android:tint="@color/text_secondary" />
-    </FrameLayout>
+    </LinearLayout>
 </com.google.android.material.card.MaterialCardView>

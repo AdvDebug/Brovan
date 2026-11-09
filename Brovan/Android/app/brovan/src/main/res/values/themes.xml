@@ -164,13 +164,9 @@
         <item name="android:layout_height">wrap_content</item>
     </style>
 
-    <style name="SettingsChevron" parent="">
-        <item name="android:layout_width">20dp</item>
-        <item name="android:layout_height">20dp</item>
+    <style name="SettingsChevron" parent="SettingsRowAction">
         <item name="android:rotation">-90</item>
         <item name="android:src">@drawable/ic_chevron_down</item>
-        <item name="android:tint">@color/text_secondary</item>
-        <item name="android:importantForAccessibility">no</item>
     </style>
 
     <style name="RuntimeTitle" parent="">
@@ -189,6 +185,111 @@
         <item name="android:layout_height">24dp</item>
         <item name="android:tint">@color/text_secondary</item>
         <item name="android:importantForAccessibility">no</item>
+    </style>
+
+    <style name="SetupColumn" parent="">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:orientation">vertical</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">32dp</item>
+        <item name="android:paddingEnd">32dp</item>
+        <item name="android:paddingTop">16dp</item>
+        <item name="android:paddingBottom">48dp</item>
+    </style>
+
+    <style name="SetupArt" parent="">
+        <item name="android:layout_width">220dp</item>
+        <item name="android:layout_height">118dp</item>
+    </style>
+
+    <style name="SetupArtLayer" parent="">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:contentDescription">@null</item>
+    </style>
+
+    <style name="SetupTitle" parent="">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">28dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:textColor">@color/text_primary</item>
+        <item name="android:textSize">26sp</item>
+    </style>
+
+    <style name="SetupBody" parent="">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">10dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:lineSpacingExtra">3dp</item>
+        <item name="android:textColor">@color/text_secondary</item>
+        <item name="android:textSize">15sp</item>
+    </style>
+
+    <style name="SetupAction" parent="Widget.Material3.Button">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:minWidth">220dp</item>
+        <item name="android:layout_marginTop">24dp</item>
+    </style>
+
+    <style name="SetupLink" parent="Widget.Material3.Button.TextButton">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">4dp</item>
+    </style>
+
+    <style name="SetupProgress" parent="">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginTop">16dp</item>
+        <item name="android:indeterminate">true</item>
+        <item name="android:visibility">gone</item>
+        <item name="trackCornerRadius">4dp</item>
+        <item name="trackThickness">6dp</item>
+    </style>
+
+    <style name="SetupNote" parent="">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:gravity">center</item>
+        <item name="android:textColor">@color/text_secondary</item>
+        <item name="android:textSize">13sp</item>
+    </style>
+
+    <style name="SetupProgressText" parent="SetupNote">
+        <item name="android:layout_marginTop">8dp</item>
+        <item name="android:visibility">gone</item>
+    </style>
+
+    <style name="SetupCheck" parent="">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:textSize">15sp</item>
+    </style>
+
+    <style name="SettingsRowIcon" parent="RuntimeIcon">
+        <item name="android:layout_marginEnd">16dp</item>
+    </style>
+
+    <style name="SettingsRowAction" parent="">
+        <item name="android:layout_width">20dp</item>
+        <item name="android:layout_height">20dp</item>
+        <item name="android:tint">@color/text_secondary</item>
+        <item name="android:importantForAccessibility">no</item>
+    </style>
+
+    <style name="ProgramActions" parent="">
+        <item name="android:layout_width">48dp</item>
+        <item name="android:layout_height">48dp</item>
+        <item name="android:layout_gravity">top|end</item>
+        <item name="android:padding">15dp</item>
+        <item name="android:background">@drawable/bg_icon_press</item>
+        <item name="android:contentDescription">@string/library_more</item>
+        <item name="android:src">@drawable/ic_more_vert</item>
+        <item name="android:tint">@color/text_secondary</item>
     </style>
 
     <style name="StatusChip" parent="">
@@ -382,5 +483,31 @@
         <item name="android:drawableEnd">@drawable/ic_chevron_down</item>
         <item name="android:drawableTint">@color/accent</item>
         <item name="android:drawablePadding">6dp</item>
+    </style>
+
+    <!-- The bar sits over a pill that follows the pages, so it has no background or stock indicator. -->
+    <style name="Widget.Brovan.NavigationBar" parent="Widget.Material3.BottomNavigationView">
+        <item name="android:background">@android:color/transparent</item>
+        <item name="backgroundTint">@null</item>
+        <item name="elevation">0dp</item>
+        <item name="itemIconTint">@color/nav_item</item>
+        <item name="itemTextColor">@color/nav_item</item>
+        <item name="itemActiveIndicatorStyle">@null</item>
+        <item name="itemBackground">@drawable/bg_nav_item_press</item>
+        <item name="labelVisibilityMode">labeled</item>
+    </style>
+
+    <style name="Widget.Brovan.NavigationRail" parent="Widget.Material3.NavigationRailView">
+        <item name="android:background">@color/surface</item>
+        <item name="backgroundTint">@null</item>
+        <item name="elevation">0dp</item>
+        <item name="itemIconTint">@color/nav_item</item>
+        <item name="itemTextColor">@color/nav_item</item>
+        <item name="itemActiveIndicatorStyle">@style/Widget.Brovan.NavigationRail.Indicator</item>
+        <item name="labelVisibilityMode">labeled</item>
+    </style>
+
+    <style name="Widget.Brovan.NavigationRail.Indicator" parent="Widget.Material3.NavigationRailView.ActiveIndicator">
+        <item name="android:color">@color/accent_wash</item>
     </style>
 </resources>

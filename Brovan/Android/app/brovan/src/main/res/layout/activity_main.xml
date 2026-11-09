@@ -1,46 +1,34 @@
 <?xml version="1.0" encoding="utf-8"?>
-<androidx.drawerlayout.widget.DrawerLayout
+<LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    android:id="@+id/drawer"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fitsSystemWindows="true">
+    android:orientation="vertical">
 
-    <androidx.coordinatorlayout.widget.CoordinatorLayout
+    <include
+        layout="@layout/main_content"
         android:layout_width="match_parent"
-        android:layout_height="match_parent">
+        android:layout_height="0dp"
+        android:layout_weight="1" />
 
-        <com.google.android.material.appbar.AppBarLayout
-            android:id="@+id/app_bar"
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/surface">
+
+        <View
+            android:id="@+id/nav_pill"
+            android:layout_width="@dimen/nav_pill_width"
+            android:layout_height="@dimen/nav_pill_height"
+            android:layout_marginTop="@dimen/nav_pill_top"
+            android:background="@drawable/bg_nav_pill" />
+
+        <com.google.android.material.bottomnavigation.BottomNavigationView
+            android:id="@+id/navigation"
+            style="@style/Widget.Brovan.NavigationBar"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="@color/background"
-            app:liftOnScroll="true">
-
-            <com.google.android.material.appbar.MaterialToolbar
-                android:id="@+id/toolbar"
-                android:layout_width="match_parent"
-                android:layout_height="?attr/actionBarSize"
-                app:navigationIcon="@drawable/ic_menu"
-                app:title="@string/app_name" />
-        </com.google.android.material.appbar.AppBarLayout>
-
-        <FrameLayout
-            android:id="@+id/content"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            app:layout_behavior="@string/appbar_scrolling_view_behavior" />
-    </androidx.coordinatorlayout.widget.CoordinatorLayout>
-
-    <com.google.android.material.navigation.NavigationView
-        android:id="@+id/navigation"
-        android:layout_width="wrap_content"
-        android:layout_height="match_parent"
-        android:layout_gravity="start"
-        android:background="@color/surface"
-        android:fitsSystemWindows="true"
-        app:headerLayout="@layout/nav_header"
-        app:insetForeground="@android:color/transparent"
-        app:menu="@menu/nav_menu" />
-</androidx.drawerlayout.widget.DrawerLayout>
+            app:menu="@menu/nav_menu" />
+    </FrameLayout>
+</LinearLayout>

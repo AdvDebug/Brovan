@@ -103,12 +103,13 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
     private static final int SAMPLE = 16;
     private static final float RADIUS = 18f;
 
+    private static final LruCache<String, Bitmap> icons = new LruCache<>(64);
+    private static final Set<String> withoutIcon = new HashSet<>();
+    private static final Map<String, Integer> tints = new HashMap<>();
+
     private final List<Program> all = new ArrayList<>();
     private final List<Program> visible = new ArrayList<>();
-    private final LruCache<String, Bitmap> icons = new LruCache<>(64);
-    private final Set<String> withoutIcon = new HashSet<>();
     private final Set<String> loading = new HashSet<>();
-    private final Map<String, Integer> tints = new HashMap<>();
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private final File iconCache;
@@ -195,7 +196,7 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         boolean failed = !program.lastFailure().isEmpty();
         holder.detail.setText(failed ? holder.itemView.getContext().getString(R.string.program_last_run_failed)
                 : program.executableName());
-        holder.detail.setTextColor(failed ? holder.itemView.getContext().getColor(R.color.log_error)
+        holder.detail.setTextColor(failed ? holder.itemView.getContext().getColor(R.color.log_warn)
                 : Theming.color(holder.itemView.getContext(), Palette.Role.TEXT_SECONDARY));
         holder.detail.setVisibility(style.detail || failed ? View.VISIBLE : View.GONE);
         holder.actions.setOnClickListener(view -> listener.onActions(program));
@@ -215,8 +216,10 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         }
 
         String key = iconKey(program);
-        Integer tint = tints.get(key);
-        holder.art.setBackground(backdrop(tint != null ? tint : monogramColor(program.name())));
+        if (holder.art != null) {
+            Integer tint = tints.get(key);
+            holder.art.setBackground(backdrop(tint != null ? tint : monogramColor(program.name())));
+        }
 
         holder.itemView.setOnClickListener(view -> listener.onLaunch(program));
         holder.itemView.setOnLongClickListener(view -> {

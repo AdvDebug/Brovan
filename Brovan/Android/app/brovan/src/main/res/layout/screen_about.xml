@@ -1,94 +1,62 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
-    android:layout_width="match_parent"
-    android:layout_height="match_parent">
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent" android:layout_height="match_parent" android:background="@color/background"
+    android:fillViewport="true">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:paddingHorizontal="16dp" android:paddingTop="16dp"
+        android:paddingBottom="24dp">
 
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="24dp">
+        <ImageView android:layout_width="80dp" android:layout_height="80dp" android:layout_gravity="center_horizontal"
+            android:src="@mipmap/ic_launcher" android:importantForAccessibility="no" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/app_name"
-            android:textColor="@color/text_primary"
-            android:textSize="30sp" />
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal" android:layout_marginTop="12dp" android:text="@string/app_name"
+            android:textColor="@color/text_primary" android:textSize="24sp" android:fontFamily="sans-serif-medium" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/about_tagline"
-            android:textColor="@color/text_secondary"
-            android:textSize="15sp" />
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal" android:layout_marginTop="2dp" android:text="@string/about_tagline"
+            android:textColor="@color/text_secondary" android:textSize="14sp" />
 
-        <com.google.android.material.card.MaterialCardView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            app:cardBackgroundColor="@color/surface"
-            app:cardCornerRadius="16dp"
-            app:cardElevation="0dp"
-            app:strokeColor="@color/outline"
-            app:strokeWidth="1dp">
+        <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group"
+            android:layout_marginTop="24dp" app:cardBackgroundColor="@color/accent_wash"
+            app:strokeColor="@color/accent_outline">
+            <LinearLayout android:id="@+id/report_issue" style="@style/SettingsSwitchRow">
+                <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_feedback" android:tint="@color/accent" />
+                <LinearLayout style="@style/SettingsSwitchText">
+                    <TextView style="@style/SettingsRowTitle" android:text="@string/about_feedback_title" />
+                    <TextView style="@style/SettingsRowSummary" android:text="@string/about_feedback_summary" />
+                </LinearLayout>
+                <ImageView style="@style/SettingsChevron" android:tint="@color/accent" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="20dp">
-
-                <TextView style="@style/SectionLabel" android:text="Author" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/about_author"
-                    android:textColor="@color/text_primary"
-                    android:textSize="22sp" />
-
-                <TextView style="@style/SectionLabel" android:text="@string/about_links" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/open_github"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="10dp"
-                    android:gravity="start|center_vertical"
-                    android:text="@string/about_open_github"
-                    app:icon="@drawable/ic_github"
-                    app:iconGravity="start"
-                    app:iconPadding="16dp"
-                    app:iconTint="@color/text_primary" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/open_linkedin"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:gravity="start|center_vertical"
-                    android:text="@string/about_open_linkedin"
-                    app:icon="@drawable/ic_linkedin"
-                    app:iconGravity="start"
-                    app:iconPadding="16dp"
-                    app:iconTint="@color/text_primary" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/open_discord"
-                    style="@style/Widget.Material3.Button.OutlinedButton"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="8dp"
-                    android:gravity="start|center_vertical"
-                    android:text="@string/about_open_discord"
-                    app:icon="@drawable/ic_discord"
-                    app:iconGravity="start"
-                    app:iconPadding="16dp"
-                    app:iconTint="@color/text_primary" />
+        <TextView style="@style/SectionLabel.Group" android:text="@string/about_made_by" />
+        <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+            <LinearLayout style="@style/SettingsGroupBody">
+                <LinearLayout android:id="@+id/open_github" style="@style/SettingsSwitchRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_github" />
+                    <LinearLayout style="@style/SettingsSwitchText">
+                        <TextView style="@style/SettingsRowTitle" android:text="@string/about_open_github" />
+                        <TextView android:id="@+id/about_github_link" style="@style/SettingsRowSummary" />
+                    </LinearLayout>
+                    <ImageView style="@style/SettingsRowAction" android:src="@drawable/ic_open_in_new" />
+                </LinearLayout>
+                <LinearLayout android:id="@+id/open_linkedin" style="@style/SettingsSwitchRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_linkedin" />
+                    <LinearLayout style="@style/SettingsSwitchText">
+                        <TextView style="@style/SettingsRowTitle" android:text="@string/about_open_linkedin" />
+                        <TextView android:id="@+id/about_linkedin_link" style="@style/SettingsRowSummary" />
+                    </LinearLayout>
+                    <ImageView style="@style/SettingsRowAction" android:src="@drawable/ic_open_in_new" />
+                </LinearLayout>
+                <LinearLayout android:id="@+id/open_discord" style="@style/SettingsSwitchRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_discord" />
+                    <LinearLayout style="@style/SettingsSwitchText">
+                        <TextView style="@style/SettingsRowTitle" android:text="@string/about_open_discord" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/about_discord" />
+                    </LinearLayout>
+                    <ImageView style="@style/SettingsRowAction" android:src="@drawable/ic_copy" />
+                </LinearLayout>
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
     </LinearLayout>

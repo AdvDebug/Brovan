@@ -1,10 +1,10 @@
 package dev.brovan.app;
 
-import android.animation.ValueAnimator;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
+import android.graphics.Color;
 import android.graphics.drawable.Animatable;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
@@ -20,6 +20,7 @@ import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
+import androidx.core.graphics.ColorUtils;
 
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
@@ -53,27 +54,35 @@ public class SetupActivity extends AppCompatActivity {
     /** Roughly what the extracted Windows files occupy; the download needs headroom on top. */
     private static final long WINDOWS_BYTES = 8L << 30;
 
+    private static final int[][] ENABLED_STATES = {{-android.R.attr.state_enabled}, {}};
+    // Material 3 disabled opacities, 12% for the container and 38% for the label.
+    private static final int DISABLED_FILL_ALPHA = 31;
+    private static final int DISABLED_TEXT_ALPHA = 97;
+
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private final List<View> dots = new ArrayList<>();
+    private final List<View> steps = new ArrayList<>();
 
     private Library library;
     private Settings settings;
+    private Palette palette;
     private ViewGroup host;
-    private LinearProgressIndicator progress;
-    private TextView stepLabel;
-    private MaterialButton back;
+    private View back;
     private MaterialButton next;
     private MaterialButton skip;
     private View page;
     private int index;
     private boolean busy;
+    private ButtonColors filled;
+    private ButtonColors tonal;
 
+    private MaterialButton stepAction;
     private TextView programState;
     private LinearProgressIndicator programProgress;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
-        Palette palette = new Settings(this).palette();
+        settings = new Settings(this);
+        palette = settings.palette();
         Theming.install(this, palette);
 
         super.onCreate(savedInstanceState);
@@ -82,11 +91,14 @@ public class SetupActivity extends AppCompatActivity {
         Theming.apply(this, Palette.defaults(), palette);
 
         library = new Library(this);
-        settings = new Settings(this);
+
+        int accent = palette.get(Palette.Role.ACCENT);
+        int text = palette.get(Palette.Role.TEXT_PRIMARY);
+        filled = new ButtonColors(accent, palette.get(Palette.Role.ON_ACCENT), text);
+        tonal = new ButtonColors(ColorUtils.setAlphaComponent(accent, Color.alpha(color(R.color.accent_wash))), text,
+                text);
 
         host = findViewById(R.id.setup_page);
-        progress = findViewById(R.id.setup_progress);
-        stepLabel = findViewById(R.id.setup_step_label);
         back = findViewById(R.id.setup_back);
         next = findViewById(R.id.setup_next);
         skip = findViewById(R.id.setup_skip);
@@ -101,7 +113,7 @@ public class SetupActivity extends AppCompatActivity {
         });
         skip.setOnClickListener(button -> done());
 
-        buildDots();
+        buildSteps();
         go(savedInstanceState == null ? 0 : savedInstanceState.getInt(STATE_INDEX), true);
     }
 
@@ -143,14 +155,15 @@ public class SetupActivity extends AppCompatActivity {
         }
 
         index = target;
+        stepAction = null;
         programState = null;
         programProgress = null;
 
         View incoming = LayoutInflater.from(this).inflate(PAGES[index], host, false);
-        bind(incoming);
+        boolean done = bind(incoming);
         swap(incoming, forward);
         startArt(incoming);
-        updateChrome();
+        updateChrome(done);
     }
 
     private void startArt(View target) {
@@ -165,40 +178,42 @@ public class SetupActivity extends AppCompatActivity {
         }
     }
 
-    private void bind(View target) {
+    private boolean bind(View target) {
         switch (index) {
             case 0:
-                break;
+                return true;
             case 1:
-                bindWindows(target);
-                break;
+                return bindWindows(target);
             case 2:
-                bindRuntimes(target);
-                break;
+                return bindRuntimes(target);
             case 3:
-                bindProgram(target);
-                break;
+                return bindProgram(target);
             default:
                 bindReady(target);
-                break;
+                return true;
         }
     }
 
-    private void bindWindows(View target) {
-        TextView state = target.findViewById(R.id.windows_state);
-
-        showWindowsState(state);
-
-        target.findViewById(R.id.windows_iso_pick).setOnClickListener(button -> {
+    private boolean bindWindows(View target) {
+        stepAction = target.findViewById(R.id.windows_iso_pick);
+        stepAction.setOnClickListener(button -> {
             if (!busy) {
                 pick(new Intent(Intent.ACTION_OPEN_DOCUMENT)
                         .addCategory(Intent.CATEGORY_OPENABLE)
                         .setType("*/*"), REQUEST_ISO);
             }
         });
+
+        target.findViewById(R.id.windows_get_iso).setOnClickListener(button -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(getString(R.string.windows_download_url))));
+            } catch (ActivityNotFoundException missing) {
+                snack(getString(R.string.no_browser));
+            }
+        });
+
+        return showWindowsState(target.findViewById(R.id.windows_state));
     }
-
-
 
     private void installWindows(Uri isoFile) {
         View target = page;
@@ -223,19 +238,18 @@ public class SetupActivity extends AppCompatActivity {
             @Override
             public void onFinished(int status) {
                 finishWork(pick, bar, detail, status, R.string.windows_done);
-                showWindowsState(state);
+                refreshEmphasis(showWindowsState(state));
                 pulse(state);
             }
         });
     }
 
-    private void bindRuntimes(View target) {
+    private boolean bindRuntimes(View target) {
         TextView state = target.findViewById(R.id.runtimes_state);
         MaterialButton install = target.findViewById(R.id.runtimes_install);
         LinearProgressIndicator bar = target.findViewById(R.id.runtimes_progress);
         TextView detail = target.findViewById(R.id.runtimes_progress_text);
-
-        showRuntimesState(state, install);
+        stepAction = install;
 
         install.setOnClickListener(button -> {
             startWork(install, bar, detail, R.string.windows_runtimes_working);
@@ -256,25 +270,28 @@ public class SetupActivity extends AppCompatActivity {
                 @Override
                 public void onFinished(int status) {
                     finishWork(install, bar, detail, status, R.string.windows_runtimes_done);
-                    showRuntimesState(state, install);
+                    refreshEmphasis(showRuntimesState(state, install));
                     pulse(state);
                 }
             });
         });
+
+        return showRuntimesState(state, install);
     }
 
-    private void bindProgram(View target) {
+    private boolean bindProgram(View target) {
         programState = target.findViewById(R.id.program_state);
         programProgress = target.findViewById(R.id.program_progress);
+        stepAction = target.findViewById(R.id.program_folder);
 
-        showProgramState(programState);
-
-        target.findViewById(R.id.program_folder).setOnClickListener(button ->
+        stepAction.setOnClickListener(button ->
                 pick(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQUEST_FOLDER));
         target.findViewById(R.id.program_file).setOnClickListener(button ->
                 pick(new Intent(Intent.ACTION_OPEN_DOCUMENT)
                         .addCategory(Intent.CATEGORY_OPENABLE)
                         .setType("*/*"), REQUEST_FILE));
+
+        return showProgramState(programState);
     }
 
     private void bindReady(View target) {
@@ -316,25 +333,28 @@ public class SetupActivity extends AppCompatActivity {
         return text;
     }
 
-    private void showWindowsState(TextView chip) {
+    private boolean showWindowsState(TextView chip) {
         boolean present = WindowsInstall.filesPresent(this);
         chip.setText(present ? R.string.setup_windows_state_installed : R.string.setup_windows_state_missing);
         chip.setTextColor(color(present ? R.color.log_ok : R.color.text_secondary));
+        return present;
     }
 
-    private void showRuntimesState(TextView chip, MaterialButton action) {
+    private boolean showRuntimesState(TextView chip, MaterialButton action) {
         boolean present = WindowsInstall.runtimesPresent(this);
         chip.setText(present ? R.string.windows_runtimes_installed : R.string.windows_runtimes_missing);
         chip.setTextColor(color(present ? R.color.log_ok : R.color.text_secondary));
         action.setText(present ? R.string.windows_runtimes_again : R.string.windows_runtimes);
+        return present;
     }
 
-    private void showProgramState(TextView chip) {
+    private boolean showProgramState(TextView chip) {
         int count = librarySize();
         chip.setText(count == 0
                 ? getString(R.string.setup_program_none)
                 : getString(R.string.setup_program_count, count));
         chip.setTextColor(color(count == 0 ? R.color.text_secondary : R.color.log_ok));
+        return count != 0;
     }
 
     private void pick(Intent intent, int requestCode) {
@@ -419,7 +439,7 @@ public class SetupActivity extends AppCompatActivity {
     private void commit(File directory, String executable, TextView state) {
         try {
             library.commit(directory, executable);
-            showProgramState(state);
+            refreshEmphasis(showProgramState(state));
             pulse(state);
         } catch (Exception failure) {
             snack(getString(R.string.setup_import_failed, failure.getMessage()));
@@ -463,54 +483,64 @@ public class SetupActivity extends AppCompatActivity {
         skip.setEnabled(!value);
     }
 
-    private void updateChrome() {
-        stepLabel.setText(getString(R.string.setup_step_of, index + 1, PAGES.length));
-        progress.setProgressCompat((index + 1) * 100 / PAGES.length, true);
-        next.setText(index == PAGES.length - 1 ? R.string.setup_finish : R.string.setup_continue);
+    private void updateChrome(boolean done) {
         back.setVisibility(index == 0 ? View.INVISIBLE : View.VISIBLE);
         skip.setVisibility(index == PAGES.length - 1 ? View.INVISIBLE : View.VISIBLE);
-        updateDots();
+
+        ColorStateList reached = ColorStateList.valueOf(palette.get(Palette.Role.ACCENT));
+        ColorStateList ahead = ColorStateList.valueOf(palette.get(Palette.Role.OUTLINE));
+        for (int i = 0; i < steps.size(); i++) {
+            steps.get(i).setBackgroundTintList(i <= index ? reached : ahead);
+        }
+        refreshEmphasis(done);
     }
 
-    private void buildDots() {
-        LinearLayout row = findViewById(R.id.setup_dots);
+    private void buildSteps() {
+        LinearLayout row = findViewById(R.id.setup_steps);
 
         for (int i = 0; i < PAGES.length; i++) {
-            View dot = new View(this);
-            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(dp(8), dp(8));
-            size.setMarginStart(dp(4));
-            size.setMarginEnd(dp(4));
-            dot.setLayoutParams(size);
-            dot.setBackgroundResource(R.drawable.bg_dot);
-            row.addView(dot);
-            dots.add(dot);
+            View step = new View(this);
+            LinearLayout.LayoutParams size = new LinearLayout.LayoutParams(0, dp(4), 1f);
+            size.setMarginStart(dp(2));
+            size.setMarginEnd(dp(2));
+            step.setLayoutParams(size);
+            step.setBackgroundResource(R.drawable.bg_dot);
+            row.addView(step);
+            steps.add(step);
         }
     }
 
-    private void updateDots() {
-        for (int i = 0; i < dots.size(); i++) {
-            View dot = dots.get(i);
-            boolean active = i == index;
+    private void refreshEmphasis(boolean done) {
+        if (stepAction != null) {
+            emphasize(stepAction, !done);
+        }
+        emphasize(next, done);
 
-            dot.setBackgroundTintList(ColorStateList.valueOf(color(active ? R.color.accent : R.color.outline)));
-            widen(dot, dp(active ? 22 : 8));
+        if (index == 0) {
+            next.setText(R.string.setup_get_started);
+        } else if (index == PAGES.length - 1) {
+            next.setText(R.string.setup_finish);
+        } else {
+            next.setText(done ? R.string.setup_continue : R.string.setup_skip_step);
         }
     }
 
-    private void widen(View dot, int target) {
-        int current = dot.getLayoutParams().width;
-        if (current == target) {
-            return;
-        }
+    private void emphasize(MaterialButton button, boolean emphasized) {
+        ButtonColors colors = emphasized ? filled : tonal;
+        button.setBackgroundTintList(colors.fill);
+        button.setTextColor(colors.text);
+    }
 
-        ValueAnimator animator = ValueAnimator.ofInt(current, target);
-        animator.setDuration(260);
-        animator.setInterpolator(new DecelerateInterpolator());
-        animator.addUpdateListener(step -> {
-            dot.getLayoutParams().width = (int) step.getAnimatedValue();
-            dot.requestLayout();
-        });
-        animator.start();
+    private static final class ButtonColors {
+        final ColorStateList fill;
+        final ColorStateList text;
+
+        ButtonColors(int fill, int text, int disabledBase) {
+            this.fill = new ColorStateList(ENABLED_STATES, new int[]{
+                    ColorUtils.setAlphaComponent(disabledBase, DISABLED_FILL_ALPHA), fill});
+            this.text = new ColorStateList(ENABLED_STATES, new int[]{
+                    ColorUtils.setAlphaComponent(disabledBase, DISABLED_TEXT_ALPHA), text});
+        }
     }
 
     private void swap(View incoming, boolean forward) {
@@ -520,7 +550,7 @@ public class SetupActivity extends AppCompatActivity {
         incoming.setAlpha(0f);
         incoming.setTranslationX(shift);
         host.addView(incoming);
-        Theming.apply(host, Palette.defaults(), new Settings(this).palette());
+        Theming.apply(incoming, Palette.defaults(), palette);
         incoming.animate()
                 .alpha(1f)
                 .translationX(0f)

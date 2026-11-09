@@ -54,6 +54,7 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
     private static final int TAP_TIMEOUT_MS = 400;
     private static final int PAIR_TIMEOUT_MS = 100;
     private static final float PAIR_SPREAD_MM = 30f;
+    // Finger travel per wheel notch at 96 DPI, about the three lines one notch scrolls.
     private static final int NOTCH_TRAVEL_PX = 48;
     private static final float TRACKPAD_SPEED = 1.6f;
     private static final float HOVER_SPEED = 1f;
@@ -329,7 +330,8 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
         return true;
     }
 
-    // Two thumbs on a game land apart or one after the other, so only a close pair that lands together can scroll.
+    // Only two fingers that land together, close side by side, can start a scroll. Thumbs on a game land apart
+    // or one after the other.
     private void startPair(MotionEvent event, int index) {
         int first = event.findPointerIndex(pointerId);
         if (first < 0) {
@@ -353,7 +355,8 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
         pairY2 = y2;
     }
 
-    // A pinch, a sideways swipe or one finger held still gives the touch back to the pointer.
+    // True while the pair is still deciding, and once it has become a scroll. A pinch, a sideways swipe or one
+    // finger held still gives the touch back to the pointer.
     private boolean pairHeld(MotionEvent event) {
         int first = event.findPointerIndex(pointerId);
         int second = event.findPointerIndex(pairId);

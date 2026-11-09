@@ -28,21 +28,22 @@
     <string name="nav_windows">Runtimes</string>
     <string name="nav_files">Files</string>
 
-    <string name="setup_step_of">Step %1$d of %2$d</string>
-    <string name="setup_skip">Skip</string>
+    <string name="setup_later">Set up later</string>
+    <string name="setup_skip_step">Skip for now</string>
+    <string name="setup_get_started">Get started</string>
     <string name="setup_back">Back</string>
     <string name="setup_continue">Continue</string>
     <string name="setup_finish">Finish</string>
     <string name="setup_mark_done">✓</string>
-    <string name="setup_mark_todo">•</string>
+    <string name="setup_mark_todo">○</string>
 
-    <string name="setup_welcome_title">Get started</string>
+    <string name="setup_welcome_title">Welcome to Brovan</string>
     <string name="setup_welcome_body">Brovan runs Windows games and programs on this phone. The next steps set everything up.</string>
 
     <string name="setup_windows_title">Import Windows files</string>
-    <string name="setup_windows_state_missing">Select a Windows ISO, WIM or ESD file.</string>
+    <string name="setup_windows_state_missing">Choose a Windows ISO, WIM or ESD file. Brovan imports the system files from it.</string>
     <string name="setup_windows_state_installed">Windows files are installed.</string>
-    <string name="setup_windows_iso">Use an ISO file</string>
+    <string name="setup_windows_iso">Choose a Windows image</string>
 
     <string name="setup_runtimes_title">Visual C++ runtimes</string>
 
@@ -53,7 +54,7 @@
     <string name="setup_ready_title">Ready to play</string>
     <string name="setup_ready_body">Brovan is ready. Open the library and start a program.</string>
     <string name="setup_almost_title">Almost there</string>
-    <string name="setup_almost_body">Do the steps below to make Brovan ready. You can also do them later from the menu.</string>
+    <string name="setup_almost_body">Do the steps below to make Brovan ready. You can also do them later in the Runtimes tab.</string>
     <string name="setup_ready_windows">Windows system files</string>
     <string name="setup_ready_runtimes">Visual C++ runtimes</string>
     <string name="setup_ready_program">A program in your library</string>
@@ -73,6 +74,11 @@
     <string name="library_empty_title">No programs yet</string>
     <string name="library_empty_body">Add the folder that contains a Windows program and all its files. Brovan copies the folder into its own storage.</string>
     <string name="library_add_title">Add a program</string>
+    <string name="library_add">Add</string>
+    <plurals name="library_count">
+        <item quantity="one">%d program</item>
+        <item quantity="other">%d programs</item>
+    </plurals>
     <string name="library_add_folder">Add folder</string>
     <string name="library_add_file">Add single .exe</string>
     <string name="library_remove">Remove</string>
@@ -92,6 +98,9 @@
 
     <string name="settings_graphics">Graphics</string>
     <string name="settings_advanced">Advanced</string>
+    <string name="settings_app">App</string>
+    <string name="settings_appearance_summary">Theme colours and library layout</string>
+    <string name="settings_about_summary">Author and project links</string>
     <string name="settings_controls">On-screen controls</string>
     <string name="settings_network">Network access</string>
     <string name="settings_jit_cache">JIT code cache</string>
@@ -179,11 +188,13 @@
     <string name="controls_saturation">Saturation</string>
     <string name="controls_brightness">Brightness</string>
 
-    <string name="about_author">AdvDebug</string>
     <string name="about_github">https://github.com/AdvDebug</string>
     <string name="about_linkedin">https://www.linkedin.com/in/advdebug</string>
     <string name="about_discord">AdvDebug</string>
-    <string name="about_links">Links</string>
+    <string name="about_issues" translatable="false">https://github.com/AdvDebug/Brovan/issues</string>
+    <string name="about_feedback_title">Found a bug or have an idea?</string>
+    <string name="about_feedback_summary">Tell us on GitHub</string>
+    <string name="about_made_by">Made by AdvDebug</string>
     <string name="about_open_github">GitHub</string>
     <string name="about_open_linkedin">LinkedIn</string>
     <string name="about_open_discord">Discord</string>
@@ -193,6 +204,7 @@
     <string name="windows_media_hint">Import the system files from a Windows ISO, WIM or ESD file.</string>
     <string name="windows_title">Windows system files</string>
     <string name="windows_open_page">Get a Windows ISO</string>
+    <string name="windows_download_url" translatable="false">https://www.microsoft.com/software-download/windows11</string>
     <string name="windows_choose">Choose file</string>
     <string name="windows_chosen">Selected: %1$s</string>
     <string name="windows_install">Import</string>

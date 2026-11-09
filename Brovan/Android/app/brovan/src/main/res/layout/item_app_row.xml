@@ -55,11 +55,6 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="12sp" />
         </LinearLayout>
-        <ImageButton android:id="@+id/actions"
-            android:layout_width="48dp" android:layout_height="48dp"
-            android:layout_gravity="top|end" android:padding="15dp"
-            android:background="?attr/selectableItemBackgroundBorderless"
-            android:contentDescription="@string/library_more"
-            android:src="@drawable/ic_more_vert" android:tint="@color/text_secondary" />
+        <ImageButton android:id="@+id/actions" style="@style/ProgramActions" />
     </LinearLayout>
 </com.google.android.material.card.MaterialCardView>

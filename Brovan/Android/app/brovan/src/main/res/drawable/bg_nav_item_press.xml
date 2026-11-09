@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ripple xmlns:android="http://schemas.android.com/apk/res/android" android:color="?attr/colorControlHighlight">
+    <item android:id="@android:id/mask">
+        <layer-list>
+            <item android:gravity="top|center_horizontal" android:top="@dimen/nav_pill_top"
+                android:width="@dimen/nav_pill_width" android:height="@dimen/nav_pill_height">
+                <shape android:shape="rectangle">
+                    <corners android:radius="@dimen/nav_pill_radius" />
+                    <solid android:color="@android:color/white" />
+                </shape>
+            </item>
+        </layer-list>
+    </item>
+</ripple>

@@ -30,7 +30,7 @@ import com.google.android.material.button.MaterialButton;
 import com.google.android.material.card.MaterialCardView;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.materialswitch.MaterialSwitch;
-import com.google.android.material.navigation.NavigationView;
+import com.google.android.material.navigation.NavigationBarView;
 import com.google.android.material.progressindicator.BaseProgressIndicator;
 import com.google.android.material.shape.MaterialShapeDrawable;
 import com.google.android.material.slider.Slider;
@@ -247,14 +247,11 @@ final class Theming {
             bar.setTrackColor(from.remap(bar.getTrackColor(), to));
         }
 
-        if (view instanceof NavigationView) {
-            NavigationView navigation = (NavigationView) view;
+        if (view instanceof NavigationBarView) {
+            NavigationBarView navigation = (NavigationBarView) view;
             navigation.setItemTextColor(remap(navigation.getItemTextColor(), from, to));
             navigation.setItemIconTintList(remap(navigation.getItemIconTintList(), from, to));
-
-            if (navigation.getItemBackground() != null) {
-                navigation.setItemBackground(repaint(navigation.getItemBackground().mutate(), from, to));
-            }
+            navigation.setItemActiveIndicatorColor(remap(navigation.getItemActiveIndicatorColor(), from, to));
         }
 
         if (view instanceof AppBarLayout) {
