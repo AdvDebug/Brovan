@@ -3265,16 +3265,7 @@ namespace Brovan.Core.Emulation
                 if ((SchedulerTick & 0x7) == 0)
                     _emulator.ResolveCodeCache();
 
-                if (WinHelper != null)
-                {
-                    OS.Windows.RemoteProcessRequests.Drain(this);
-
-                    if (WinHelper.PipeRequests.Count != 0)
-                        WinHelper.PipeRequests.Poll(this);
-
-                    if (WinHelper.AfdRequests.HasWork)
-                        WinHelper.AfdRequests.Service(this);
-                }
+                bool HostWorkFinished = Guest.PollHostWork(this);
 
                 if (Volatile.Read(ref TerminationRequested) != 0 && Interlocked.Exchange(ref TerminationRequested, 0) != 0)
                 {
@@ -3303,7 +3294,7 @@ namespace Brovan.Core.Emulation
                         KnownThreadOrderCount = ThreadOrder.Count;
                     }
 
-                    if (Self.WakeupScanRequired || SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch || HasFinishedHostIo())
+                    if (Self.WakeupScanRequired || SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch || HostWorkFinished)
                     {
                         if (Debug)
                             TriggerDebugMessage($"scheduler: wakeup scan required={Self.WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
@@ -3362,7 +3353,7 @@ namespace Brovan.Core.Emulation
                             continue;
                         }
 
-                        if (HasActiveGetMessageWait() || HasPendingHostIo())
+                        if (Guest.AwaitsHostWork(this))
                         {
                             IdleWait(IdleWaitSliceMs, PassEpoch, PassHostEpoch);
                             WinHelper?.KuserSharedData?.RefreshIfUnhooked();

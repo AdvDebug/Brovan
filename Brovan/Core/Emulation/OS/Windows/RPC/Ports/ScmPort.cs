@@ -28,8 +28,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private const uint UniquePointerReferent = 0x20000;
 
-        private static readonly ulong ServiceStateName = WnfStateNames.Encode(1, WnfStateNames.NameLifetime.Temporary, WnfStateNames.DataScope.System);
-
         private static readonly string[] KnownServices =
         {
             "AudioSrv",
@@ -92,7 +90,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Reply = new byte[20];
             BinaryPrimitives.WriteUInt32LittleEndian(Reply.AsSpan(0, 4), InfoLevel);
             BinaryPrimitives.WriteUInt32LittleEndian(Reply.AsSpan(4, 4), UniquePointerReferent);
-            BinaryPrimitives.WriteUInt64LittleEndian(Reply.AsSpan(8, 8), ServiceStateName);
+            BinaryPrimitives.WriteUInt64LittleEndian(Reply.AsSpan(8, 8), WnfStateNames.ServiceStateName);
             BinaryPrimitives.WriteUInt32LittleEndian(Reply.AsSpan(16, 4), ErrorSuccess);
             return true;
         }

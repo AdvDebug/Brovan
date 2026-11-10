@@ -12,12 +12,16 @@ namespace Brovan.WinFacts.Rules
         int[] Parents,
         string[] TypeClasses,
         CompositionPropertyFact[] Properties,
-        CompositionOwnPropertiesFact[] OwnProperties);
+        CompositionOwnPropertiesFact[] OwnProperties,
+        CompositionBufferFact[] Buffers);
 
     // Base is the type a reference property requires of its target, 0 for other properties.
     internal sealed record CompositionPropertyFact(string Name, uint Id, uint Base);
 
     internal sealed record CompositionOwnPropertiesFact(string Class, string Setter, uint[] Properties);
+
+    // Bytes is the one size the setter accepts, whatever the data.
+    internal sealed record CompositionBufferFact(string Class, uint Property, int Bytes);
 
     internal sealed class CompositionGroup : FactGroup
     {
@@ -55,7 +59,8 @@ namespace Brovan.WinFacts.Rules
         private const string SetBuffer = "SetBufferProperty";
         private const string SetReference = "SetReferenceProperty";
         private const string SetCallbackId = "SetCallbackId";
-        private static readonly string[] SlotMethods = { SetInteger, SetBuffer, SetReference, SetCallbackId };
+        private const string SetFloat = "SetFloatProperty";
+        private static readonly string[] SlotMethods = { SetInteger, SetBuffer, SetReference, SetCallbackId, SetFloat };
         private static readonly Register[] VolatileRegisters = { Register.RAX, Register.RCX, Register.RDX, Register.R8, Register.R9, Register.R10, Register.R11 };
 
         // The record fields (offset, bytes) must match what Brovan.Core's CompositionBatchParser reads.
@@ -68,21 +73,29 @@ namespace Brovan.WinFacts.Rules
             new("SetBuffer", new[] { "?" + SetBuffer + "@" }, 16, new[] { (4, 4), (8, 4), (12, 4) }, SetBuffer),
             new("SetReference", new[] { "?" + SetReference + "@" }, 16, new[] { (4, 4), (8, 4), (12, 4) }, SetReference),
             new("SetVisualInputSink", new[] { "?SetVisualInputSink@CApplicationChannel@DirectComposition@@", InlinedInputSink }, 16, new[] { (4, 4), (8, 8) }, null),
+            new("SetFloat", new[] { "?" + SetFloat + "@" }, 16, new[] { (4, 4), (8, 4), (12, 4) }, SetFloat),
         };
 
         private static readonly CommandRule CreateRule = Commands[0];
 
-        // Each setter slot holds CResourceMarshaler's stub (Base), any other function (Own), or the named function.
+        // Each setter slot holds CResourceMarshaler's stub (Base), any other function (Own), or the named function, or is
+        // not checked (Any). CResourceMarshaler::SetFloatProperty is not a stub, so a Float slot is never Base.
         private static readonly ClassRule[] Classes =
         {
-            new("BlurredWallpaperBackdropBrush", "CBlurredWallpaperBackdropBrushMarshaler", Base, Base, Base, Base),
-            new("ColorBrush", "CColorBrushMarshaler", Base, "CColorBrushMarshaler", Base, Base),
-            new("ComponentTransform3D", "CComponentTransform3DMarshaler", "CPropertyChangeResourceMarshaler", Own, Base, "CNotificationResourceMarshaler"),
-            new("Visual", "CVisualMarshaler", "CVisualMarshaler", Own, "CVisualMarshaler", "CNotificationResourceMarshaler"),
+            new("BlurredWallpaperBackdropBrush", "CBlurredWallpaperBackdropBrushMarshaler", Base, Base, Base, Base, Any),
+            new("ColorBrush", "CColorBrushMarshaler", Base, "CColorBrushMarshaler", Base, Base, Any),
+            new("ComponentTransform3D", "CComponentTransform3DMarshaler", "CPropertyChangeResourceMarshaler", Own, Base, "CNotificationResourceMarshaler", Any),
+            new("Visual", "CVisualMarshaler", "CVisualMarshaler", Own, "CVisualMarshaler", "CNotificationResourceMarshaler", Any),
+            new("SurfaceBrush", SurfaceBrushClass, SurfaceBrushClass, SurfaceBrushClass, SurfaceBrushClass, Base, Any),
         };
 
         private const string Base = "<base>";
         private const string Own = "<own>";
+        private const string Any = "<any>";
+        private const string SurfaceBrushClass = "CSurfaceBrushMarshaler";
+        private const string FloatSignature = "UEAAJIMPEA_N@Z";
+        private const int MaxBufferBytes = 64;
+        private const ulong MaxSizeCompare = 0x1000;
 
         // These stay in the order of the generated CompositionProperty enum.
         private const string PropertyChangeMask = "PropertyChangeMask";
@@ -93,7 +106,7 @@ namespace Brovan.WinFacts.Rules
 
         private sealed record CreateCase(uint Opcode, ulong Call, uint MaxType);
 
-        private sealed record ClassRule(string Name, string NtClass, string Integer, string Buffer, string Reference, string CallbackId);
+        private sealed record ClassRule(string Name, string NtClass, string Integer, string Buffer, string Reference, string CallbackId, string Float);
 
         internal override string Name => "composition";
 
@@ -127,14 +140,21 @@ namespace Brovan.WinFacts.Rules
             uint Mask = ReadPropertyChangeMask(Inputs, TypeClasses);
             uint[] OwnIntegers = ReadVisualOwnIntegers(Inputs, TypeClasses, Mask);
             (uint Transform, uint TransformBase, uint[] OwnReferences) = ReadVisualReferences(Inputs, TypeClasses, Parents);
+            SurfaceBrushProperties Brush = ReadSurfaceBrush(Inputs, TypeClasses, Slots);
 
             CompositionPropertyFact[] PropertyFacts = { new(PropertyChangeMask, Mask, 0), new(VisualTransform, Transform, TransformBase) };
-            CompositionOwnPropertiesFact[] OwnFacts =
+            List<CompositionOwnPropertiesFact> OwnFacts = new()
             {
                 new("Visual", "Integer", OwnIntegers),
                 new("Visual", "Reference", OwnReferences),
+                new("SurfaceBrush", "Integer", Brush.Integers),
+                new("SurfaceBrush", "Reference", Brush.References),
             };
-            CompositionFacts Facts = new(CommandMap, Sizes, MaxType, Parents, TypeClasses, PropertyFacts, OwnFacts);
+            if (Brush.Floats != null)
+                OwnFacts.Add(new("SurfaceBrush", "Float", Brush.Floats));
+
+            CompositionBufferFact[] BufferFacts = Brush.Buffers.Select(Buffer => new CompositionBufferFact("SurfaceBrush", Buffer.Property, Buffer.Bytes)).ToArray();
+            CompositionFacts Facts = new(CommandMap, Sizes, MaxType, Parents, TypeClasses, PropertyFacts, OwnFacts.ToArray(), BufferFacts);
             return JsonSerializer.Serialize(Facts);
         }
 
@@ -611,11 +631,12 @@ namespace Brovan.WinFacts.Rules
                 if (!Inputs.Publics.TryGet(VtableName(Class.NtClass), out uint Vtable))
                     throw new FactException($"{Class.NtClass}: no vtable");
 
-                foreach ((string Method, string Expected) in new[] { (SetInteger, Class.Integer), (SetBuffer, Class.Buffer), (SetReference, Class.Reference), (SetCallbackId, Class.CallbackId) })
+                foreach ((string Method, string Expected) in new[] { (SetInteger, Class.Integer), (SetBuffer, Class.Buffer), (SetReference, Class.Reference), (SetCallbackId, Class.CallbackId), (SetFloat, Class.Float) })
                 {
-                    uint Entry = (uint)(Inputs.Image.ReadUInt64(Vtable + Slots[Method]) - Inputs.Image.ImageBase);
+                    uint Entry = VtableEntry(Inputs, Vtable, Slots[Method]);
                     bool Matches = Expected switch
                     {
+                        Any => true,
                         Base => Entry == BaseStubs[Method],
                         Own => Entry != BaseStubs[Method],
                         _ => Entry == Inputs.Publics.Find(MemberName(Expected, Method)),
@@ -733,7 +754,7 @@ namespace Brovan.WinFacts.Rules
             uint? Answer(uint Property, ulong Target)
             {
                 Machine.Restore(Start);
-                return Machine.TryCall(Function, Visual, Session.Channel, Property, Target, Updated) is ulong Status ? (uint)Status : null;
+                return (uint?)Machine.TryCall(Function, Visual, Session.Channel, Property, Target, Updated);
             }
 
             ulong TransformObject = Targets.First(Target => Target.Type == TransformType).Object;
@@ -759,6 +780,136 @@ namespace Brovan.WinFacts.Rules
 
             return (Transforms[0].Property, Transforms[0].Base, Own.ToArray());
         }
+
+        private sealed record SurfaceBrushProperties(uint[] Integers, uint[] Floats, uint[] References, (uint Property, int Bytes)[] Buffers)
+        {
+            internal bool SameSets(SurfaceBrushProperties Other)
+                => Integers.SequenceEqual(Other.Integers) && Floats.SequenceEqual(Other.Floats) && References.SequenceEqual(Other.References)
+                   && Buffers.SequenceEqual(Other.Buffers);
+        }
+
+        private static readonly ulong[] IntegerProbes = { 0, 1, ulong.MaxValue };
+        private static readonly float[] FloatProbes = { 0f, 1f, -1f, float.NaN };
+        private static readonly byte[] BufferFills = { 1, 0 };
+
+        // The brush has no surface, as in Brovan, so a buffer property that needs one is refused. Where the float
+        // slot is not the class's own setter, NT answers from the per-type property table, so the float list is left out.
+        private static SurfaceBrushProperties ReadSurfaceBrush(VersionInputs Inputs, string[] TypeClasses, Dictionary<string, uint> Slots)
+        {
+            uint Setter(string Method) => Inputs.Publics.Find(MemberName(SurfaceBrushClass, Method));
+            uint[] Scan(string Method) => ScanProperties(Inputs, MemberName(SurfaceBrushClass, Method)).ToArray();
+
+            uint IntegerSetter = Setter(SetInteger);
+            uint BufferSetter = Setter(SetBuffer);
+            uint ReferenceSetter = Setter(SetReference);
+            uint FloatEntry = VtableEntry(Inputs, Inputs.Publics.Find(VtableName(SurfaceBrushClass)), Slots[SetFloat]);
+            bool OwnFloat = Inputs.Publics.TryFind(MemberName(SurfaceBrushClass, SetFloat), FloatSignature, out uint FloatSetter) && FloatSetter == FloatEntry;
+            uint[] IntegerScan = Scan(SetInteger);
+            uint[] FloatScan = OwnFloat ? Scan(SetFloat) : Array.Empty<uint>();
+            uint[] BufferScan = Scan(SetBuffer);
+            int[] BufferSizes = ScanSizes(Inputs, MemberName(SurfaceBrushClass, SetBuffer));
+            uint[] ReferenceScan = Scan(SetReference);
+            SurfaceBrushProperties Found = null;
+            for (int Feature = 0; Feature < 2; Feature++)
+            {
+                using Session Session = new(Inputs, Feature);
+                Machine Machine = Session.Machine;
+                ulong Updated = Machine.Alloc(8);
+                ulong Data = Machine.Alloc(BufferSizes[^1]);
+                ulong Brush = Session.Create(TypeOf(TypeClasses, "SurfaceBrush"));
+                Machine.Snapshot Start = Machine.Save();
+                uint? Answer(uint Function, params ulong[] Args)
+                {
+                    Machine.Restore(Start);
+                    return (uint?)Machine.TryCall(Function, Args);
+                }
+
+                uint[] Integers = IntegerScan.Where(Property => Accepts($"surface brush integer 0x{Property:X}",
+                    IntegerProbes.Select(Value => Answer(IntegerSetter, Brush, Session.Channel, Property, Value, Updated)))).ToArray();
+
+                uint[] Floats = FloatScan.Where(Property => Accepts($"surface brush float 0x{Property:X}",
+                    FloatProbes.Select(Value =>
+                    {
+                        Machine.WriteFloatArgument(2, Value);
+                        return Answer(FloatSetter, Brush, Property, 0, Updated);
+                    }))).ToArray();
+
+                // A refused run leaves the brush as it was, so only a run that was not refused needs a restore.
+                bool Changed = false;
+                uint? BufferAnswer(uint Property, int Bytes, byte Fill)
+                {
+                    if (Changed)
+                        Machine.Restore(Start);
+
+                    Machine.Write(Data, Enumerable.Repeat(Fill, Bytes).ToArray());
+                    uint? Status = (uint?)Machine.TryCall(BufferSetter, Brush, Session.Channel, Property, Data, (ulong)Bytes, Updated);
+                    Changed = Status != StatusInvalidParameter;
+                    return Status;
+                }
+
+                List<(uint Property, int Bytes)> Buffers = new();
+                foreach (uint Property in BufferScan)
+                {
+                    int[] Sizes = BufferSizes.Where(Bytes => Accepts($"surface brush buffer 0x{Property:X} of {Bytes} bytes",
+                        BufferFills.Select(Fill => BufferAnswer(Property, Bytes, Fill)))).ToArray();
+                    if (Sizes.Length > 1)
+                        throw new FactException($"surface brush buffer 0x{Property:X} takes {Sizes.Length} sizes");
+
+                    if (Sizes.Length == 1)
+                        Buffers.Add((Property, Sizes[0]));
+                }
+
+                List<uint> References = new();
+                foreach (uint Property in ReferenceScan)
+                {
+                    bool Own = Answer(ReferenceSetter, Brush, Session.Channel, Property, UnmappedTarget, Updated) != StatusInvalidParameter;
+                    uint? Null = Answer(ReferenceSetter, Brush, Session.Channel, Property, 0, Updated);
+                    if (Null != (Own ? StatusSuccess : StatusInvalidParameter))
+                        throw new FactException($"surface brush reference 0x{Property:X} answers null with {FormatStatus(Null)}");
+
+                    if (Own)
+                        References.Add(Property);
+                }
+
+                SurfaceBrushProperties State = new(Integers, Floats, References.ToArray(), Buffers.ToArray());
+                if (Found != null && !Found.SameSets(State))
+                    throw new FactException("surface brush properties differ between feature states");
+
+                Found = State;
+            }
+
+            return OwnFloat ? Found : Found with { Floats = null };
+        }
+
+        private static int[] ScanSizes(VersionInputs Inputs, string Name)
+        {
+            Function Function = Readers.Function.Decode(Inputs.Image, Inputs.Publics, Inputs.Publics.Find(Name));
+            SortedSet<int> Sizes = new(Enumerable.Range(0, MaxBufferBytes + 1));
+            foreach (Instruction Instruction in Function.Instructions)
+            {
+                if (Instruction.Mnemonic != Mnemonic.Cmp || !Instruction.Op1Kind.IsImmediate() || Instruction.GetImmediate(1) >= MaxSizeCompare)
+                    continue;
+
+                int Value = (int)Instruction.GetImmediate(1);
+                Sizes.UnionWith(new[] { Math.Max(Value - 1, 0), Value, Value + 1 });
+            }
+
+            return Sizes.ToArray();
+        }
+
+        private static bool Accepts(string What, IEnumerable<uint?> Answers)
+        {
+            uint?[] All = Answers.ToArray();
+            if (All.All(Status => Status == StatusSuccess))
+                return true;
+
+            if (All.All(Status => Status == StatusInvalidParameter))
+                return false;
+
+            throw new FactException($"{What} answers {string.Join(", ", All.Select(FormatStatus))}");
+        }
+
+        private static string FormatStatus(uint? Status) => Status is uint Known ? $"0x{Known:X8}" : "nothing";
 
         private static bool IsDerivedFrom(int[] Parents, uint Type, uint Base)
         {
@@ -808,6 +959,8 @@ namespace Brovan.WinFacts.Rules
         private static string MemberName(string Class, string Method) => $"?{Method}@{Class}@{NtNamespace}@@";
 
         private static string VtableName(string Class) => $"??_7{Class}@{NtNamespace}@@6B@";
+
+        private static uint VtableEntry(VersionInputs Inputs, uint Vtable, uint Slot) => (uint)(Inputs.Image.ReadUInt64(Vtable + Slot) - Inputs.Image.ImageBase);
 
         private static bool IsCompare(in Instruction Instruction, ulong Value)
             => Instruction.Mnemonic == Mnemonic.Cmp && Instruction.Op0Kind == OpKind.Register && Instruction.Op0Register.IsGPR32() &&
@@ -892,12 +1045,14 @@ namespace Brovan.WinFacts.Rules
             Code.Line("        private readonly uint[] PropertyIds;");
             Code.Line("        private readonly uint[] RequiredBases;");
             Code.Line("        private readonly (CompositionClass Class, CompositionSlots Setter, uint[] Properties)[] OwnProperties;");
+            Code.Line("        private readonly (CompositionClass Class, uint Property, int Bytes)[] Buffers;");
             Code.Line();
             Code.Line("        // NT: an opcode the kernel refuses has record size 0 and command None. Parents has one entry per type, and its");
             Code.Line("        // length is where the walk ends.");
             Code.Line("        private CompositionTableSet(byte[] RecordSizes, (int Opcode, CompositionCommand Command)[] Commands, byte[] Parents,");
             Code.Line("            (int Type, CompositionClass Class)[] Classes, (CompositionProperty Property, uint Id, uint Base)[] Properties,");
-            Code.Line("            (CompositionClass Class, CompositionSlots Setter, uint[] Properties)[] OwnProperties)");
+            Code.Line("            (CompositionClass Class, CompositionSlots Setter, uint[] Properties)[] OwnProperties,");
+            Code.Line("            (CompositionClass Class, uint Property, int Bytes)[] Buffers)");
             Code.Line("        {");
             Code.Line("            this.RecordSizes = RecordSizes;");
             Code.Line("            this.Commands = new CompositionCommand[RecordSizes.Length];");
@@ -922,6 +1077,7 @@ namespace Brovan.WinFacts.Rules
             Code.Line("            }");
             Code.Line();
             Code.Line("            this.OwnProperties = OwnProperties;");
+            Code.Line("            this.Buffers = Buffers;");
             Code.Line("        }");
             Code.Line();
             Code.Line("        internal uint Property(CompositionProperty Property) => PropertyIds[(int)Property];");
@@ -936,6 +1092,32 @@ namespace Brovan.WinFacts.Rules
             Code.Line("                    return Array.IndexOf(Properties, Property) >= 0;");
             Code.Line("            }");
             Code.Line();
+            Code.Line("            return false;");
+            Code.Line("        }");
+            Code.Line();
+            Code.Line("        internal bool HasOwnProperties(CompositionClass Class, CompositionSlots Setter)");
+            Code.Line("        {");
+            Code.Line("            foreach ((CompositionClass OwnClass, CompositionSlots OwnSetter, uint[] _) in OwnProperties)");
+            Code.Line("            {");
+            Code.Line("                if (OwnClass == Class && OwnSetter == Setter)");
+            Code.Line("                    return true;");
+            Code.Line("            }");
+            Code.Line();
+            Code.Line("            return false;");
+            Code.Line("        }");
+            Code.Line();
+            Code.Line("        internal bool TryGetBufferBytes(CompositionClass Class, uint Property, out int Bytes)");
+            Code.Line("        {");
+            Code.Line("            foreach ((CompositionClass BufferClass, uint BufferProperty, int BufferBytes) in Buffers)");
+            Code.Line("            {");
+            Code.Line("                if (BufferClass == Class && BufferProperty == Property)");
+            Code.Line("                {");
+            Code.Line("                    Bytes = BufferBytes;");
+            Code.Line("                    return true;");
+            Code.Line("                }");
+            Code.Line("            }");
+            Code.Line();
+            Code.Line("            Bytes = 0;");
             Code.Line("            return false;");
             Code.Line("        }");
         }
@@ -984,6 +1166,12 @@ namespace Brovan.WinFacts.Rules
                 Code.Line($"                (CompositionClass.{Own.Class}, CompositionSlots.{Own.Setter},");
                 Code.Line($"                    new uint[] {{ {string.Join(", ", Own.Properties.Select(Property => $"0x{Property:X}"))} }}),");
             }
+
+            Code.Line("            },");
+            Code.Line("            new (CompositionClass, uint, int)[]");
+            Code.Line("            {");
+            foreach (CompositionBufferFact Buffer in Facts.Buffers)
+                Code.Line($"                (CompositionClass.{Buffer.Class}, 0x{Buffer.Property:X}u, {Buffer.Bytes}),");
 
             Code.Line("            });");
         }

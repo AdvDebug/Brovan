@@ -68,7 +68,6 @@ namespace Brovan.Core.Emulation.Guests
         // NT uses 30 days, and ntdll waits on critical sections with no timeout when this is over an hour.
         private const ulong CriticalSectionTimeout = unchecked((ulong)(-2592000L * 10000000));
         private const ulong ProcessParametersPackageDependencyData64 = 0x400;
-        private const uint FirstLowBoxNumber = 1;
 
         private const uint Wow64InfoOffset = 0x490;
         private const uint Wow64TlsWow64InfoOffset = 0xE10 + 10 * 4;
@@ -322,6 +321,7 @@ namespace Brovan.Core.Emulation.Guests
             lock (Instance.KernelLock)
             {
                 OS.Windows.RPC.Ports.AudioSrvPortHandler.StopStreams(Instance);
+                AlpcMessaging.ReleaseRemote();
                 WinHelper.UnloadAppHives();
                 WinHelper.KernelFiles?.Dispose();
                 WinHelper.Composition.ReleaseAll(Instance);
@@ -380,6 +380,25 @@ namespace Brovan.Core.Emulation.Guests
 
             return WinHelper != null && WinHelper.CanDispatchUserApc(Thread);
         }
+
+        public bool PollHostWork(BinaryEmulator Instance)
+        {
+            if (WinHelper == null)
+                return false;
+
+            SessionPump.Run(Instance);
+
+            if (WinHelper.PipeRequests.Count != 0)
+                WinHelper.PipeRequests.Poll(Instance);
+
+            if (WinHelper.AfdRequests.HasWork)
+                WinHelper.AfdRequests.Service(Instance);
+
+            return WinHelper.AfdConnects.HasFinished;
+        }
+
+        public bool AwaitsHostWork(BinaryEmulator Instance)
+            => WinHelper != null && (Instance.HasActiveGetMessageWait() || Instance.HasPendingHostIo() || AlpcMessaging.HasRemoteWork);
 
         public bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle)
         {
@@ -2099,9 +2118,18 @@ namespace Brovan.Core.Emulation.Guests
                 });
         }
 
+        // The host starts the root process without package claims, so only the root builds a package token.
         private AppxProcessIdentity CreatePackageIdentity(BinaryEmulator Instance)
         {
-            AppxProcessIdentity Identity = AppxPackageModel.TryCreate(Instance, WinHelper, Instance.GuestImagePath);
+            WinProcess Own = WinHelper.OwnProcess;
+            if (Own?.PrimaryToken == null)
+                return null;
+
+            bool Root = !ProcessInheritance.IsLaunched;
+            WinToken PackageToken = null;
+            AppxProcessIdentity Identity = Root
+                ? AppxPackageModel.TryCreate(Instance, WinHelper, Instance.GuestImagePath, Own.PrimaryToken, out PackageToken)
+                : AppxPackageModel.TryCreateFromToken(Instance, WinHelper, Own.PrimaryToken);
             if (Identity == null)
                 return null;
 
@@ -2111,18 +2139,11 @@ namespace Brovan.Core.Emulation.Guests
                 return null;
             }
 
-            WinToken Token = WinHelper.OwnProcess?.PrimaryToken;
-            if (Token == null)
-                return null;
+            if (Root)
+                Own.PrimaryToken = PackageToken;
 
-            Token.SecurityAttributes = Identity.SecurityAttributes;
             if (Identity.IsAppContainer)
-            {
-                Token.AppContainerSid = Identity.AppContainerSid;
-                Token.AppContainerNumber = FirstLowBoxNumber;
-                Token.CapabilitySids = Identity.CapabilitySids;
                 WinHelper.CreateAppContainerNamedObjects(NtQueryInformationToken.FormatSid(Identity.AppContainerSid));
-            }
 
             AppxPackageModel.PublishRegistration(Instance, WinHelper, Identity);
             UseSystemGraphicsLibraries();

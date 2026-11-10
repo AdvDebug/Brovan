@@ -163,6 +163,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             continue;
 
                         GuestSessionMailbox.Reset(Index);
+                        SessionPump.Reset(Index);
                         ClaimSlot(Offset, GuestProcessId, Architecture, ImageName);
                         _ownSlot = Index;
                         break;
@@ -536,7 +537,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 _view = _map.CreateViewAccessor(0, TableSize);
 
                 PurgeAbandonedSessions();
-                GuestPipeChannel.PurgeAbandoned();
+                SessionNames.PurgeAbandoned(SessionNames.Pipes, GuestPipeChannel.PipeExtension, GuestPipeChannel.RemoveIfAbandoned);
+                SessionNames.PurgeAbandoned(SessionNames.AlpcPorts, AlpcSessionPort.Extension, AlpcSessionPort.RemoveIfAbandoned);
+                SessionNames.PurgeAbandoned(SessionNames.AlpcChannels, AlpcChannel.Extension, AlpcChannel.RemoveIfAbandoned);
                 return true;
             }
             catch (Exception Ex)
@@ -551,6 +554,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static void Discard()
         {
             GuestSessionMailbox.Close();
+            SessionPump.Close();
+            SessionIds.Close();
 
             _view?.Dispose();
             _map?.Dispose();
@@ -665,6 +670,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Thread.Sleep(ControlPollMilliseconds);
 
                 RemoteGuestProcess.PollLive();
+                AlpcMessaging.PollRemotePeers();
 
                 uint Request;
                 uint ExitCode;
@@ -989,21 +995,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const string CellDirectoryName = "files";
         private const string CellExtension = ".pos";
 
-        private FileStream Stream;
-        private MemoryMappedFile Map;
-        private MemoryMappedViewAccessor View;
+        private SessionMapping Mapping;
         private byte* Base;
         private int Slot = -1;
 
         internal string CellPath { get; }
 
-        private SharedFilePosition(string CellPath, FileStream Stream, MemoryMappedFile Map, MemoryMappedViewAccessor View, byte* Base)
+        private SharedFilePosition(string CellPath, SessionMapping Mapping)
         {
             this.CellPath = CellPath;
-            this.Stream = Stream;
-            this.Map = Map;
-            this.View = View;
-            this.Base = Base;
+            this.Mapping = Mapping;
+            Base = Mapping.Base;
         }
 
         private static string CellDirectory => Path.Combine(GuestSession.Directory, CellDirectoryName);
@@ -1067,33 +1069,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static SharedFilePosition MapCell(string CellPath, FileMode Mode)
         {
-            FileStream CellStream = null;
-            MemoryMappedFile Mapping = null;
-            MemoryMappedViewAccessor CellView = null;
-
-            try
-            {
-                CellStream = new FileStream(CellPath, Mode, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
-                if (CellStream.Length < CellBytes)
-                    CellStream.SetLength(CellBytes);
-
-                Mapping = MemoryMappedFile.CreateFromFile(CellStream, null, CellBytes, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, true);
-                CellView = Mapping.CreateViewAccessor(0, CellBytes, MemoryMappedFileAccess.ReadWrite);
-
-                byte* Pointer = null;
-                CellView.SafeMemoryMappedViewHandle.AcquirePointer(ref Pointer);
-                if (Pointer != null)
-                    return new SharedFilePosition(CellPath, CellStream, Mapping, CellView, Pointer);
-            }
-            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
-            {
-                Utils.LogError($"[SharedFilePosition] Cannot map {CellPath}: {Error.Message}");
-            }
-
-            CellView?.Dispose();
-            Mapping?.Dispose();
-            CellStream?.Dispose();
-            return null;
+            SessionMapping Mapping = SessionMapping.OpenFile(CellPath, Mode, CellBytes);
+            return Mapping == null ? null : new SharedFilePosition(CellPath, Mapping);
         }
 
         private bool TryRegister()
@@ -1111,10 +1088,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             bool Last = !SessionHolders.HasLive(Base + HoldersOffset, HolderSlots, false);
 
-            View.SafeMemoryMappedViewHandle.ReleasePointer();
-            View.Dispose();
-            Map.Dispose();
-            Stream.Dispose();
+            Mapping.Dispose();
+            Mapping = null;
             Base = null;
 
             if (!Last)
@@ -1145,9 +1120,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static readonly long HeaderBytes = Math.Max(Environment.SystemPageSize, 0x1000);
 
-        private FileStream Stream;
-        private MemoryMappedFile Map;
-        private MemoryMappedViewAccessor View;
+        private SessionMapping Mapping;
         private byte* Base;
         private int Slot = -1;
         private readonly bool InSessionFile;
@@ -1157,13 +1130,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal IntPtr Pointer => (IntPtr)(Base + HeaderBytes);
 
-        private GuestSharedMemory(string Location, FileStream Stream, MemoryMappedFile Map, MemoryMappedViewAccessor View, byte* Base, bool InSessionFile)
+        private GuestSharedMemory(string Location, SessionMapping Mapping, bool InSessionFile)
         {
             this.Location = Location;
-            this.Stream = Stream;
-            this.Map = Map;
-            this.View = View;
-            this.Base = Base;
+            this.Mapping = Mapping;
+            Base = Mapping.Base;
             this.InSessionFile = InSessionFile;
         }
 
@@ -1378,9 +1349,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     FileStream.Dispose();
                     return null;
                 }
-
-                MemoryMappedFile Mapping = MemoryMappedFile.CreateFromFile(FileStream, null, Length, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, true);
-                return Wrap(Location, FileStream, Mapping, Length, true);
             }
             catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
             {
@@ -1388,30 +1356,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 FileStream?.Dispose();
                 return null;
             }
+
+            SessionMapping Mapping = SessionMapping.MapFile(FileStream, Length, Location);
+            return Mapping == null ? null : new GuestSharedMemory(Location, Mapping, true);
         }
 
         // Owns Stream and Mapping, even when it fails.
         private static GuestSharedMemory Wrap(string Location, FileStream Stream, MemoryMappedFile Mapping, long Length, bool InSessionFile)
         {
-            MemoryMappedViewAccessor Accessor = null;
-            try
-            {
-                Accessor = Mapping.CreateViewAccessor(0, Length, MemoryMappedFileAccess.ReadWrite);
-
-                byte* Pointer = null;
-                Accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref Pointer);
-                if (Pointer != null)
-                    return new GuestSharedMemory(Location, Stream, Mapping, Accessor, Pointer + Accessor.PointerOffset, InSessionFile);
-            }
-            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException || Error is ArgumentException)
-            {
-                Utils.LogError($"[GuestSharedMemory] Cannot map a view of {Location}: {Error.Message}");
-            }
-
-            Accessor?.Dispose();
-            Mapping.Dispose();
-            Stream?.Dispose();
-            return null;
+            SessionMapping View = SessionMapping.Wrap(Stream, Mapping, Length, Location);
+            return View == null ? null : new GuestSharedMemory(Location, View, InSessionFile);
         }
 
         private static void Remove(string Location)
@@ -1444,10 +1398,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Last = !SessionHolders.HasLive(Base + HoldersOffset, HolderSlots, false);
             }
 
-            View.SafeMemoryMappedViewHandle.ReleasePointer();
-            View.Dispose();
-            Map.Dispose();
-            Stream?.Dispose();
+            Mapping.Dispose();
+            Mapping = null;
             Base = null;
 
             if (Last)

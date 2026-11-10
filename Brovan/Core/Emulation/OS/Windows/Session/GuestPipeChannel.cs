@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
@@ -18,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint StateCreating = 3;
         private const uint StateDeleting = 4;
 
-        internal const int FrameHeaderBytes = 4;
+        internal const int FrameHeaderBytes = SessionRing.FrameHeaderBytes;
 
         private const uint HeaderMagic = 0x32505642;
         private const uint HeaderVersion = 3;
@@ -41,44 +40,22 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int ClientToServerOffset = 0x800;
         private const int DataOffset = 0x900;
 
-        // Each side's cursor has its own cache line.
-        private const int WriteCursorField = 0x00;
-        private const int WriteFrameRemainingField = 0x08;
-        private const int ReadCursorField = 0x40;
-        private const int ReadFrameRemainingField = 0x48;
-        private const int PayloadField = 0x80;
-        private const int BrokenField = 0x84;
+        // The lock words follow the fields of SessionRing in each ring block.
         private const int WriteLockField = 0xC0;
         private const int ReadLockField = 0xC8;
 
         private const int MinCapacity = 0x1000;
         private const int MaxCapacity = 0x100000;
         private const int MaxInstanceCount = 64;
-        private const string PipeDirectoryName = "pipes";
-
-        private readonly struct Ring
-        {
-            internal readonly int Block;
-            internal readonly int Data;
-            internal readonly int Capacity;
-
-            internal Ring(int Block, int Data, int Capacity)
-            {
-                this.Block = Block;
-                this.Data = Data;
-                this.Capacity = Capacity;
-            }
-        }
+        internal const string PipeExtension = ".pipe";
 
         private static readonly uint OwnProcessId = (uint)Environment.ProcessId;
 
-        private FileStream Stream;
-        private MemoryMappedFile Map;
-        private MemoryMappedViewAccessor View;
+        private SessionMapping Mapping;
         private byte* Base;
 
-        private readonly Ring Inbound;
-        private readonly Ring Outbound;
+        private readonly SessionRing Inbound;
+        private readonly SessionRing Outbound;
         private readonly int HolderTable;
         private readonly int PeerHolderTable;
         private int HolderSlot = -1;
@@ -91,19 +68,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal string BackingPath { get; }
 
-        private GuestPipeChannel(bool IsServer, string GuestName, string BackingPath, FileStream Stream,
-            MemoryMappedFile Map, MemoryMappedViewAccessor View, byte* Base, int ServerToClient, int ClientToServer)
+        private GuestPipeChannel(bool IsServer, string GuestName, string BackingPath, SessionMapping Mapping, int ServerToClient, int ClientToServer)
         {
             this.IsServer = IsServer;
             this.GuestName = GuestName;
             this.BackingPath = BackingPath;
-            this.Stream = Stream;
-            this.Map = Map;
-            this.View = View;
-            this.Base = Base;
+            this.Mapping = Mapping;
+            Base = Mapping.Base;
 
-            Ring ServerToClientRing = new Ring(ServerToClientOffset, DataOffset, ServerToClient);
-            Ring ClientToServerRing = new Ring(ClientToServerOffset, DataOffset + ServerToClient, ClientToServer);
+            SessionRing ServerToClientRing = new SessionRing(Base, ServerToClientOffset, DataOffset, ServerToClient);
+            SessionRing ClientToServerRing = new SessionRing(Base, ClientToServerOffset, DataOffset + ServerToClient, ClientToServer);
 
             Outbound = IsServer ? ServerToClientRing : ClientToServerRing;
             Inbound = IsServer ? ClientToServerRing : ServerToClientRing;
@@ -148,68 +122,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        internal bool PeerClosed => Base == null || Disconnected || IsBroken(Inbound) || !HasLiveHolder(PeerHolderTable);
+        internal bool PeerClosed => Base == null || Disconnected || Inbound.IsBroken || !HasLiveHolder(PeerHolderTable);
 
-        internal bool OutboundBroken => Base != null && IsBroken(in Outbound);
+        internal bool OutboundBroken => Base != null && Outbound.IsBroken;
 
-        internal int InboundPayload => Base == null ? 0 : (int)Math.Min(ReadField(Inbound.Block + PayloadField), (uint)Inbound.Capacity);
+        internal int InboundPayload => Base == null ? 0 : (int)Math.Min(Inbound.ReadField(SessionRing.PayloadField), (uint)Inbound.Capacity);
 
-        internal bool InboundHasBytes => Base != null && Used(Inbound) != 0;
+        internal bool InboundHasBytes => Base != null && Inbound.Used() != 0;
 
-        internal int OutboundFree => Base == null ? 0 : Outbound.Capacity - Used(Outbound);
+        internal int OutboundFree => Base == null ? 0 : Outbound.Free;
 
         internal bool FitsOutbound(int PayloadBytes) => (long)PayloadBytes + FrameHeaderBytes <= Outbound.Capacity;
-
-        private bool IsBroken(in Ring R) => ReadField(R.Block + BrokenField) != 0;
-
-        private void MarkBroken(in Ring R) => WriteField(R.Block + BrokenField, 1);
-
-        private int Used(in Ring R)
-        {
-            uint Written = ReadField(R.Block + WriteCursorField);
-            uint Consumed = ReadField(R.Block + ReadCursorField);
-            uint Count = unchecked(Written - Consumed);
-
-            // A peer that died mid update must not turn into an out of range copy.
-            if (Count > (uint)R.Capacity)
-            {
-                MarkBroken(in R);
-                return 0;
-            }
-
-            return (int)Count;
-        }
-
-        private void CopyOut(in Ring R, uint Cursor, Span<byte> Destination)
-        {
-            int Mask = R.Capacity - 1;
-            int Start = (int)(Cursor & (uint)Mask);
-            int First = Math.Min(Destination.Length, R.Capacity - Start);
-
-            new ReadOnlySpan<byte>(Base + R.Data + Start, First).CopyTo(Destination);
-            if (Destination.Length > First)
-                new ReadOnlySpan<byte>(Base + R.Data, Destination.Length - First).CopyTo(Destination.Slice(First));
-        }
-
-        private void CopyIn(in Ring R, uint Cursor, ReadOnlySpan<byte> Source)
-        {
-            int Mask = R.Capacity - 1;
-            int Start = (int)(Cursor & (uint)Mask);
-            int First = Math.Min(Source.Length, R.Capacity - Start);
-
-            Source.Slice(0, First).CopyTo(new Span<byte>(Base + R.Data + Start, First));
-            if (Source.Length > First)
-                Source.Slice(First).CopyTo(new Span<byte>(Base + R.Data, Source.Length - First));
-        }
-
-        private uint ReadLength(in Ring R, uint Cursor)
-        {
-            Span<byte> Header = stackalloc byte[FrameHeaderBytes];
-            CopyOut(in R, Cursor, Header);
-            return System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(Header);
-        }
-
-        private void AddPayload(in Ring R, int Delta) => Interlocked.Add(ref Unsafe.AsRef<int>(Base + R.Block + PayloadField), Delta);
 
         private bool TryLock(int Field, ulong Token, out bool Stolen)
         {
@@ -255,8 +178,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             // The dead holder left part of a frame behind, and no reader can find the next one.
-            if (Stolen && ReadField(Outbound.Block + WriteFrameRemainingField) != 0)
-                MarkBroken(in Outbound);
+            if (Stolen && Outbound.ReadField(SessionRing.WriteFrameRemainingField) != 0)
+                Outbound.MarkBroken();
 
             return true;
         }
@@ -264,8 +187,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal void UnlockWrite(ulong Token)
         {
             // A writer that stops in a frame leaves no way to find the next one.
-            if (Base != null && ReadField(Outbound.Block + WriteFrameRemainingField) != 0)
-                MarkBroken(in Outbound);
+            if (Base != null && Outbound.ReadField(SessionRing.WriteFrameRemainingField) != 0)
+                Outbound.MarkBroken();
 
             Unlock(Outbound.Block + WriteLockField, Token);
         }
@@ -273,41 +196,41 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Byte mode takes whatever is queued, across frame boundaries.
         internal int ReadBytes(Span<byte> Destination)
         {
-            if (Base == null || IsBroken(in Inbound))
+            if (Base == null || Inbound.IsBroken)
                 return 0;
 
             int Copied = 0;
             while (Copied < Destination.Length)
             {
-                int Available = Used(in Inbound);
+                int Available = Inbound.Used();
                 if (Available == 0)
                     break;
 
-                uint Cursor = ReadField(Inbound.Block + ReadCursorField);
-                uint Remaining = ReadField(Inbound.Block + ReadFrameRemainingField);
+                uint Cursor = Inbound.ReadField(SessionRing.ReadCursorField);
+                uint Remaining = Inbound.ReadField(SessionRing.ReadFrameRemainingField);
 
                 if (Remaining == 0)
                 {
                     if (Available < FrameHeaderBytes)
                         break;
 
-                    uint Length = ReadLength(in Inbound, Cursor);
+                    uint Length = Inbound.ReadLength(Cursor);
                     if (Length > MaxFrameBytes)
                     {
-                        MarkBroken(in Inbound);
+                        Inbound.MarkBroken();
                         break;
                     }
 
-                    WriteField(Inbound.Block + ReadFrameRemainingField, Length);
-                    WriteField(Inbound.Block + ReadCursorField, unchecked(Cursor + FrameHeaderBytes));
+                    Inbound.WriteField(SessionRing.ReadFrameRemainingField, Length);
+                    Inbound.WriteField(SessionRing.ReadCursorField, unchecked(Cursor + FrameHeaderBytes));
                     continue;
                 }
 
                 int Take = (int)Math.Min(Math.Min(Remaining, (uint)(Destination.Length - Copied)), (uint)Available);
-                CopyOut(in Inbound, Cursor, Destination.Slice(Copied, Take));
-                WriteField(Inbound.Block + ReadFrameRemainingField, Remaining - (uint)Take);
-                WriteField(Inbound.Block + ReadCursorField, unchecked(Cursor + (uint)Take));
-                AddPayload(in Inbound, -Take);
+                Inbound.CopyOut(Cursor, Destination.Slice(Copied, Take));
+                Inbound.WriteField(SessionRing.ReadFrameRemainingField, Remaining - (uint)Take);
+                Inbound.WriteField(SessionRing.ReadCursorField, unchecked(Cursor + (uint)Take));
+                Inbound.AddPayload(-Take);
                 Copied += Take;
             }
 
@@ -320,22 +243,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             Copied = 0;
             MessageLeft = false;
 
-            if (Base == null || IsBroken(in Inbound))
+            if (Base == null || Inbound.IsBroken)
                 return false;
 
-            int Available = Used(in Inbound);
-            uint Cursor = ReadField(Inbound.Block + ReadCursorField);
-            uint Remaining = ReadField(Inbound.Block + ReadFrameRemainingField);
+            int Available = Inbound.Used();
+            uint Cursor = Inbound.ReadField(SessionRing.ReadCursorField);
+            uint Remaining = Inbound.ReadField(SessionRing.ReadFrameRemainingField);
 
             if (Remaining == 0)
             {
                 if (Available < FrameHeaderBytes)
                     return false;
 
-                uint Length = ReadLength(in Inbound, Cursor);
+                uint Length = Inbound.ReadLength(Cursor);
                 if (Length > MaxFrameBytes)
                 {
-                    MarkBroken(in Inbound);
+                    Inbound.MarkBroken();
                     return false;
                 }
 
@@ -346,17 +269,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Cursor = unchecked(Cursor + FrameHeaderBytes);
                 Available -= FrameHeaderBytes;
                 Remaining = Length;
-                WriteField(Inbound.Block + ReadFrameRemainingField, Remaining);
-                WriteField(Inbound.Block + ReadCursorField, Cursor);
+                Inbound.WriteField(SessionRing.ReadFrameRemainingField, Remaining);
+                Inbound.WriteField(SessionRing.ReadCursorField, Cursor);
             }
 
             int Take = (int)Math.Min(Math.Min(Remaining, (uint)Destination.Length), (uint)Available);
             if (Take > 0)
             {
-                CopyOut(in Inbound, Cursor, Destination.Slice(0, Take));
-                WriteField(Inbound.Block + ReadFrameRemainingField, Remaining - (uint)Take);
-                WriteField(Inbound.Block + ReadCursorField, unchecked(Cursor + (uint)Take));
-                AddPayload(in Inbound, -Take);
+                Inbound.CopyOut(Cursor, Destination.Slice(0, Take));
+                Inbound.WriteField(SessionRing.ReadFrameRemainingField, Remaining - (uint)Take);
+                Inbound.WriteField(SessionRing.ReadCursorField, unchecked(Cursor + (uint)Take));
+                Inbound.AddPayload(-Take);
             }
 
             Copied = Take;
@@ -368,12 +291,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal int Peek(Span<byte> Destination, bool MessageMode, out uint MessageLength)
         {
             MessageLength = 0;
-            if (Base == null || IsBroken(in Inbound))
+            if (Base == null || Inbound.IsBroken)
                 return 0;
 
-            int Available = Used(in Inbound);
-            uint Cursor = ReadField(Inbound.Block + ReadCursorField);
-            uint Remaining = ReadField(Inbound.Block + ReadFrameRemainingField);
+            int Available = Inbound.Used();
+            uint Cursor = Inbound.ReadField(SessionRing.ReadCursorField);
+            uint Remaining = Inbound.ReadField(SessionRing.ReadFrameRemainingField);
             bool FirstFrame = true;
             int Copied = 0;
 
@@ -384,7 +307,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Available < FrameHeaderBytes)
                         break;
 
-                    Remaining = ReadLength(in Inbound, Cursor);
+                    Remaining = Inbound.ReadLength(Cursor);
                     if (Remaining > MaxFrameBytes)
                         break;
 
@@ -400,7 +323,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 int Take = (int)Math.Min(Math.Min(Remaining, (uint)(Destination.Length - Copied)), (uint)Available);
                 if (Take > 0)
-                    CopyOut(in Inbound, Cursor, Destination.Slice(Copied, Take));
+                    Inbound.CopyOut(Cursor, Destination.Slice(Copied, Take));
 
                 Copied += Take;
                 Cursor = unchecked(Cursor + (uint)Take);
@@ -417,57 +340,34 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Each chunk becomes a frame of its own.
         internal int WriteBytes(ReadOnlySpan<byte> Source)
         {
-            if (Base == null || IsBroken(in Outbound))
+            if (Base == null || Outbound.IsBroken)
                 return 0;
 
             int Written = 0;
             while (Written < Source.Length)
             {
-                int Free = Outbound.Capacity - Used(in Outbound);
+                int Free = Outbound.Free;
                 if (Free <= FrameHeaderBytes)
                     break;
 
                 int Chunk = Math.Min(Source.Length - Written, Free - FrameHeaderBytes);
-                PublishFrame(Source.Slice(Written, Chunk));
+                Outbound.PublishFrame(Source.Slice(Written, Chunk));
                 Written += Chunk;
             }
 
             return Written;
         }
 
-        internal bool TryWriteFrame(ReadOnlySpan<byte> Source)
-        {
-            if (Base == null || IsBroken(in Outbound))
-                return false;
-
-            if (Outbound.Capacity - Used(in Outbound) < FrameHeaderBytes + (long)Source.Length)
-                return false;
-
-            PublishFrame(Source);
-            return true;
-        }
-
-        private void PublishFrame(ReadOnlySpan<byte> Payload)
-        {
-            uint Cursor = ReadField(Outbound.Block + WriteCursorField);
-            Span<byte> Header = stackalloc byte[FrameHeaderBytes];
-            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Header, (uint)Payload.Length);
-            CopyIn(in Outbound, Cursor, Header);
-            CopyIn(in Outbound, unchecked(Cursor + FrameHeaderBytes), Payload);
-            AddPayload(in Outbound, Payload.Length);
-
-            // The cursor moves last, so a reader in another process sees the whole frame or none of it.
-            WriteField(Outbound.Block + WriteCursorField, unchecked(Cursor + FrameHeaderBytes + (uint)Payload.Length));
-        }
+        internal bool TryWriteFrame(ReadOnlySpan<byte> Source) => Base != null && Outbound.TryWriteFrame(Source);
 
         // A message larger than the ring goes in pieces under the write lock. -1 when the length does not fit yet.
         internal int WriteMessagePiece(ReadOnlySpan<byte> Rest, int TotalLength, bool First)
         {
-            if (Base == null || IsBroken(in Outbound))
+            if (Base == null || Outbound.IsBroken)
                 return -1;
 
-            int Free = Outbound.Capacity - Used(in Outbound);
-            uint Cursor = ReadField(Outbound.Block + WriteCursorField);
+            int Free = Outbound.Free;
+            uint Cursor = Outbound.ReadField(SessionRing.WriteCursorField);
 
             if (First)
             {
@@ -476,20 +376,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Span<byte> Header = stackalloc byte[FrameHeaderBytes];
                 System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Header, (uint)TotalLength);
-                CopyIn(in Outbound, Cursor, Header);
+                Outbound.CopyIn(Cursor, Header);
                 Cursor = unchecked(Cursor + FrameHeaderBytes);
                 Free -= FrameHeaderBytes;
-                WriteField(Outbound.Block + WriteFrameRemainingField, (uint)TotalLength);
+                Outbound.WriteField(SessionRing.WriteFrameRemainingField, (uint)TotalLength);
             }
 
             int Take = Math.Min(Rest.Length, Free);
             if (Take > 0)
-                CopyIn(in Outbound, Cursor, Rest.Slice(0, Take));
+                Outbound.CopyIn(Cursor, Rest.Slice(0, Take));
 
-            uint Left = ReadField(Outbound.Block + WriteFrameRemainingField) - (uint)Take;
-            WriteField(Outbound.Block + WriteFrameRemainingField, Left);
-            AddPayload(in Outbound, Take);
-            WriteField(Outbound.Block + WriteCursorField, unchecked(Cursor + (uint)Take));
+            uint Left = Outbound.ReadField(SessionRing.WriteFrameRemainingField) - (uint)Take;
+            Outbound.WriteField(SessionRing.WriteFrameRemainingField, Left);
+            Outbound.AddPayload(Take);
+            Outbound.WriteField(SessionRing.WriteCursorField, unchecked(Cursor + (uint)Take));
             return Take;
         }
 
@@ -519,19 +419,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void ClearClientState()
         {
-            for (int Block = ServerToClientOffset; Block <= ClientToServerOffset; Block += ClientToServerOffset - ServerToClientOffset)
-            {
-                WriteField(Block + WriteCursorField, 0);
-                WriteField(Block + WriteFrameRemainingField, 0);
-                WriteField(Block + ReadCursorField, 0);
-                WriteField(Block + ReadFrameRemainingField, 0);
-                WriteField(Block + PayloadField, 0);
-                WriteField(Block + BrokenField, 0);
-                Volatile.Write(ref Unsafe.AsRef<ulong>(Base + Block + WriteLockField), 0);
-                Volatile.Write(ref Unsafe.AsRef<ulong>(Base + Block + ReadLockField), 0);
-            }
-
+            ClearRing(in Inbound);
+            ClearRing(in Outbound);
             SessionHolders.Clear(Base + ClientHoldersOffset, HolderSlots);
+        }
+
+        private void ClearRing(in SessionRing Ring)
+        {
+            Ring.Clear();
+            Volatile.Write(ref Unsafe.AsRef<ulong>(Base + Ring.Block + WriteLockField), 0);
+            Volatile.Write(ref Unsafe.AsRef<ulong>(Base + Ring.Block + ReadLockField), 0);
         }
 
         // NT puts the instance back to listening. A client that still holds the old connection stays disconnected.
@@ -544,8 +441,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteField(GenerationOffset, unchecked(ReadField(GenerationOffset) + 1));
             WriteField(StateOffset, StateListening);
         }
-
-        private static string PipeDirectory => Path.Combine(GuestSession.Directory, PipeDirectoryName);
 
         private static int RoundCapacity(uint Quota)
         {
@@ -564,73 +459,33 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool IsPowerOfTwo(int Value) => Value >= MinCapacity && Value <= MaxCapacity && (Value & (Value - 1)) == 0;
 
-        private static ulong NameHash(string Name)
+        private static string InstancePath(string GuestName, int Instance) => SessionNames.InstancePath(SessionNames.Pipes, GuestName, Instance, PipeExtension);
+
+        // Another process can delete the file at any time, so a failure to open it is no error.
+        private static bool TryMap(string Path, FileMode Mode, long Length, out SessionMapping Mapping)
         {
-            ulong Hash = 14695981039346656037UL;
-            for (int i = 0; i < Name.Length; i++)
-            {
-                Hash ^= char.ToLowerInvariant(Name[i]);
-                Hash *= 1099511628211UL;
-            }
-
-            return Hash;
-        }
-
-        private static string InstancePath(string GuestName, int Instance)
-            => Path.Combine(PipeDirectory, NameHash(GuestName).ToString("x16") + "." + Instance.ToString() + ".pipe");
-
-        private static void EnsureDirectory() => GuestSession.CreatePrivateDirectory(PipeDirectory);
-
-        private static bool TryMap(string Path, FileMode Mode, long Length, out FileStream Stream,
-            out MemoryMappedFile Map, out MemoryMappedViewAccessor View, out byte* Base)
-        {
-            Stream = null;
-            Map = null;
-            View = null;
-            Base = null;
-
+            Mapping = null;
+            FileStream Stream;
             try
             {
                 Stream = new FileStream(Path, Mode, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete);
 
                 if (Length > 0 && Stream.Length < Length)
                     Stream.SetLength(Length);
-
-                if (Stream.Length < DataOffset + (MinCapacity * 2))
-                {
-                    Stream.Dispose();
-                    Stream = null;
-                    return false;
-                }
-
-                Map = MemoryMappedFile.CreateFromFile(Stream, null, Stream.Length, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, true);
-                View = Map.CreateViewAccessor(0, Stream.Length, MemoryMappedFileAccess.ReadWrite);
-
-                byte* Pointer = null;
-                View.SafeMemoryMappedViewHandle.AcquirePointer(ref Pointer);
-                if (Pointer == null)
-                {
-                    Release(View, Map, Stream);
-                    Stream = null;
-                    Map = null;
-                    View = null;
-                    return false;
-                }
-
-                Base = Pointer;
-                return true;
             }
             catch (Exception)
             {
-                View?.Dispose();
-                Map?.Dispose();
-                Stream?.Dispose();
-                Stream = null;
-                Map = null;
-                View = null;
-                Base = null;
                 return false;
             }
+
+            if (Stream.Length < DataOffset + (MinCapacity * 2))
+            {
+                Stream.Dispose();
+                return false;
+            }
+
+            Mapping = SessionMapping.MapFile(Stream, Stream.Length, Path);
+            return Mapping != null;
         }
 
         private static bool HeaderValid(byte* At, long FileLength, out int ServerToClient, out int ClientToServer, out string Name)
@@ -669,57 +524,27 @@ namespace Brovan.Core.Emulation.OS.Windows
             return string.Equals(Stored, GuestName, StringComparison.OrdinalIgnoreCase);
         }
 
-        // A closed instance leaves a gap in the numbers, so the files are listed, not counted.
-        private static string[] ExistingInstancePaths(string GuestName)
-        {
-            try
-            {
-                return System.IO.Directory.GetFiles(PipeDirectory, NameHash(GuestName).ToString("x16") + ".*.pipe");
-            }
-            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
-            {
-                return Array.Empty<string>();
-            }
-        }
+        private static string[] ExistingInstancePaths(string GuestName) => SessionNames.InstancePaths(SessionNames.Pipes, GuestName, PipeExtension);
 
         internal static bool ServerExists(string GuestName)
         {
             foreach (string Path in ExistingInstancePaths(GuestName))
             {
-                if (!TryMap(Path, FileMode.Open, 0, out FileStream Stream, out MemoryMappedFile Map, out MemoryMappedViewAccessor View, out byte* At))
+                if (!TryMap(Path, FileMode.Open, 0, out SessionMapping Mapping))
                     continue;
 
-                try
+                using (Mapping)
                 {
-                    if (!HeaderMatches(At, GuestName, Stream.Length, out _, out _))
+                    byte* At = Mapping.Base;
+                    if (!HeaderMatches(At, GuestName, Mapping.Length, out _, out _))
                         continue;
 
                     if (ReadFieldAt(At, StateOffset) == StateListening && HasLiveHolderAt(At, ServerHoldersOffset))
                         return true;
                 }
-                finally
-                {
-                    Release(View, Map, Stream);
-                }
             }
 
             return false;
-        }
-
-        private static void Release(MemoryMappedViewAccessor View, MemoryMappedFile Map, FileStream Stream)
-        {
-            try
-            {
-                View?.SafeMemoryMappedViewHandle.ReleasePointer();
-            }
-            catch (Exception Error)
-            {
-                Utils.LogError($"[GuestPipeChannel] Releasing a pipe view failed: {Error.Message}");
-            }
-
-            View?.Dispose();
-            Map?.Dispose();
-            Stream?.Dispose();
         }
 
         internal static NTSTATUS TryCreateServer(string GuestName, uint PipeType, uint MaxInstances,
@@ -734,7 +559,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             try
             {
-                EnsureDirectory();
+                SessionNames.EnsureDirectory(SessionNames.Pipes);
             }
             catch (Exception Error)
             {
@@ -748,9 +573,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 string Path = InstancePath(GuestName, Instance);
 
-                if (!TryMap(Path, FileMode.OpenOrCreate, Length, out FileStream Stream, out MemoryMappedFile Map, out MemoryMappedViewAccessor View, out byte* At))
+                if (!TryMap(Path, FileMode.OpenOrCreate, Length, out SessionMapping Mapping))
                     continue;
 
+                byte* At = Mapping.Base;
                 bool Claimed = false;
                 try
                 {
@@ -758,7 +584,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Observed == StateCreating || Observed == StateDeleting)
                         continue;
 
-                    bool Valid = HeaderValid(At, Stream.Length, out _, out _, out string Stored);
+                    bool Valid = HeaderValid(At, Mapping.Length, out _, out _, out string Stored);
 
                     if (Observed != StateFree && HasLiveHolderAt(At, ServerHoldersOffset))
                     {
@@ -767,7 +593,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         continue;
                     }
 
-                    if (Stream.Length < Length || CompareExchangeAt(At, StateOffset, StateCreating, Observed) != Observed)
+                    if (Mapping.Length < Length || CompareExchangeAt(At, StateOffset, StateCreating, Observed) != Observed)
                         continue;
 
                     // The state word stays StateCreating, or another creator could take the instance too.
@@ -793,7 +619,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     WriteFieldAt(At, MagicOffset, HeaderMagic);
                     WriteFieldAt(At, StateOffset, StateListening);
 
-                    Channel = new GuestPipeChannel(true, GuestName, Path, Stream, Map, View, At, ServerToClient, ClientToServer);
+                    Channel = new GuestPipeChannel(true, GuestName, Path, Mapping, ServerToClient, ClientToServer);
                     Channel.HolderSlot = 0;
                     Claimed = true;
                     return NTSTATUS.STATUS_SUCCESS;
@@ -801,7 +627,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 finally
                 {
                     if (!Claimed)
-                        Release(View, Map, Stream);
+                        Mapping.Dispose();
                 }
             }
 
@@ -830,13 +656,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Channel = null;
 
-            if (!TryMap(BackingPath, FileMode.Open, 0, out FileStream Stream, out MemoryMappedFile Map, out MemoryMappedViewAccessor View, out byte* At))
+            if (!TryMap(BackingPath, FileMode.Open, 0, out SessionMapping Mapping))
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
+            byte* At = Mapping.Base;
             bool Claimed = false;
             try
             {
-                if (!HeaderMatches(At, GuestName, Stream.Length, out int ServerToClient, out int ClientToServer))
+                if (!HeaderMatches(At, GuestName, Mapping.Length, out int ServerToClient, out int ClientToServer))
                     return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
                 if (!HasLiveHolderAt(At, ServerHoldersOffset))
@@ -845,7 +672,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (CompareExchangeAt(At, StateOffset, StateConnected, StateListening) != StateListening)
                     return NTSTATUS.STATUS_PIPE_BUSY;
 
-                GuestPipeChannel Client = new GuestPipeChannel(false, GuestName, BackingPath, Stream, Map, View, At, ServerToClient, ClientToServer);
+                GuestPipeChannel Client = new GuestPipeChannel(false, GuestName, BackingPath, Mapping, ServerToClient, ClientToServer);
                 Client.ClientGeneration = ReadFieldAt(At, GenerationOffset);
                 if (!Client.TryRegisterHolder())
                 {
@@ -860,7 +687,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             finally
             {
                 if (!Claimed)
-                    Release(View, Map, Stream);
+                    Mapping.Dispose();
             }
         }
 
@@ -868,16 +695,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Channel = null;
 
-            if (!TryMap(BackingPath, FileMode.Open, 0, out FileStream Stream, out MemoryMappedFile Map, out MemoryMappedViewAccessor View, out byte* At))
+            if (!TryMap(BackingPath, FileMode.Open, 0, out SessionMapping Mapping))
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
             bool Claimed = false;
             try
             {
-                if (!HeaderValid(At, Stream.Length, out int ServerToClient, out int ClientToServer, out string Name))
+                if (!HeaderValid(Mapping.Base, Mapping.Length, out int ServerToClient, out int ClientToServer, out string Name))
                     return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
-                GuestPipeChannel End = new GuestPipeChannel(Server, Name, BackingPath, Stream, Map, View, At, ServerToClient, ClientToServer);
+                GuestPipeChannel End = new GuestPipeChannel(Server, Name, BackingPath, Mapping, ServerToClient, ClientToServer);
                 End.ClientGeneration = Generation;
                 if (!End.TryRegisterHolder())
                     return NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
@@ -889,61 +716,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             finally
             {
                 if (!Claimed)
-                    Release(View, Map, Stream);
+                    Mapping.Dispose();
             }
         }
 
-        internal static void PurgeAbandoned()
+        // No magic or StateCreating means a server is still setting the file up. StateDeleting is taken by compare and
+        // exchange, so no creator can claim the file before it is gone.
+        internal static void RemoveIfAbandoned(string Location)
         {
-            string Directory = PipeDirectory;
-
-            if (!System.IO.Directory.Exists(Directory))
+            if (!TryMap(Location, FileMode.Open, 0, out SessionMapping Mapping))
                 return;
 
-            string[] Files;
-            try
+            bool Abandoned;
+            using (Mapping)
             {
-                Files = System.IO.Directory.GetFiles(Directory, "*.pipe");
+                byte* At = Mapping.Base;
+                uint Observed = ReadFieldAt(At, StateOffset);
+                Abandoned = ReadFieldAt(At, MagicOffset) == HeaderMagic &&
+                            (ReadFieldAt(At, VersionOffset) != HeaderVersion ||
+                             (Observed != StateCreating && !HasLiveHolderAt(At, ServerHoldersOffset) &&
+                              CompareExchangeAt(At, StateOffset, StateDeleting, Observed) == Observed));
             }
-            catch (Exception Error)
-            {
-                Utils.LogError($"[GuestPipeChannel] Cannot list the pipe directory: {Error.Message}");
-                return;
-            }
 
-            for (int i = 0; i < Files.Length; i++)
-            {
-                if (!TryMap(Files[i], FileMode.Open, 0, out FileStream Stream, out MemoryMappedFile Map, out MemoryMappedViewAccessor View, out byte* At))
-                    continue;
-
-                bool Abandoned;
-                try
-                {
-                    // No magic or StateCreating means a server is still setting the file up. StateDeleting is taken by
-                    // compare and exchange, so no creator can claim the file before it is gone.
-                    uint Observed = ReadFieldAt(At, StateOffset);
-                    Abandoned = ReadFieldAt(At, MagicOffset) == HeaderMagic &&
-                                (ReadFieldAt(At, VersionOffset) != HeaderVersion ||
-                                 (Observed != StateCreating && !HasLiveHolderAt(At, ServerHoldersOffset) &&
-                                  CompareExchangeAt(At, StateOffset, StateDeleting, Observed) == Observed));
-                }
-                finally
-                {
-                    Release(View, Map, Stream);
-                }
-
-                if (!Abandoned)
-                    continue;
-
-                try
-                {
-                    File.Delete(Files[i]);
-                }
-                catch (Exception Error)
-                {
-                    Utils.LogError($"[GuestPipeChannel] Cannot remove an abandoned pipe: {Error.Message}");
-                }
-            }
+            if (Abandoned)
+                SessionNames.Delete(Location);
         }
 
         public void Dispose()
@@ -965,11 +761,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            Release(View, Map, Stream);
-
-            View = null;
-            Map = null;
-            Stream = null;
+            Mapping?.Dispose();
+            Mapping = null;
             Base = null;
 
             if (RemoveInstance && BackingPath != null)

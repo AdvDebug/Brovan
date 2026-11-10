@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Immutable;
 using System.Runtime.CompilerServices;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -229,7 +230,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            NTSTATUS WriteSidPointerInfo(byte[] Sid)
+            NTSTATUS WriteSidPointerInfo(ReadOnlySpan<byte> Sid)
             {
                 uint SidOffset = AlignPointer(PointerSize);
                 uint RequiredSize = SidOffset + (uint)Sid.Length;
@@ -241,7 +242,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                 Buffer.Clear();
                 WritePointer(Buffer, 0, TokenInformation + SidOffset);
-                Sid.AsSpan().CopyTo(Buffer.Slice((int)SidOffset, Sid.Length));
+                Sid.CopyTo(Buffer.Slice((int)SidOffset, Sid.Length));
 
                 if (!Instance.WriteMemory(TokenInformation, Buffer))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -250,7 +251,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             // SID_AND_ATTRIBUTES keeps the SID on an 8 byte boundary on both architectures.
-            NTSTATUS WriteSidAndAttributesInfo(byte[] Sid, uint Attributes)
+            NTSTATUS WriteSidAndAttributesInfo(ReadOnlySpan<byte> Sid, uint Attributes)
             {
                 uint SidOffset = (PointerSize + 4 + 7u) & ~7u;
                 uint RequiredSize = SidOffset + (uint)Sid.Length;
@@ -263,7 +264,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Buffer.Clear();
                 WritePointer(Buffer, 0, TokenInformation + SidOffset);
                 BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice((int)PointerSize, 4), Attributes);
-                Sid.AsSpan().CopyTo(Buffer.Slice((int)SidOffset, Sid.Length));
+                Sid.CopyTo(Buffer.Slice((int)SidOffset, Sid.Length));
 
                 if (!Instance.WriteMemory(TokenInformation, Buffer))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -271,7 +272,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            NTSTATUS WriteSecurityAttributesInfo(WinTokenSecurityAttribute[] Attributes)
+            NTSTATUS WriteSecurityAttributesInfo(ReadOnlySpan<WinTokenSecurityAttribute> Attributes)
             {
                 uint RequiredSize = NtQuerySecurityAttributesToken.GetAttributesInformationSize(Attributes, Is64);
                 WriteReturnLength(RequiredSize);
@@ -288,15 +289,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            NTSTATUS WriteSidGroupsInfo(ReadOnlySpan<TokenGroup> Groups, byte[][] Sids, uint SidAttributes)
+            NTSTATUS WriteSidGroupsInfo(ReadOnlySpan<TokenGroup> Groups, ImmutableArray<ImmutableArray<byte>> Sids, uint SidAttributes)
             {
-                int Count = Sids?.Length ?? Groups.Length;
+                int Count = Sids.IsDefault ? Groups.Length : Sids.Length;
                 uint EntrySize = PointerSize * 2;
                 uint ArrayOffset = PointerSize;
                 uint SidOffset = ArrayOffset + EntrySize * (uint)Count;
                 uint RequiredSize = SidOffset;
                 for (int Index = 0; Index < Count; Index++)
-                    RequiredSize += (uint)(Sids?[Index] ?? Groups[Index].Sid).Length;
+                    RequiredSize += (uint)(Sids.IsDefault ? Groups[Index].Sid.Length : Sids[Index].Length);
 
                 WriteReturnLength(RequiredSize);
                 if (TokenInformationLength < RequiredSize)
@@ -309,10 +310,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 for (int Index = 0; Index < Count; Index++)
                 {
                     int Entry = (int)(ArrayOffset + EntrySize * (uint)Index);
-                    byte[] Sid = Sids?[Index] ?? Groups[Index].Sid;
+                    ReadOnlySpan<byte> Sid = Sids.IsDefault ? Groups[Index].Sid : Sids[Index].AsSpan();
                     WritePointer(Buffer, Entry, TokenInformation + SidOffset);
-                    BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(Entry + (int)PointerSize, 4), Sids != null ? SidAttributes : Groups[Index].Attributes);
-                    Sid.AsSpan().CopyTo(Buffer.Slice((int)SidOffset));
+                    BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(Entry + (int)PointerSize, 4), Sids.IsDefault ? Groups[Index].Attributes : SidAttributes);
+                    Sid.CopyTo(Buffer.Slice((int)SidOffset));
                     SidOffset += (uint)Sid.Length;
                 }
 
@@ -328,21 +329,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return WriteSidGroupsInfo(default, Token.CapabilitySids, SeGroupEnabled);
 
                 case TOKEN_INFORMATION_CLASS.TokenAppContainerSid:
-                    return Token.IsAppContainer ? WriteSidPointerInfo(Token.AppContainerSid) : WritePointerOnlyInfo();
+                    return Token.IsAppContainer ? WriteSidPointerInfo(Token.AppContainerSid.AsSpan()) : WritePointerOnlyInfo();
 
                 case TOKEN_INFORMATION_CLASS.TokenAppContainerNumber:
                     return WriteUInt32Info(Token.AppContainerNumber);
 
                 case TOKEN_INFORMATION_CLASS.TokenGroups:
-                    return WriteSidGroupsInfo(GroupsOf(Token, OwnerOf(Instance, Token)), null, 0);
+                    return WriteSidGroupsInfo(GroupsOf(Token), default, 0);
 
                 case TOKEN_INFORMATION_CLASS.TokenLogonSid:
                     {
-                        TokenGroup[] Groups = GroupsOf(Token, OwnerOf(Instance, Token));
+                        TokenGroup[] Groups = GroupsOf(Token);
                         for (int Index = 0; Index < Groups.Length; Index++)
                         {
                             if ((Groups[Index].Attributes & SeGroupLogonId) == SeGroupLogonId)
-                                return WriteSidGroupsInfo(Groups.AsSpan(Index, 1), null, 0);
+                                return WriteSidGroupsInfo(Groups.AsSpan(Index, 1), default, 0);
                         }
 
                         return WriteEmptyCountedInfo();
@@ -355,10 +356,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return WriteEmptyCountedInfo();
 
                 case TOKEN_INFORMATION_CLASS.TokenOwner:
-                    return WriteSidPointerInfo(UserSidOf(Token, OwnerOf(Instance, Token)));
+                    return WriteSidPointerInfo(UserSidOf(Token));
 
                 case TOKEN_INFORMATION_CLASS.TokenPrimaryGroup:
-                    return WriteSidPointerInfo(PrimaryGroupOf(Token, OwnerOf(Instance, Token)));
+                    return WriteSidPointerInfo(PrimaryGroupOf(Token));
 
                 case TOKEN_INFORMATION_CLASS.TokenDefaultDacl:
                 case TOKEN_INFORMATION_CLASS.TokenProcessTrustLevel:
@@ -419,14 +420,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return WriteUInt32Info(3);
 
                 case TOKEN_INFORMATION_CLASS.TokenSecurityAttributes:
-                    return WriteSecurityAttributesInfo(Token.SecurityAttributes);
+                    return WriteSecurityAttributesInfo(Token.SecurityAttributes.AsSpan());
 
                 case TOKEN_INFORMATION_CLASS.TokenUserClaimAttributes:
                 case TOKEN_INFORMATION_CLASS.TokenDeviceClaimAttributes:
                 case TOKEN_INFORMATION_CLASS.TokenRestrictedUserClaimAttributes:
                 case TOKEN_INFORMATION_CLASS.TokenRestrictedDeviceClaimAttributes:
                 case TOKEN_INFORMATION_CLASS.TokenSingletonAttributes:
-                    return WriteSecurityAttributesInfo(Array.Empty<WinTokenSecurityAttribute>());
+                    return WriteSecurityAttributesInfo(default);
 
                 case TOKEN_INFORMATION_CLASS.TokenType:
                     return WriteUInt32Info(Token.Type == TokenType.Primary ? 1u : 2u);
@@ -474,15 +475,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RequiredSize);
                         Buffer.Clear();
 
-                        WinProcess OwnerProcess = OwnerOf(Instance, Token);
                         bool Primary = Token.Type == TokenType.Primary;
 
                         BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x00, 8), Token.TokenId);
-                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), AuthenticationIdOf(Instance, OwnerProcess));
+                        BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x08, 8), AuthenticationIdOf(Token));
                         BinaryPrimitives.WriteInt64LittleEndian(Buffer.Slice(0x10, 8), long.MaxValue);
                         BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x18, 4), Primary ? 1u : 2u);
                         BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x1C, 4), Primary ? 0u : (uint)Token.ImpersonationLevel);
-                        BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x28, 4), (uint)GroupsOf(Token, OwnerProcess).Length);
+                        BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x28, 4), (uint)GroupsOf(Token).Length);
                         BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x30, 8), Token.ModifiedId);
 
                         if (!Instance.WriteMemory(TokenInformation, Buffer))
@@ -492,10 +492,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                 case TOKEN_INFORMATION_CLASS.TokenUser:
-                    return WriteSidAndAttributesInfo(UserSidOf(Token, OwnerOf(Instance, Token)), 0);
+                    return WriteSidAndAttributesInfo(UserSidOf(Token), 0);
 
                 case TOKEN_INFORMATION_CLASS.TokenIntegrityLevel:
-                    return WriteSidAndAttributesInfo(LabelSidOf(IntegrityRidOf(Token, OwnerOf(Instance, Token))), SeGroupIntegrity);
+                    return WriteSidAndAttributesInfo(LabelSidOf(IntegrityRidOf(Token)), SeGroupIntegrity);
 
                 case TOKEN_INFORMATION_CLASS.TokenPrivateNameSpace:
                     return WriteUInt32Info(0);
@@ -555,33 +555,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return CallerImpersonationToken(Instance) ?? Instance.WinHelper.OwnProcess?.GetPrimaryToken();
         }
 
-        internal static WinProcess OwnerOf(BinaryEmulator Instance, WinToken Token)
+        private static bool IsServiceUser(User User) => User is User.System or User.LocalService or User.WindowManager;
+
+        private static bool HoldsImpersonatePrivilege(WinToken Token) => IsServiceUser(Token.User) || Token.IsElevated;
+
+        internal static byte[] UserSidOf(WinToken Token)
         {
-            uint ProcessId = (uint)Token.OwningProcessId;
-            WinSysHelper Helper = Instance.WinHelper;
-            if (Helper.OwnProcess?.PID == ProcessId)
-                return Helper.OwnProcess;
-            if (Helper.ShellProcess?.PID == ProcessId)
-                return Helper.ShellProcess;
-
-            foreach (WinProcess Process in Helper.WinProcesses)
-            {
-                if (Process.PID == ProcessId)
-                    return Process;
-            }
-
-            return null;
-        }
-
-        private static bool IsServiceUser(WinProcess OwnerProcess) => OwnerProcess?.RunningUser is User.System or User.LocalService or User.WindowManager;
-
-        private static bool IsElevated(WinToken Token, WinProcess OwnerProcess) => Token.IsElevated || OwnerProcess?.RunningUser == User.Admin;
-
-        private static bool HoldsImpersonatePrivilege(WinToken Token, WinProcess OwnerProcess) => IsServiceUser(OwnerProcess) || IsElevated(Token, OwnerProcess);
-
-        internal static byte[] UserSidOf(WinToken Token, WinProcess OwnerProcess)
-        {
-            return KindOf(Token, OwnerProcess) switch
+            return KindOf(Token) switch
             {
                 LogonKind.Anonymous => AnonymousLogonSid,
                 LogonKind.Service => LocalSystemSid,
@@ -589,9 +569,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
         }
 
-        internal static byte[] PrimaryGroupOf(WinToken Token, WinProcess OwnerProcess)
+        internal static byte[] PrimaryGroupOf(WinToken Token)
         {
-            return KindOf(Token, OwnerProcess) switch
+            return KindOf(Token) switch
             {
                 LogonKind.Anonymous => AnonymousLogonSid,
                 LogonKind.Service => LocalSystemSid,
@@ -599,13 +579,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
         }
 
-        private static LogonKind KindOf(WinToken Token, WinProcess OwnerProcess)
+        private static LogonKind KindOf(WinToken Token)
         {
             if (Token.IsAnonymous)
                 return LogonKind.Anonymous;
-            if (IsServiceUser(OwnerProcess))
+            if (IsServiceUser(Token.User))
                 return LogonKind.Service;
-            return IsElevated(Token, OwnerProcess) ? LogonKind.Elevated : LogonKind.Interactive;
+            return Token.IsElevated ? LogonKind.Elevated : LogonKind.Interactive;
         }
 
         private static uint IntegrityRidOf(LogonKind Kind, bool AppContainer)
@@ -627,7 +607,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Level < SecurityImpersonationLevel.SecurityImpersonation || Server == null)
                 return Level;
 
-            if (CanImpersonate(Instance, Server, Client))
+            if (CanImpersonate(Server, Client))
                 return Level;
 
             return Client.Type == TokenType.Impersonation && Client.ImpersonationLevel < SecurityImpersonationLevel.SecurityIdentification
@@ -635,38 +615,42 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : SecurityImpersonationLevel.SecurityIdentification;
         }
 
-        private static bool CanImpersonate(BinaryEmulator Instance, WinToken Server, WinToken Client)
+        private static bool CanImpersonate(WinToken Server, WinToken Client)
         {
-            bool AppContainerAllows = !Server.IsAppContainer || (Client.IsAppContainer && Server.AppContainerSid.AsSpan().SequenceEqual(Client.AppContainerSid));
+            bool AppContainerAllows = !Server.IsAppContainer || (Client.IsAppContainer && Server.AppContainerSid.AsSpan().SequenceEqual(Client.AppContainerSid.AsSpan()));
             if (Client.IsAnonymous)
                 return AppContainerAllows;
 
-            WinProcess ServerOwner = OwnerOf(Instance, Server);
-            if (HoldsImpersonatePrivilege(Server, ServerOwner))
+            if (HoldsImpersonatePrivilege(Server))
                 return true;
 
-            WinProcess ClientOwner = OwnerOf(Instance, Client);
-            return AppContainerAllows && IntegrityRidOf(Server, ServerOwner) >= IntegrityRidOf(Client, ClientOwner)
-                && UserSidOf(Server, ServerOwner).AsSpan().SequenceEqual(UserSidOf(Client, ClientOwner));
+            return AppContainerAllows && IntegrityRidOf(Server) >= IntegrityRidOf(Client)
+                && UserSidOf(Server).AsSpan().SequenceEqual(UserSidOf(Client));
         }
 
-        internal static uint IntegrityRidOf(WinToken Token, WinProcess OwnerProcess) => IntegrityRidOf(KindOf(Token, OwnerProcess), Token.IsAppContainer);
+        internal static uint IntegrityRidOf(WinToken Token) => IntegrityRidOf(KindOf(Token), Token.IsAppContainer);
 
         internal static byte[] LabelSidOf(uint IntegrityRid) => LabelSids[IntegrityRid >> 12];
 
-        internal static TokenGroup[] GroupsOf(WinToken Token, WinProcess OwnerProcess) => GroupSets[GroupSetIndex(KindOf(Token, OwnerProcess), Token.IsAppContainer)];
+        internal static TokenGroup[] GroupsOf(WinToken Token) => GroupSets[GroupSetIndex(KindOf(Token), Token.IsAppContainer)];
 
-        internal static ulong AuthenticationIdOf(BinaryEmulator Instance, WinProcess OwnerProcess)
+        internal static ulong AuthenticationIdOf(WinToken Token)
         {
-            return (OwnerProcess?.RunningUser ?? Instance.WinHelper.CurrentUser) switch
+            return Token.User switch
             {
                 User.System => WinToken.SystemLogonId,
                 User.LocalService => WinToken.LocalServiceLogonId,
+                User.Anonymous => WinToken.AnonymousLogonId,
                 _ => WinToken.InteractiveLogonId,
             };
         }
 
         internal static int SidLength(int SubAuthorityCount) => 8 + 4 * SubAuthorityCount;
+
+        internal static bool IsValidSidHeader(byte Revision, byte SubAuthorityCount) => Revision == SidRevision && SubAuthorityCount <= MaxSubAuthorities;
+
+        internal static bool IsValidSid(ReadOnlySpan<byte> Sid)
+            => Sid.Length >= SidLength(0) && IsValidSidHeader(Sid[0], Sid[1]) && Sid.Length == SidLength(Sid[1]);
 
         internal static uint SubAuthority(ReadOnlySpan<byte> Sid, int Index) => BinaryPrimitives.ReadUInt32LittleEndian(Sid.Slice(SidLength(Index)));
 

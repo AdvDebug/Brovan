@@ -34,6 +34,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
 
         private readonly WinProcess Process;
 
+        // NT: GetFromId finds a per-app id for any caller (UserStatics::GetNonRoamableIdForUserAndApp).
+        private readonly HashSet<string> AppNonRoamableIds = new(StringComparer.OrdinalIgnoreCase);
+
         private UserManagerService(WinProcess Process)
         {
             this.Process = Process;
@@ -49,8 +52,33 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
                 Utils.LogError($"[-] UserManager: interface {UserManagerRpcPortHandler.Interface.Id} could not be mapped to {Endpoint}.");
 
             RpcssPortHandler.RegisterActivatableClass(Helper, StaticsClassId, Apartment, new UserManagerStatics(Service.User));
+            RpcssPortHandler.RegisterActivatableClass(Helper, UserStatics.ClassId, Apartment, new UserStatics(Service));
             return Service;
         }
+
+        // The checks and their order follow UserStatics::TryFindUserByNonRoamableId.
+        internal SessionUserObject FindUser(BinaryEmulator Instance, ReadOnlySpan<char> NonRoamableId)
+        {
+            WinToken Caller = EffectiveToken(Instance);
+            if (Caller == null)
+                return null;
+
+            if ((PassesAccessCheck(Caller, out _) || HasSignInCapability(Caller)) && IsSameSession(Caller)
+                && NonRoamableId.Equals(UserNonRoamableId, StringComparison.OrdinalIgnoreCase))
+                return User;
+
+            return AppNonRoamableIds.GetAlternateLookup<ReadOnlySpan<char>>().Contains(NonRoamableId) ? User : null;
+        }
+
+        private bool IsSameSession(WinToken Caller) => Caller.SessionId == Process.GetPrimaryToken().SessionId || Caller.SessionId == WinToken.InteractiveSessionId;
+
+        private static bool PassesAccessCheck(WinToken Caller, out byte[] CallerSid)
+        {
+            CallerSid = UserSidOf(Caller);
+            return NtAccessCheck.CheckHost(CallerDescriptor, Caller, CallerSid, CallerAccess, CallerMapping, out _) == NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static bool HasSignInCapability(WinToken Caller) => Caller.HasCapability(SignInSupportCapability) || Caller.HasCapability(ShellExperienceCapability);
 
         internal uint GetUserData(BinaryEmulator Instance, uint MarshalId, out string NonRoamableId, out string AccountName)
         {
@@ -60,16 +88,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
             if (MarshalId != SessionUserObject.MarshalId || Caller == null)
                 return ErrorNoSuchLogonSession;
 
-            WinProcess CallerProcess = OwnerOf(Instance, Caller);
-            byte[] CallerSid = UserSidOf(Caller, CallerProcess);
-            bool AccessGranted = NtAccessCheck.CheckHost(CallerDescriptor, Caller, CallerProcess, CallerSid, CallerAccess, CallerMapping, out _) == NTSTATUS.STATUS_SUCCESS;
+            bool AccessGranted = PassesAccessCheck(Caller, out byte[] CallerSid);
 
             // No Brovan token holds the multi-user capability, so every caller must be the session user.
-            bool SameSession = Caller.SessionId == Process.GetPrimaryToken().SessionId || Caller.SessionId == WinToken.InteractiveSessionId;
-            if (!CallerSid.AsSpan().SequenceEqual(InteractiveUserSid) || (AccessGranted && !SameSession))
+            if (!CallerSid.AsSpan().SequenceEqual(InteractiveUserSid) || (AccessGranted && !IsSameSession(Caller)))
                 return ErrorNoSuchLogonSession;
 
-            if (!Caller.IsAppContainer || AccessGranted || Caller.HasCapability(SignInSupportCapability) || Caller.HasCapability(ShellExperienceCapability))
+            if (!Caller.IsAppContainer || AccessGranted || HasSignInCapability(Caller))
             {
                 NonRoamableId = UserNonRoamableId;
                 AccountName = WinSysHelper.CurrentUserName;
@@ -83,6 +108,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
             // NT hashes the user id, the package family and the session into an app's id (UserStatics::GetNonRoamableIdForUserAndApp).
             string Source = UserNonRoamableId + Family + WinToken.InteractiveSessionId.ToString(CultureInfo.InvariantCulture);
             NonRoamableId = Convert.ToBase64String(SHA256.HashData(Encoding.UTF8.GetBytes(Source)));
+            AppNonRoamableIds.Add(NonRoamableId);
             AccountName = string.Empty;
             return Orpc.SOk;
         }

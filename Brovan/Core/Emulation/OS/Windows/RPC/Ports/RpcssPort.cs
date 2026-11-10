@@ -28,6 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         // Opnums from this build's combase lclor and scm format strings.
         private const uint ProcConnect = 0;
+        private const uint ProcSetAppId = 1;
         private const uint ProcAllocateReservedIds = 3;
         private const uint ProcBulkUpdateOIDs = 4;
         private const uint ProcServerAllocateOXIDAndOIDs = 6;
@@ -55,6 +56,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private const uint OrOk = 0;
         private const uint OrBadOxid = 1910;
+        private const uint RpcETooLate = 0x80010119;
         private const int FreeOxidOffset = 24;
 
         private const uint RegdbEClassNotReg = 0x80040154;
@@ -93,7 +95,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         // rpcss makes one primary OXID per process at its first registration and returns it from every one.
         private static ulong PrimaryOxid;
-        private static ulong NextId = 0x1000;
+        private static Guid ProcessAppId;
         private static uint NextCookie = 1;
 
         internal static void RegisterClass(WinSysHelper Helper, Guid Class, HostApartment Apartment, HostObject Object)
@@ -150,6 +152,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             {
                 case ProcConnect:
                     return Connect(Stub, ProcessId);
+
+                case ProcSetAppId:
+                    return SetAppId(Stub);
 
                 case ProcAllocateReservedIds:
                     return AllocateReservedIds(Stub);
@@ -545,7 +550,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.WriteUInt32(IdCount);
             Writer.AlignArray(IdCount, 8);
             for (uint i = 0; i < IdCount; i++)
-                Writer.WriteUInt64(NextId++);
+                Writer.WriteUInt64(NextObjectId());
 
             Writer.WriteUInt32(IdCount);
             Writer.WriteUInt32(0);
@@ -627,6 +632,24 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return Count <= MaximumIds;
         }
 
+        // NT: rpcss keeps the first AppID a process gives (CProcess::SetAppID).
+        private static byte[] SetAppId(ReadOnlySpan<byte> Stub)
+        {
+            Ndr20Reader Reader = new Ndr20Reader(Stub);
+            if (!Reader.TryReadContextHandle(out _) || !Reader.TryReadGuid(out Guid AppId))
+                return null;
+
+            uint Status = OrOk;
+            if (ProcessAppId != Guid.Empty)
+                Status = RpcETooLate;
+            else
+                ProcessAppId = AppId;
+
+            Ndr20Writer Writer = new Ndr20Writer(8);
+            Writer.WriteUInt32(Status);
+            return Writer.ToArray();
+        }
+
         private static byte[] AllocateReservedIds(ReadOnlySpan<byte> Stub)
         {
             if (!TryReadIdCount(Stub, out uint Count))
@@ -653,13 +676,16 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return ServerOxids.ContainsKey(Oxid) ? BuildNewIds(Count, Count, OrOk) : BuildNewIds(Count, 0, OrBadOxid);
         }
 
+        // NT: rpcss is one per machine, so an OXID or OID never names objects of two processes.
+        private static ulong NextObjectId() => SessionIds.Next(SessionIdKind.ObjectExporter);
+
         private static byte[] BuildNewIds(uint Size, uint Allocated, uint Status)
         {
             Ndr20Writer Writer = new Ndr20Writer(32 + (int)Size * 8);
             Writer.WriteUInt32(Size);
             Writer.AlignArray(Size, 8);
             for (uint i = 0; i < Allocated; i++)
-                Writer.WriteUInt64(NextId++);
+                Writer.WriteUInt64(NextObjectId());
 
             Writer.WriteZeros((int)(Size - Allocated) * sizeof(ulong));
             Writer.WriteUInt32(Allocated);
@@ -691,12 +717,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             if (PrimaryOxid == 0)
             {
-                PrimaryOxid = NextId++;
+                PrimaryOxid = NextObjectId();
                 ServerOxids[PrimaryOxid] = Primary;
             }
 
             Ndr20Writer Writer = new Ndr20Writer(64 + (int)Count * 8);
-            ulong Oxid = NextId++;
+            ulong Oxid = NextObjectId();
             ServerOxids[Oxid] = Server;
             Writer.WriteUInt64(Oxid);
             Writer.WriteUInt64(PrimaryOxid);
@@ -706,7 +732,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.WriteUInt32(Count);
             Writer.AlignArray(Count, 8);
             for (uint i = 0; i < Count; i++)
-                Writer.WriteUInt64(NextId++);
+                Writer.WriteUInt64(NextObjectId());
 
             Writer.WriteUInt32(Count);
             Writer.WriteUInt64(0);

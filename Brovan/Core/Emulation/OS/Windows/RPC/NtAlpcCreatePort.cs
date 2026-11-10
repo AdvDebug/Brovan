@@ -33,7 +33,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinPort Created = AlpcMessaging.CreateConnectionPort(PortName, PortFlags);
             if (PortName.Length != 0)
+            {
+                NTSTATUS PublishStatus = AlpcMessaging.Publish(Instance, Created);
+                if (PublishStatus != NTSTATUS.STATUS_SUCCESS)
+                    return PublishStatus;
+
                 Instance.WinHelper.WinPorts.Add(Created);
+            }
 
             WinHandle Handle = Instance.WinHelper.OpenObjectHandle(Created, AccessMask.StandardRightsAll);
 

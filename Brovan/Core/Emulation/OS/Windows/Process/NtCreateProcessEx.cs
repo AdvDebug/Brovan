@@ -48,38 +48,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Parent;
         }
 
-        private static WinToken CloneToken(WinToken Source, uint NewOwningProcessId)
-        {
-            if (Source == null)
-            {
-                return new WinToken
-                {
-                    Type = TokenType.Primary,
-                    SessionId = WinToken.InteractiveSessionId,
-                    IsElevated = false,
-                    IsRestricted = false,
-                    EffectiveOnly = false,
-                    ImpersonationLevel = SecurityImpersonationLevel.SecurityImpersonation,
-                    OwningProcessId = NewOwningProcessId,
-                    OwningThreadId = 0
-                };
-            }
-
-            WinToken Clone = new WinToken
-            {
-                Type = TokenType.Primary,
-                SessionId = Source.SessionId,
-                IsElevated = Source.IsElevated,
-                IsRestricted = Source.IsRestricted,
-                EffectiveOnly = Source.EffectiveOnly,
-                ImpersonationLevel = Source.ImpersonationLevel,
-                OwningProcessId = NewOwningProcessId,
-                OwningThreadId = 0
-            };
-            Clone.CopyIdentityFrom(Source);
-            return Clone;
-        }
-
         private static void ApplySectionIdentity(WinProcess Process, WinSection Section)
         {
             if (Process == null || Section == null)
@@ -157,16 +125,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DebugPort != 0 && !Instance.WinHelper.HandleExists(DebugPort, HandleType.PortHandle))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            WinToken TokenSource = null;
-            if (TokenHandle != 0)
-            {
-                if (!Instance.WinHelper.HandleExists(TokenHandle, HandleType.TokenHandle))
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-
-                TokenSource = Instance.WinHelper.HandleManager.GetObjectByHandle<WinToken>(TokenHandle);
-                if (TokenSource == null)
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-            }
+            NTSTATUS TokenStatus = GuestProcessLauncher.ResolveLaunchToken(Instance, TokenHandle, ParentProcess, out WinToken Launch);
+            if (TokenStatus != NTSTATUS.STATUS_SUCCESS)
+                return TokenStatus;
 
             WinProcess CreatedProcess = new WinProcess
             {
@@ -176,14 +137,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 PPID = ParentProcess.PID,
                 Name = ParentProcess.Name,
                 Path = ParentProcess.Path,
-                RunningUser = ParentProcess.RunningUser,
                 InstrumentationCallback = ParentProcess.InstrumentationCallback,
                 Threadless = true
             };
 
             uint NewPID = Instance.WinHelper.GenerateRandomPID();
             CreatedProcess.PID = NewPID;
-            CreatedProcess.PrimaryToken = CloneToken(TokenSource ?? ParentProcess.PrimaryToken, NewPID);
+            CreatedProcess.PrimaryToken = Launch.AssignPrimary(NewPID);
 
             if (Section != null)
             {

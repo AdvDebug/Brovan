@@ -35,11 +35,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (HasDescriptor && (SecurityInformation & (OwnerSecurityInformation | GroupSecurityInformation)) != 0)
             {
                 WinToken Token = Instance.WinHelper.OwnProcess.GetPrimaryToken();
-                WinProcess TokenOwner = OwnerOf(Instance, Token);
                 if ((SecurityInformation & OwnerSecurityInformation) != 0)
-                    Owner = UserSidOf(Token, TokenOwner);
+                    Owner = UserSidOf(Token);
                 if ((SecurityInformation & GroupSecurityInformation) != 0)
-                    Group = PrimaryGroupOf(Token, TokenOwner);
+                    Group = PrimaryGroupOf(Token);
             }
 
             // NT places the owner and then the group after the header (SeQuerySecurityDescriptorInfo).

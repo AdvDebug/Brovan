@@ -23,13 +23,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(PortName))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            WinPort Port = NtConnectPort.FindPortForOpen(Instance, PortName);
+            WinPort Port = FindPort(Instance, PortName);
             if (Port == null)
             {
                 Port = new WinPort
                 {
                     Name = PortName,
-                    Handler = CsrssPortHandler.Handle
+                    Handler = CsrssPortHandler.Handle,
+                    Fallback = true,
                 };
                 Instance.WinHelper.WinPorts.Add(Port);
             }
@@ -37,10 +38,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Connect(Instance, PortHandlePtr, Port);
         }
 
+        internal static WinPort FindPort(BinaryEmulator Instance, string PortName)
+        {
+            WinPort Port = NtConnectPort.FindPortForOpen(Instance, PortName);
+            return Port == null || Port.Fallback ? AlpcMessaging.FindSessionPort(Instance, PortName) ?? Port : Port;
+        }
+
         // NtAlpcConnectPort and NtAlpcConnectPortEx share the arguments in slots 3, 4, 6, 7 and 10.
         internal static NTSTATUS Connect(BinaryEmulator Instance, ulong PortHandlePtr, WinPort Port)
         {
-            if (Port.IsServer)
+            if (Port.IsServer || Port.IsRemote)
                 return AlpcMessaging.ConnectGuest(Instance, Port, PortHandlePtr, Instance.WinHelper.GetArg(3), (uint)Instance.WinHelper.GetArg(4), Instance.WinHelper.GetArg(6), Instance.WinHelper.GetArg(7), Instance.WinHelper.GetArg(10));
 
             if (CsrssPortHandler.QueuesAnswers(Port) && ((uint)Instance.WinHelper.GetArg(4) & AlpcMessaging.SyncRequestFlag) == 0)

@@ -11,6 +11,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         Buffer = 2,
         Reference = 4,
         CallbackId = 8,
+        Float = 16,
     }
 
     // A slot in BaseSlots answers as NT's CResourceMarshaler stub does, and any other slot is the type's own code.
@@ -38,6 +39,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal virtual NTSTATUS SetReference(uint Property, CompositionResource Target) => BaseAnswer(CompositionSlots.Reference, NTSTATUS.STATUS_INVALID_PARAMETER);
 
         internal virtual NTSTATUS SetCallbackId(uint Id) => BaseAnswer(CompositionSlots.CallbackId, NTSTATUS.STATUS_NOT_SUPPORTED);
+
+        // NT's base SetFloatProperty answers from a per-type property table, so no type has Float in BaseSlots.
+        internal virtual NTSTATUS SetFloat(uint Property, float Value) => Unserved;
 
         internal virtual CompositionVisual AsVisual => null;
 
@@ -87,6 +91,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             CompositionClass.ColorBrush => new CompositionColorBrush(Type, Channel),
             CompositionClass.ComponentTransform3D => new CompositionComponentTransform3D(Type, Channel),
             CompositionClass.Visual => new CompositionVisual(Type, Channel),
+            CompositionClass.SurfaceBrush => new CompositionSurfaceBrush(Type, Channel),
             _ => null
         };
     }

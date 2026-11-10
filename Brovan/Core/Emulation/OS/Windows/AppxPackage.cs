@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Formats.Asn1;
 using System.IO;
 using System.Security.Cryptography;
@@ -84,10 +85,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public List<AppxPackage> Graph;
         public bool IsAppContainer;
         public byte[] AppContainerSid;
-        public byte[][] CapabilitySids;
+        public ImmutableArray<ImmutableArray<byte>> CapabilitySids = ImmutableArray<ImmutableArray<byte>>.Empty;
         public string LoaderSearchPath;
         public byte[] DependencyMiniRepository;
-        public WinTokenSecurityAttribute[] SecurityAttributes;
+        public ImmutableArray<WinTokenSecurityAttribute> SecurityAttributes = ImmutableArray<WinTokenSecurityAttribute>.Empty;
         public ulong HostId;
     }
 
@@ -120,7 +121,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong ClaimPackagedApplication = 0x1;
         private const ulong ClaimFullTrust = 0x4;
         private const ulong ClaimAppContainer = 0x10;
-        private const ulong PackageHostIdBase = 0x1000000000000000;
+
+        // Brovan gives one AppContainer number to every AppContainer of the session.
+        private const uint FirstLowBoxNumber = 1;
 
         private const uint TargetPlatformUniversal = 0;
         private const uint TargetPlatformDesktop = 3;
@@ -199,17 +202,44 @@ namespace Brovan.Core.Emulation.OS.Windows
             "sharedUserCertificates", "removableStorage",
         };
 
-        private static long PackageHostSequence;
 
-        internal static AppxProcessIdentity TryCreate(BinaryEmulator Instance, WinSysHelper Helper, string GuestImagePath)
+        internal static AppxProcessIdentity TryCreate(BinaryEmulator Instance, WinSysHelper Helper, string GuestImagePath, WinToken Base, out WinToken PackageToken)
         {
-            if (string.IsNullOrEmpty(GuestImagePath))
+            PackageToken = null;
+            if (!TryFindByImage(Instance, GuestImagePath, out AppxPackage Package, out AppxApplication Application))
                 return null;
+
+            bool AppContainer = !Application.IsFullTrust;
+            PackageToken = BuildPackageToken(Base, Package, Application.Id, Application.SupportsMultipleInstances, AppContainer,
+                ClaimPackagedApplication | (AppContainer ? ClaimAppContainer : ClaimFullTrust), 0, SessionIds.Next(SessionIdKind.PackageHost));
+            return TryBuildIdentity(Instance, Package, Application, PackageToken, EnumerateInstalledPackages(Helper));
+        }
+
+        internal static AppxProcessIdentity TryCreateFromToken(BinaryEmulator Instance, WinSysHelper Helper, WinToken Token)
+        {
+            if (Token.FindAttribute(WinTokenSecurityAttribute.SysAppIdName) is not { StringValues.Length: >= 2 } AppId)
+                return null;
+
+            string FullName = AppId.StringValues[0];
+            string ApplicationId = AppId.StringValues[1];
+            List<InstalledPackage> Installed = EnumerateInstalledPackages(Helper);
+            if (!TryFindByFullName(Instance, Installed, FullName, out AppxPackage Package))
+                return null;
+
+            // A broker runs with an application id that the manifest does not declare.
+            AppxApplication Application = Package.Applications.Find(App => string.Equals(App.Id, ApplicationId, StringComparison.OrdinalIgnoreCase));
+            return TryBuildIdentity(Instance, Package, Application, Token, Installed);
+        }
+
+        private static bool TryFindByImage(BinaryEmulator Instance, string GuestImagePath, out AppxPackage Package, out AppxApplication Application)
+        {
+            Package = null;
+            Application = null;
+            if (string.IsNullOrEmpty(GuestImagePath))
+                return false;
 
             string ImagePath = GuestImagePath.Replace('/', '\\');
             string PackageRoot = GeneralHelper.IO.GetWindowsDirectoryName(ImagePath);
-            AppxPackage Package = null;
-            AppxApplication Application = null;
 
             for (int Depth = 0; Depth < MaxManifestSearchDepth && !string.IsNullOrEmpty(PackageRoot); Depth++)
             {
@@ -218,7 +248,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     Package = ParseManifest(Instance, Manifest, ManifestPath);
                     if (Package == null)
-                        return null;
+                        return false;
 
                     string Relative = ImagePath.Substring(PackageRoot.TrimEnd('\\').Length).TrimStart('\\');
                     Application = Package.Applications.Find(App =>
@@ -234,36 +264,68 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             if (Package == null)
-                return null;
+                return false;
 
             if (Application == null)
             {
                 Instance.TriggerEventMessage($"[-] AppX: {Package.FullName} declares no application for \"{ImagePath}\", running without package identity.", LogFlags.Issues);
-                return null;
+                return false;
             }
 
             if (Package.IsFramework || Package.IsResource)
             {
                 Instance.TriggerEventMessage($"[-] AppX: {Package.FullName} is not a main package.", LogFlags.Issues);
-                return null;
+                return false;
             }
 
-            List<InstalledPackage> Installed = EnumerateInstalledPackages(Helper);
             Package.InstallPath = PackageRoot.TrimEnd('\\');
             Package.Origin = DetermineOrigin(Instance, Package.InstallPath);
+            return true;
+        }
 
+        private static bool TryFindByFullName(BinaryEmulator Instance, List<InstalledPackage> Installed, string FullName, out AppxPackage Package)
+        {
+            Package = null;
+            foreach (InstalledPackage Candidate in Installed)
+            {
+                if (!string.Equals(Candidate.FullName, FullName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!TryReadHostFile(Candidate.ManifestPath, MaxManifestBytes, out byte[] Manifest))
+                    break;
+
+                Package = ParseManifest(Instance, Manifest, Candidate.ManifestPath);
+                if (Package == null)
+                    return false;
+
+                Package.InstallPath = GeneralHelper.IO.GetWindowsDirectoryName(Candidate.ManifestPath).TrimEnd('\\');
+                Package.Origin = DetermineOrigin(Instance, Package.InstallPath);
+                return true;
+            }
+
+            Instance.TriggerEventMessage($"[-] AppX: {FullName} is not installed.", LogFlags.Issues);
+            return false;
+        }
+
+        private static AppxProcessIdentity TryBuildIdentity(BinaryEmulator Instance, AppxPackage Package, AppxApplication Application, WinToken Token,
+            List<InstalledPackage> Installed)
+        {
             string ProcessArchitecture = Instance._binary.Architecture == BinaryArchitecture.x64 ? "x64" : "x86";
             List<AppxPackage> Graph = ResolveGraph(Instance, Package, ProcessArchitecture, Installed);
             if (Graph == null)
                 return null;
 
+            ulong HostId = Token.FindAttribute(WinTokenSecurityAttribute.PackageHostIdName) is { UInt64Values.Length: 1 } Host ? Host.UInt64Values[0] : 0;
             AppxProcessIdentity Identity = new AppxProcessIdentity
             {
                 Package = Package,
                 Application = Application,
                 Graph = Graph,
-                IsAppContainer = !Application.IsFullTrust,
+                IsAppContainer = Token.IsAppContainer,
                 AppContainerSid = DeriveAppContainerSid(Package.FamilyName),
+                CapabilitySids = Token.CapabilitySids,
+                SecurityAttributes = Token.SecurityAttributes,
+                HostId = HostId,
             };
 
             List<uint> Flags = new List<uint>(Graph.Count);
@@ -271,15 +333,22 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Flags.Add(GetGraphFlags(Graph[Index], Index == 0));
 
             Identity.LoaderSearchPath = BuildLoaderSearchPath(Graph, Flags, Graph.Count);
-            Identity.CapabilitySids = Identity.IsAppContainer ? BuildCapabilitySids(Package, Identity.AppContainerSid) : Array.Empty<byte[]>();
-            Identity.HostId = PackageHostIdBase | (ulong)System.Threading.Interlocked.Increment(ref PackageHostSequence);
-            Identity.SecurityAttributes = BuildSecurityAttributes(Package, Application, Identity.IsAppContainer, Identity.HostId);
             Identity.DependencyMiniRepository = BuildDependencyMiniRepository(Identity, Flags);
 
             if ((Instance.Settings.Flags & LogFlags.General) != 0)
-                Instance.TriggerEventMessage($"[+] AppX: {Package.FamilyName}!{Application.Id}, {Graph.Count} package(s) in the graph, {(Identity.IsAppContainer ? "AppContainer" : "full trust")}, origin {Package.Origin}.", LogFlags.General);
+                Instance.TriggerEventMessage($"[+] AppX: {Package.FamilyName}!{Application?.Id}, {Graph.Count} package(s) in the graph, {(Identity.IsAppContainer ? "AppContainer" : "full trust")}, origin {Package.Origin}.", LogFlags.General);
 
             return Identity;
+        }
+
+        internal static WinToken BuildPackageToken(WinToken Base, AppxPackage Package, string ApplicationId, bool MultipleInstances, bool IsAppContainer,
+            ulong PackageClaims, uint ClaimFlags, ulong HostId)
+        {
+            byte[] ContainerSid = DeriveAppContainerSid(Package.FamilyName);
+            ImmutableArray<byte> AppContainer = IsAppContainer ? ImmutableArray.Create(ContainerSid) : default;
+            ImmutableArray<ImmutableArray<byte>> Capabilities = IsAppContainer ? BuildCapabilitySids(Package, ContainerSid) : ImmutableArray<ImmutableArray<byte>>.Empty;
+            return Base.WithPackageIdentity(BuildSecurityAttributes(Package, ApplicationId, MultipleInstances, PackageClaims, ClaimFlags, HostId),
+                AppContainer, FirstLowBoxNumber, Capabilities);
         }
 
         internal static void PublishRegistration(BinaryEmulator Instance, WinSysHelper Helper, AppxProcessIdentity Identity)
@@ -1196,37 +1265,38 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Builder.ToString();
         }
 
-        private static byte[][] BuildCapabilitySids(AppxPackage Package, byte[] AppContainerSid)
+        private static ImmutableArray<ImmutableArray<byte>> BuildCapabilitySids(AppxPackage Package, byte[] AppContainerSid)
         {
-            List<byte[]> Sids = new List<byte[]>(Package.Capabilities.Count + 1);
+            ImmutableArray<ImmutableArray<byte>>.Builder Sids = ImmutableArray.CreateBuilder<ImmutableArray<byte>>(Package.Capabilities.Count + 1);
             HashSet<string> Seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             foreach (string Capability in Package.Capabilities)
             {
                 if (Seen.Add(Capability))
-                    Sids.Add(DeriveCapabilitySid(Capability));
+                    Sids.Add(ImmutableArray.Create(DeriveCapabilitySid(Capability)));
             }
 
             byte[] PackageCapability = (byte[])AppContainerSid.Clone();
             BinaryPrimitives.WriteUInt32LittleEndian(PackageCapability.AsSpan(NtQueryInformationToken.SidLength(0)), NtQueryInformationToken.AppCapabilityBaseRid);
-            Sids.Add(PackageCapability);
-            return Sids.ToArray();
+            Sids.Add(ImmutableArray.Create(PackageCapability));
+            return Sids.ToImmutable();
         }
 
-        private static WinTokenSecurityAttribute[] BuildSecurityAttributes(AppxPackage Package, AppxApplication Application, bool IsAppContainer, ulong HostId)
+        private static ImmutableArray<WinTokenSecurityAttribute> BuildSecurityAttributes(AppxPackage Package, string ApplicationId, bool MultipleInstances,
+            ulong PackageClaims, uint ClaimFlags, ulong HostId)
         {
-            List<string> AppIdentity = new List<string> { Package.FullName, Application.Id, Package.FamilyName };
-            if (Application.SupportsMultipleInstances)
+            List<string> AppIdentity = new List<string> { Package.FullName, ApplicationId, Package.FamilyName };
+            if (MultipleInstances)
                 AppIdentity.Add(Guid.NewGuid().ToString("B"));
 
-            ulong Claims = ((ulong)Package.Origin << 32) | ClaimPackagedApplication | (IsAppContainer ? ClaimAppContainer : ClaimFullTrust);
+            ulong Claims = ((ulong)Package.Origin << 32) | PackageClaims;
 
-            return new[]
-            {
-                new WinTokenSecurityAttribute { Name = WinTokenSecurityAttribute.SysAppIdName, ValueType = WinTokenSecurityAttribute.TypeString, StringValues = AppIdentity.ToArray() },
-                new WinTokenSecurityAttribute { Name = WinTokenSecurityAttribute.PackageClaimsName, ValueType = WinTokenSecurityAttribute.TypeUInt64, UInt64Values = new[] { Claims } },
-                new WinTokenSecurityAttribute { Name = WinTokenSecurityAttribute.PackageHostIdName, ValueType = WinTokenSecurityAttribute.TypeUInt64, UInt64Values = new[] { HostId } },
-            };
+            ImmutableArray<WinTokenSecurityAttribute>.Builder Attributes = ImmutableArray.CreateBuilder<WinTokenSecurityAttribute>(3);
+            Attributes.Add(new WinTokenSecurityAttribute { Name = WinTokenSecurityAttribute.SysAppIdName, ValueType = WinTokenSecurityAttribute.TypeString, Flags = ClaimFlags, StringValues = AppIdentity.ToImmutableArray() });
+            Attributes.Add(new WinTokenSecurityAttribute { Name = WinTokenSecurityAttribute.PackageClaimsName, ValueType = WinTokenSecurityAttribute.TypeUInt64, Flags = ClaimFlags, UInt64Values = ImmutableArray.Create(Claims) });
+            if (HostId != 0)
+                Attributes.Add(new WinTokenSecurityAttribute { Name = WinTokenSecurityAttribute.PackageHostIdName, ValueType = WinTokenSecurityAttribute.TypeUInt64, Flags = ClaimFlags, UInt64Values = ImmutableArray.Create(HostId) });
+            return Attributes.ToImmutable();
         }
 
         internal static string DerivePublisherId(string Publisher)

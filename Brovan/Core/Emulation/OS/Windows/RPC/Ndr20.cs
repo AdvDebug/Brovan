@@ -313,7 +313,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         {
             Sid = default;
             return TryReadUInt32(out uint SubAuthorityCount) && SubAuthorityCount <= NtQueryInformationToken.MaxSubAuthorities
-                && TryReadBytes(NtQueryInformationToken.SidLength((int)SubAuthorityCount), out Sid) && Sid[1] == SubAuthorityCount;
+                && TryReadBytes(NtQueryInformationToken.SidLength((int)SubAuthorityCount), out Sid) && Sid[1] == SubAuthorityCount
+                && NtQueryInformationToken.IsValidSid(Sid);
         }
 
         public bool TryReadGuid(out Guid Value)

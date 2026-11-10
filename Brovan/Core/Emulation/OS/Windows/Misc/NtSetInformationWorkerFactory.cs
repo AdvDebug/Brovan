@@ -115,6 +115,25 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_SUCCESS;
                     }
 
+                case WORKERFACTORYINFOCLASS.WorkerFactoryStackInformation:
+                    {
+                        int PointerSize = Instance.WinHelper.PointerSize;
+                        if (WorkerFactoryInformationLength != 2 * PointerSize)
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                        Span<byte> Stack = stackalloc byte[16];
+                        Stack = Stack.Slice(0, 2 * PointerSize);
+                        if (!Instance.ReadMemory(WorkerFactoryInformation, Stack))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                        if (Factory.Shutdown)
+                            return NTSTATUS.STATUS_ABANDONED;
+
+                        Factory.StackReserve = WinSysHelper.ReadPointerField(Stack, 0, (uint)PointerSize);
+                        Factory.StackCommit = WinSysHelper.ReadPointerField(Stack, 1, (uint)PointerSize);
+                        return NTSTATUS.STATUS_SUCCESS;
+                    }
+
                 default:
                     {
                         if (WorkerFactoryInformationLength == 0)

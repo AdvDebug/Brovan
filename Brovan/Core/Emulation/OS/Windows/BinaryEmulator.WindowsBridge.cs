@@ -1388,8 +1388,6 @@ namespace Brovan.Core.Emulation
             return false;
         }
 
-        internal bool HasFinishedHostIo() => WinHelper != null && WinHelper.AfdConnects.HasFinished;
-
         internal bool HasActiveGetMessageWait()
         {
             for (int i = 0; i < WakeScanList.Count; i++)

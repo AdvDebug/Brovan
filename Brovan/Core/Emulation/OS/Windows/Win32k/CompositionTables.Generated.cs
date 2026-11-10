@@ -96,6 +96,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         SetBuffer,
         SetReference,
         SetVisualInputSink,
+        SetFloat,
     }
 
     internal enum CompositionClass : byte
@@ -105,6 +106,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         ColorBrush,
         ComponentTransform3D,
         Visual,
+        SurfaceBrush,
     }
 
     internal enum CompositionProperty : byte
@@ -125,12 +127,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private readonly uint[] PropertyIds;
         private readonly uint[] RequiredBases;
         private readonly (CompositionClass Class, CompositionSlots Setter, uint[] Properties)[] OwnProperties;
+        private readonly (CompositionClass Class, uint Property, int Bytes)[] Buffers;
 
         // NT: an opcode the kernel refuses has record size 0 and command None. Parents has one entry per type, and its
         // length is where the walk ends.
         private CompositionTableSet(byte[] RecordSizes, (int Opcode, CompositionCommand Command)[] Commands, byte[] Parents,
             (int Type, CompositionClass Class)[] Classes, (CompositionProperty Property, uint Id, uint Base)[] Properties,
-            (CompositionClass Class, CompositionSlots Setter, uint[] Properties)[] OwnProperties)
+            (CompositionClass Class, CompositionSlots Setter, uint[] Properties)[] OwnProperties,
+            (CompositionClass Class, uint Property, int Bytes)[] Buffers)
         {
             this.RecordSizes = RecordSizes;
             this.Commands = new CompositionCommand[RecordSizes.Length];
@@ -155,6 +159,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             this.OwnProperties = OwnProperties;
+            this.Buffers = Buffers;
         }
 
         internal uint Property(CompositionProperty Property) => PropertyIds[(int)Property];
@@ -172,6 +177,32 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return false;
         }
 
+        internal bool HasOwnProperties(CompositionClass Class, CompositionSlots Setter)
+        {
+            foreach ((CompositionClass OwnClass, CompositionSlots OwnSetter, uint[] _) in OwnProperties)
+            {
+                if (OwnClass == Class && OwnSetter == Setter)
+                    return true;
+            }
+
+            return false;
+        }
+
+        internal bool TryGetBufferBytes(CompositionClass Class, uint Property, out int Bytes)
+        {
+            foreach ((CompositionClass BufferClass, uint BufferProperty, int BufferBytes) in Buffers)
+            {
+                if (BufferClass == Class && BufferProperty == Property)
+                {
+                    Bytes = BufferBytes;
+                    return true;
+                }
+            }
+
+            Bytes = 0;
+            return false;
+        }
+
         private static readonly CompositionTableSet Set22621_1252 = new(
             new byte[] { 24, 16, 24, 8, 24, 24, 16, 12, 24, 16, 24, 16, 16, 16, 16, 16, 16, 20, 72, 16, 12 },
             new[]
@@ -180,6 +211,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (3, CompositionCommand.ReleaseResource),
                 (7, CompositionCommand.SetCallbackId),
                 (8, CompositionCommand.SetInteger),
+                (9, CompositionCommand.SetFloat),
                 (12, CompositionCommand.SetBuffer),
                 (13, CompositionCommand.SetReference),
                 (19, CompositionCommand.SetVisualInputSink),
@@ -206,6 +238,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (0xF, CompositionClass.BlurredWallpaperBackdropBrush),
                 (0x16, CompositionClass.ColorBrush),
                 (0x1E, CompositionClass.ComponentTransform3D),
+                (0xB5, CompositionClass.SurfaceBrush),
                 (0xC4, CompositionClass.Visual),
                 (0xCB, CompositionClass.BlurredWallpaperBackdropBrush),
             },
@@ -220,6 +253,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     new uint[] { 0x7, 0x8, 0x9, 0xD, 0xF, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x1A, 0x24, 0x25, 0x28, 0x29, 0x2A, 0x2B, 0x30, 0x33 }),
                 (CompositionClass.Visual, CompositionSlots.Reference,
                     new uint[] { 0x3, 0x4, 0x5, 0x6, 0xA, 0x16, 0x26, 0x27, 0x31 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Integer,
+                    new uint[] { 0x4, 0x5 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Reference,
+                    new uint[] { 0x0, 0x6 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Float,
+                    new uint[] { 0x2, 0x3 }),
+            },
+            new (CompositionClass, uint, int)[]
+            {
+                (CompositionClass.SurfaceBrush, 0x1u, 16),
+                (CompositionClass.SurfaceBrush, 0x7u, 1),
+                (CompositionClass.SurfaceBrush, 0x8u, 1),
             });
 
         private static readonly CompositionTableSet Set26100_1 = new(
@@ -230,6 +275,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (4, CompositionCommand.ReleaseResource),
                 (10, CompositionCommand.SetCallbackId),
                 (11, CompositionCommand.SetInteger),
+                (12, CompositionCommand.SetFloat),
                 (15, CompositionCommand.SetBuffer),
                 (16, CompositionCommand.SetReference),
                 (22, CompositionCommand.SetVisualInputSink),
@@ -255,6 +301,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (0xF, CompositionClass.BlurredWallpaperBackdropBrush),
                 (0x16, CompositionClass.ColorBrush),
                 (0x1E, CompositionClass.ComponentTransform3D),
+                (0xA6, CompositionClass.SurfaceBrush),
                 (0xB5, CompositionClass.Visual),
                 (0xBC, CompositionClass.BlurredWallpaperBackdropBrush),
             },
@@ -269,6 +316,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     new uint[] { 0x8, 0x9, 0xA, 0xE, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x1B, 0x25, 0x26, 0x29, 0x2A, 0x2B, 0x30, 0x33 }),
                 (CompositionClass.Visual, CompositionSlots.Reference,
                     new uint[] { 0x4, 0x5, 0x6, 0x7, 0xB, 0x17, 0x27, 0x28, 0x31 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Integer,
+                    new uint[] { 0x5, 0x6 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Reference,
+                    new uint[] { 0x0, 0x7 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Float,
+                    new uint[] { 0x3, 0x4 }),
+            },
+            new (CompositionClass, uint, int)[]
+            {
+                (CompositionClass.SurfaceBrush, 0x1u, 16),
+                (CompositionClass.SurfaceBrush, 0x2u, 16),
+                (CompositionClass.SurfaceBrush, 0x8u, 1),
+                (CompositionClass.SurfaceBrush, 0x9u, 1),
             });
 
         private static readonly CompositionTableSet Set26100_2454 = new(
@@ -279,6 +339,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (4, CompositionCommand.ReleaseResource),
                 (10, CompositionCommand.SetCallbackId),
                 (11, CompositionCommand.SetInteger),
+                (12, CompositionCommand.SetFloat),
                 (15, CompositionCommand.SetBuffer),
                 (16, CompositionCommand.SetReference),
                 (22, CompositionCommand.SetVisualInputSink),
@@ -304,6 +365,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (0xF, CompositionClass.BlurredWallpaperBackdropBrush),
                 (0x16, CompositionClass.ColorBrush),
                 (0x1E, CompositionClass.ComponentTransform3D),
+                (0xA7, CompositionClass.SurfaceBrush),
                 (0xB6, CompositionClass.Visual),
                 (0xBD, CompositionClass.BlurredWallpaperBackdropBrush),
             },
@@ -318,6 +380,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     new uint[] { 0x8, 0x9, 0xA, 0xE, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x1B, 0x25, 0x26, 0x29, 0x2A, 0x2B, 0x30, 0x33 }),
                 (CompositionClass.Visual, CompositionSlots.Reference,
                     new uint[] { 0x4, 0x5, 0x6, 0x7, 0xB, 0x17, 0x27, 0x28, 0x31 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Integer,
+                    new uint[] { 0x5, 0x6 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Reference,
+                    new uint[] { 0x0, 0x7 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Float,
+                    new uint[] { 0x3, 0x4 }),
+            },
+            new (CompositionClass, uint, int)[]
+            {
+                (CompositionClass.SurfaceBrush, 0x1u, 16),
+                (CompositionClass.SurfaceBrush, 0x2u, 16),
+                (CompositionClass.SurfaceBrush, 0x8u, 1),
+                (CompositionClass.SurfaceBrush, 0x9u, 1),
             });
 
         private static readonly CompositionTableSet Set26100_3323 = new(
@@ -328,6 +403,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (4, CompositionCommand.ReleaseResource),
                 (10, CompositionCommand.SetCallbackId),
                 (11, CompositionCommand.SetInteger),
+                (12, CompositionCommand.SetFloat),
                 (15, CompositionCommand.SetBuffer),
                 (16, CompositionCommand.SetReference),
                 (22, CompositionCommand.SetVisualInputSink),
@@ -353,6 +429,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (0xF, CompositionClass.BlurredWallpaperBackdropBrush),
                 (0x16, CompositionClass.ColorBrush),
                 (0x1E, CompositionClass.ComponentTransform3D),
+                (0xA7, CompositionClass.SurfaceBrush),
                 (0xB6, CompositionClass.Visual),
                 (0xBD, CompositionClass.BlurredWallpaperBackdropBrush),
             },
@@ -367,6 +444,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     new uint[] { 0x8, 0x9, 0xA, 0xE, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x1B, 0x25, 0x26, 0x29, 0x2A, 0x2B, 0x30, 0x33 }),
                 (CompositionClass.Visual, CompositionSlots.Reference,
                     new uint[] { 0x4, 0x5, 0x6, 0x7, 0xB, 0x17, 0x27, 0x28, 0x31 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Integer,
+                    new uint[] { 0x5, 0x6 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Reference,
+                    new uint[] { 0x0, 0x7 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Float,
+                    new uint[] { 0x3, 0x4 }),
+            },
+            new (CompositionClass, uint, int)[]
+            {
+                (CompositionClass.SurfaceBrush, 0x1u, 16),
+                (CompositionClass.SurfaceBrush, 0x2u, 16),
+                (CompositionClass.SurfaceBrush, 0x8u, 1),
+                (CompositionClass.SurfaceBrush, 0x9u, 1),
             });
 
         private static readonly CompositionTableSet Set26100_7705 = new(
@@ -377,6 +467,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (4, CompositionCommand.ReleaseResource),
                 (10, CompositionCommand.SetCallbackId),
                 (11, CompositionCommand.SetInteger),
+                (12, CompositionCommand.SetFloat),
                 (15, CompositionCommand.SetBuffer),
                 (16, CompositionCommand.SetReference),
                 (22, CompositionCommand.SetVisualInputSink),
@@ -403,6 +494,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (0xF, CompositionClass.BlurredWallpaperBackdropBrush),
                 (0x16, CompositionClass.ColorBrush),
                 (0x1E, CompositionClass.ComponentTransform3D),
+                (0xA9, CompositionClass.SurfaceBrush),
                 (0xB8, CompositionClass.Visual),
                 (0xBF, CompositionClass.BlurredWallpaperBackdropBrush),
             },
@@ -417,6 +509,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     new uint[] { 0x8, 0x9, 0xA, 0xE, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x1B, 0x25, 0x26, 0x29, 0x2A, 0x2B, 0x30, 0x33 }),
                 (CompositionClass.Visual, CompositionSlots.Reference,
                     new uint[] { 0x4, 0x5, 0x6, 0x7, 0xB, 0x17, 0x27, 0x28, 0x31 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Integer,
+                    new uint[] { 0x5, 0x6 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Reference,
+                    new uint[] { 0x0, 0x7 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Float,
+                    new uint[] { 0x3, 0x4 }),
+            },
+            new (CompositionClass, uint, int)[]
+            {
+                (CompositionClass.SurfaceBrush, 0x1u, 16),
+                (CompositionClass.SurfaceBrush, 0x2u, 16),
+                (CompositionClass.SurfaceBrush, 0x8u, 1),
+                (CompositionClass.SurfaceBrush, 0x9u, 1),
             });
 
         private static readonly CompositionTableSet Set26100_8972 = new(
@@ -427,6 +532,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (4, CompositionCommand.ReleaseResource),
                 (10, CompositionCommand.SetCallbackId),
                 (11, CompositionCommand.SetInteger),
+                (12, CompositionCommand.SetFloat),
                 (15, CompositionCommand.SetBuffer),
                 (16, CompositionCommand.SetReference),
                 (22, CompositionCommand.SetVisualInputSink),
@@ -452,6 +558,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (0xF, CompositionClass.BlurredWallpaperBackdropBrush),
                 (0x16, CompositionClass.ColorBrush),
                 (0x1E, CompositionClass.ComponentTransform3D),
+                (0xA7, CompositionClass.SurfaceBrush),
                 (0xB4, CompositionClass.Visual),
                 (0xBB, CompositionClass.BlurredWallpaperBackdropBrush),
             },
@@ -466,6 +573,19 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     new uint[] { 0x8, 0x9, 0xA, 0xE, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x1B, 0x25, 0x26, 0x29, 0x2A, 0x2B, 0x30, 0x33 }),
                 (CompositionClass.Visual, CompositionSlots.Reference,
                     new uint[] { 0x4, 0x5, 0x6, 0x7, 0xB, 0x17, 0x27, 0x28, 0x31 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Integer,
+                    new uint[] { 0x5, 0x6 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Reference,
+                    new uint[] { 0x0, 0x7 }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Float,
+                    new uint[] { 0x3, 0x4 }),
+            },
+            new (CompositionClass, uint, int)[]
+            {
+                (CompositionClass.SurfaceBrush, 0x1u, 16),
+                (CompositionClass.SurfaceBrush, 0x2u, 16),
+                (CompositionClass.SurfaceBrush, 0x8u, 1),
+                (CompositionClass.SurfaceBrush, 0x9u, 1),
             });
 
         private static readonly CompositionTableSet Set28000_2113 = new(
@@ -476,6 +596,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (4, CompositionCommand.ReleaseResource),
                 (10, CompositionCommand.SetCallbackId),
                 (11, CompositionCommand.SetInteger),
+                (12, CompositionCommand.SetFloat),
                 (15, CompositionCommand.SetBuffer),
                 (16, CompositionCommand.SetReference),
                 (22, CompositionCommand.SetVisualInputSink),
@@ -501,6 +622,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (0x13, CompositionClass.ColorBrush),
                 (0x19, CompositionClass.ComponentTransform3D),
                 (0x3C, CompositionClass.BlurredWallpaperBackdropBrush),
+                (0x8E, CompositionClass.SurfaceBrush),
                 (0x9C, CompositionClass.Visual),
                 (0xA3, CompositionClass.BlurredWallpaperBackdropBrush),
             },
@@ -515,6 +637,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     new uint[] { 0x8, 0x9, 0xA, 0xE, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x1B, 0x25, 0x26, 0x29, 0x2A, 0x2B, 0x2E, 0x31 }),
                 (CompositionClass.Visual, CompositionSlots.Reference,
                     new uint[] { 0x4, 0x5, 0x6, 0x7, 0xB, 0x17, 0x27, 0x28, 0x2F }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Integer,
+                    new uint[] { 0x0, 0x6, 0x7, 0x9, 0xA }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Reference,
+                    new uint[] { 0x2, 0x8 }),
+            },
+            new (CompositionClass, uint, int)[]
+            {
+                (CompositionClass.SurfaceBrush, 0x1u, 16),
+                (CompositionClass.SurfaceBrush, 0x3u, 16),
             });
 
         private static readonly CompositionTableSet Set28000_2525 = new(
@@ -525,6 +656,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (4, CompositionCommand.ReleaseResource),
                 (10, CompositionCommand.SetCallbackId),
                 (11, CompositionCommand.SetInteger),
+                (12, CompositionCommand.SetFloat),
                 (15, CompositionCommand.SetBuffer),
                 (16, CompositionCommand.SetReference),
                 (22, CompositionCommand.SetVisualInputSink),
@@ -550,6 +682,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (0x13, CompositionClass.ColorBrush),
                 (0x19, CompositionClass.ComponentTransform3D),
                 (0x3D, CompositionClass.BlurredWallpaperBackdropBrush),
+                (0x90, CompositionClass.SurfaceBrush),
                 (0x9E, CompositionClass.Visual),
                 (0xA5, CompositionClass.BlurredWallpaperBackdropBrush),
             },
@@ -564,6 +697,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     new uint[] { 0x8, 0x9, 0xA, 0xE, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x1B, 0x25, 0x26, 0x29, 0x2A, 0x2B, 0x2E, 0x31 }),
                 (CompositionClass.Visual, CompositionSlots.Reference,
                     new uint[] { 0x4, 0x5, 0x6, 0x7, 0xB, 0x17, 0x27, 0x28, 0x2F }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Integer,
+                    new uint[] { 0x0, 0x6, 0x7, 0x9, 0xA }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Reference,
+                    new uint[] { 0x2, 0x8 }),
+            },
+            new (CompositionClass, uint, int)[]
+            {
+                (CompositionClass.SurfaceBrush, 0x1u, 16),
+                (CompositionClass.SurfaceBrush, 0x3u, 16),
             });
 
         private static readonly CompositionTableSet Set28000_3086 = new(
@@ -574,6 +716,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (4, CompositionCommand.ReleaseResource),
                 (10, CompositionCommand.SetCallbackId),
                 (11, CompositionCommand.SetInteger),
+                (12, CompositionCommand.SetFloat),
                 (15, CompositionCommand.SetBuffer),
                 (16, CompositionCommand.SetReference),
                 (22, CompositionCommand.SetVisualInputSink),
@@ -599,6 +742,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 (0x13, CompositionClass.ColorBrush),
                 (0x19, CompositionClass.ComponentTransform3D),
                 (0x3B, CompositionClass.BlurredWallpaperBackdropBrush),
+                (0x8E, CompositionClass.SurfaceBrush),
                 (0x9A, CompositionClass.Visual),
                 (0xA1, CompositionClass.BlurredWallpaperBackdropBrush),
             },
@@ -613,6 +757,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     new uint[] { 0x8, 0x9, 0xA, 0xE, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x1B, 0x25, 0x26, 0x29, 0x2A, 0x2B, 0x2E, 0x31 }),
                 (CompositionClass.Visual, CompositionSlots.Reference,
                     new uint[] { 0x4, 0x5, 0x6, 0x7, 0xB, 0x17, 0x27, 0x28, 0x2F }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Integer,
+                    new uint[] { 0x0, 0x6, 0x7, 0x9, 0xA }),
+                (CompositionClass.SurfaceBrush, CompositionSlots.Reference,
+                    new uint[] { 0x2, 0x8 }),
+            },
+            new (CompositionClass, uint, int)[]
+            {
+                (CompositionClass.SurfaceBrush, 0x1u, 16),
+                (CompositionClass.SurfaceBrush, 0x3u, 16),
             });
 
         internal static CompositionTableSet Find(ushort Build, ushort Revision) => (Build, Revision) switch

@@ -31,16 +31,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (NumberOfAttrs > MaxQueriedAttributes)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            WinTokenSecurityAttribute[] Selected = Token.SecurityAttributes;
+            ReadOnlySpan<WinTokenSecurityAttribute> Selected = Token.SecurityAttributes.AsSpan();
             if (NumberOfAttrs != 0)
             {
-                Selected = new WinTokenSecurityAttribute[NumberOfAttrs];
+                WinTokenSecurityAttribute[] Picked = new WinTokenSecurityAttribute[NumberOfAttrs];
                 for (uint Index = 0; Index < NumberOfAttrs; Index++)
                 {
                     if (!Instance.WinHelper.TryReadUnicodeString(AttributesPtr + Index * NameSize, out string Name, out NTSTATUS ReadStatus))
                         return ReadStatus;
 
-                    WinTokenSecurityAttribute? Found = FindAttribute(Token.SecurityAttributes, Name);
+                    WinTokenSecurityAttribute? Found = Token.FindAttribute(Name);
                     if (Found == null)
                     {
                         if (ReturnLengthPtr != 0 && !Instance._emulator.WriteMemory(ReturnLengthPtr, 0u))
@@ -49,8 +49,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_NOT_FOUND;
                     }
 
-                    Selected[Index] = Found;
+                    Picked[Index] = Found;
                 }
+
+                Selected = Picked;
             }
 
             uint RequiredSize = GetAttributesInformationSize(Selected, Is64);
@@ -71,7 +73,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // TOKEN_SECURITY_ATTRIBUTES_INFORMATION and its TOKEN_SECURITY_ATTRIBUTE_V1 array, with the data after it.
-        internal static uint GetAttributesInformationSize(WinTokenSecurityAttribute[] Attributes, bool Is64)
+        internal static uint GetAttributesInformationSize(ReadOnlySpan<WinTokenSecurityAttribute> Attributes, bool Is64)
         {
             uint PointerSize = Is64 ? 8u : 4u;
             uint Size = Align(4 + 4 + PointerSize, PointerSize) + (uint)Attributes.Length * AttributeSize(Is64);
@@ -95,7 +97,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Align(Size, PointerSize);
         }
 
-        internal static void WriteAttributesInformation(Span<byte> Data, ulong GuestBase, WinTokenSecurityAttribute[] Attributes, bool Is64)
+        internal static void WriteAttributesInformation(Span<byte> Data, ulong GuestBase, ReadOnlySpan<WinTokenSecurityAttribute> Attributes, bool Is64)
         {
             uint PointerSize = Is64 ? 8u : 4u;
             uint ArrayOffset = Align(4 + 4 + PointerSize, PointerSize);
@@ -144,17 +146,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
                 }
             }
-        }
-
-        private static WinTokenSecurityAttribute? FindAttribute(WinTokenSecurityAttribute[] Attributes, string Name)
-        {
-            foreach (WinTokenSecurityAttribute Attribute in Attributes)
-            {
-                if (string.Equals(Attribute.Name, Name, StringComparison.OrdinalIgnoreCase))
-                    return Attribute;
-            }
-
-            return null;
         }
 
         private static uint AttributeSize(bool Is64) => Is64 ? 40u : 24u;

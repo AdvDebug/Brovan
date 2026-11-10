@@ -84,7 +84,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 if (!Reader.TryReadGuid(out _) || !TryReadTower(ref Reader, out Tower))
                     return false;
 
-                if (!Reader.TryReadUInt32(out uint SidReferent) || (SidReferent != 0 && (!Reader.TryReadSid(out Sid) || Sid[0] != SidRevision)))
+                if (!Reader.TryReadUInt32(out uint SidReferent) || (SidReferent != 0 && !Reader.TryReadSid(out Sid)))
                     return false;
             }
             else
@@ -159,7 +159,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         {
             const uint ReadControl = (uint)AccessMask.ReadControl;
             byte[] Descriptor = NtAccessCheck.BuildSingleAllowDescriptor(Sid, Sid, Sid, ReadControl);
-            return NtAccessCheck.CheckHost(Descriptor, Server.GetPrimaryToken(), Server, default, ReadControl, default, out _) == NTSTATUS.STATUS_SUCCESS;
+            return NtAccessCheck.CheckHost(Descriptor, Server.GetPrimaryToken(), default, ReadControl, default, out _) == NTSTATUS.STATUS_SUCCESS;
         }
     }
 }

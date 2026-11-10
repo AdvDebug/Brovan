@@ -114,6 +114,10 @@ namespace Brovan.Core.Settings
         // Host windows of one process. Windows has no limit, because a recreated window loses its activation state.
         public static int HostTopLevels { get; private set; }
 
+        // ALPC connections of a process to ports of other processes in the session, and the bytes of each direction.
+        public static int AlpcRemoteConnections { get; private set; }
+        public static int AlpcChannelRingBytes { get; private set; }
+
         // The guest Vulkan ICD sizes its descriptor pool raise budget from this figure.
         public static ulong GuestPhysicalBytes { get; private set; }
 
@@ -164,6 +168,8 @@ namespace Brovan.Core.Settings
             ActivationContextBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 128));
             BackingWindows = (int)Pick(Off: 524288, Minimal: 262144, Medium: 131072, High: 65536, Aggressive: 32768);
             HostTopLevels = GeneralHelper.IsWindows ? int.MaxValue : (int)Pick(Off: 4096, Minimal: 2048, Medium: 512, High: 256, Aggressive: 128);
+            AlpcRemoteConnections = (int)Pick(Off: 1024, Minimal: 768, Medium: 512, High: 256, Aggressive: 128);
+            AlpcChannelRingBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 256));
             ulong PhysicalMegabytes = Pick(Off: 8192, Minimal: 6144, Medium: 4096, High: 3072, Aggressive: 2048);
 
             GuestPhysicalBytes = Megabytes(PhysicalMegabytes);

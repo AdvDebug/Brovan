@@ -60,6 +60,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                         Status = Resource?.SetInteger(Property, BinaryPrimitives.ReadUInt64LittleEndian(Record.Slice(16))) ?? NTSTATUS.STATUS_ACCESS_DENIED;
                         break;
 
+                    case CompositionCommand.SetFloat:
+                        Property = BinaryPrimitives.ReadUInt32LittleEndian(Record.Slice(8));
+                        Status = Resource?.SetFloat(Property, BinaryPrimitives.ReadSingleLittleEndian(Record.Slice(12))) ?? NTSTATUS.STATUS_ACCESS_DENIED;
+                        break;
+
                     case CompositionCommand.SetBuffer:
                     {
                         Property = BinaryPrimitives.ReadUInt32LittleEndian(Record.Slice(8));

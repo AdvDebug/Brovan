@@ -18,7 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.ImpersonationToken = new WinToken
             {
                 Type = TokenType.Impersonation,
-                IsAnonymous = true,
+                User = User.Anonymous,
                 ImpersonationLevel = SecurityImpersonationLevel.SecurityImpersonation,
                 OwningThreadId = Thread.ThreadId
             };

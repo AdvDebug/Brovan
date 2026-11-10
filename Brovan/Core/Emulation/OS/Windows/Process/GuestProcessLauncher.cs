@@ -17,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal static class ProcessInheritance
     {
         private const uint Magic = 0x48495642;
-        private const uint Version = 2;
+        private const uint Version = 3;
         private const int MaxEntries = 4096;
         private const int MaxFileBytes = 4 << 20;
         private const int MaxEnvironmentBytes = 1 << 20;
@@ -130,7 +130,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // NT duplicates requested standard handles whether they are inheritable or not (PspCopyAndFixupParameters).
         internal static byte[] Build(BinaryEmulator Instance, ulong ProcessParameters, byte[] Environment, bool InheritHandles, List<ulong> HandleList,
-            uint StdHandleState, uint StdHandleSubsystem, uint ImageSubsystem)
+            uint StdHandleState, uint StdHandleSubsystem, uint ImageSubsystem, byte[] Identity)
         {
             HandleManager Handles = Instance.WinHelper.HandleManager;
             Dictionary<ulong, HandleEntry> Chosen = new Dictionary<ulong, HandleEntry>();
@@ -177,9 +177,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            if (Chosen.Count == 0 && Environment == null)
-                return null;
-
             using MemoryStream Buffer = new MemoryStream();
             using BinaryWriter Writer = new BinaryWriter(Buffer, Encoding.UTF8);
             Writer.Write(Magic);
@@ -190,6 +187,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             Writer.Write(Environment?.Length ?? 0);
             if (Environment != null)
                 Writer.Write(Environment);
+
+            Writer.Write(Identity.Length);
+            Writer.Write(Identity);
 
             long CountPosition = Buffer.Position;
             Writer.Write(0);
@@ -223,9 +223,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Count++;
             }
-
-            if (Count == 0 && Environment == null)
-                return null;
 
             Buffer.Position = CountPosition;
             Writer.Write(Count);
@@ -314,20 +311,27 @@ namespace Brovan.Core.Emulation.OS.Windows
             Writer.Write(Kind);
         }
 
+        internal static bool IsLaunched => GuestSession.SpawnToken != 0;
+
         // Returns the standard handles that arrived, zero for each one this process makes itself.
-        internal static ulong[] Apply(BinaryEmulator Emulator, WinSysHelper Helper)
+        internal static ulong[] Apply(BinaryEmulator Emulator, WinSysHelper Helper, out byte[] Identity)
         {
+            Identity = null;
             ulong[] Arrived = new ulong[3];
-            uint SpawnToken = GuestSession.SpawnToken;
-            if (SpawnToken == 0)
+            if (!IsLaunched)
                 return Arrived;
+
+            uint SpawnToken = GuestSession.SpawnToken;
 
             string RecordPath = PathFor(SpawnToken);
             byte[] Record;
             try
             {
                 if (!File.Exists(RecordPath))
+                {
+                    Utils.LogError("[ProcessInheritance] The launch record is missing.");
                     return Arrived;
+                }
 
                 FileInfo Info = new FileInfo(RecordPath);
                 Record = Info.Length <= MaxFileBytes ? File.ReadAllBytes(RecordPath) : null;
@@ -350,14 +354,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 using BinaryReader Reader = new BinaryReader(new MemoryStream(Record), Encoding.UTF8);
                 if (Reader.ReadUInt32() != Magic || Reader.ReadUInt32() != Version)
+                {
+                    Utils.LogError("[ProcessInheritance] The launch record has another format.");
                     return Arrived;
+                }
 
                 for (int i = 0; i < 3; i++)
                     Std[i] = Reader.ReadUInt64();
 
                 int EnvironmentLength = Reader.ReadInt32();
                 if (EnvironmentLength < 0 || EnvironmentLength > MaxEnvironmentBytes + 4)
+                {
+                    Utils.LogError("[ProcessInheritance] The launch record is damaged.");
                     return Arrived;
+                }
 
                 if (EnvironmentLength != 0)
                 {
@@ -367,6 +377,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                     else
                         Utils.LogError("[ProcessInheritance] The inherited environment block is damaged.");
                 }
+
+                int IdentityLength = Reader.ReadInt32();
+                byte[] Form = IdentityLength > 0 && IdentityLength <= TokenTransfer.MaxFormBytes ? Reader.ReadBytes(IdentityLength) : null;
+                if (Form == null || Form.Length != IdentityLength)
+                {
+                    Utils.LogError("[ProcessInheritance] The launch record carries no token.");
+                    return Arrived;
+                }
+
+                Identity = Form;
 
                 int Count = Reader.ReadInt32();
                 if (Count < 0 || Count > MaxEntries)
@@ -586,11 +606,34 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ushort OptionalHeaderMagic32 = 0x10B;
         private const ushort OptionalHeaderMagic64 = 0x20B;
 
-        /// <param name="InheritRecordFor">Builds the inheritance record once the image subsystem is known.</param>
-        internal static bool TryLaunch(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, bool StartSuspended, Func<uint, byte[]> InheritRecordFor, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
+        // NT lets a creator without SeAssignPrimaryTokenPrivilege name only a token of its own logon
+        // (PspInitializeProcessSecurity).
+        internal static NTSTATUS ResolveLaunchToken(BinaryEmulator Instance, ulong TokenHandle, WinProcess Parent, out WinToken Launch)
+        {
+            Launch = null;
+            if (TokenHandle == 0)
+            {
+                Launch = Parent.GetPrimaryToken();
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(TokenHandle, AccessMask.TokenAssignPrimary, out WinToken Named);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            WinToken Creator = Instance.WinHelper.OwnProcess.GetPrimaryToken();
+            if (NtQueryInformationToken.AuthenticationIdOf(Named) != NtQueryInformationToken.AuthenticationIdOf(Creator))
+                return NTSTATUS.STATUS_PRIVILEGE_NOT_HELD;
+
+            Launch = Named;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        /// <param name="InheritRecordFor">Builds the inheritance record from the image subsystem and the token form.</param>
+        internal static bool TryLaunch(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, bool StartSuspended, WinToken Assigned, Func<uint, byte[], byte[]> InheritRecordFor, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
         {
             string InheritPath = null;
-            bool Launched = TryLaunchWithRecord(Instance, ProcessParameters, ImageNameHint, StartSuspended, InheritRecordFor, ref InheritPath, out Process, out ImageInformation, out Status);
+            bool Launched = TryLaunchWithRecord(Instance, ProcessParameters, ImageNameHint, StartSuspended, Assigned, InheritRecordFor, ref InheritPath, out Process, out ImageInformation, out Status);
 
             if (!Launched && InheritPath != null)
             {
@@ -607,7 +650,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Launched;
         }
 
-        private static bool TryLaunchWithRecord(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, bool StartSuspended, Func<uint, byte[]> InheritRecordFor, ref string InheritPath, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
+        private static bool TryLaunchWithRecord(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, bool StartSuspended, WinToken Assigned, Func<uint, byte[], byte[]> InheritRecordFor, ref string InheritPath, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
         {
             Process = null;
             ImageInformation = default;
@@ -668,21 +711,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             string WorkingDirectory = ResolveWorkingDirectory(CurrentDirectory, HostImage);
             uint SpawnToken = NextSpawnToken();
 
-            byte[] InheritRecord = InheritRecordFor?.Invoke(ImageInformation.SubSystemType);
-            if (InheritRecord != null)
+            byte[] Identity = TokenTransfer.Write(Assigned);
+            if (Identity == null)
             {
-                try
-                {
-                    System.IO.Directory.CreateDirectory(GuestSession.Directory);
-                    InheritPath = ProcessInheritance.PathFor(SpawnToken);
-                    File.WriteAllBytes(InheritPath, InheritRecord);
-                }
-                catch (Exception Error)
-                {
-                    Utils.LogError($"[GuestProcessLauncher] Cannot pass the inherited handles: {Error.Message}");
-                    Status = NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
-                    return false;
-                }
+                Utils.LogError($"[GuestProcessLauncher] The token of {Path.GetFileName(HostImage)} does not fit the token form.");
+                Status = NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
+                return false;
+            }
+
+            byte[] InheritRecord = InheritRecordFor(ImageInformation.SubSystemType, Identity);
+            try
+            {
+                System.IO.Directory.CreateDirectory(GuestSession.Directory);
+                InheritPath = ProcessInheritance.PathFor(SpawnToken);
+                File.WriteAllBytes(InheritPath, InheritRecord);
+            }
+            catch (Exception Error)
+            {
+                Utils.LogError($"[GuestProcessLauncher] Cannot pass the inherited handles: {Error.Message}");
+                Status = NTSTATUS.STATUS_INSUFFICIENT_RESOURCES;
+                return false;
             }
 
             Process HostProcess;
@@ -715,6 +763,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             const ushort MachineAmd64 = 0x8664;
 
+            // The creator keeps the token it gave, under the identity the child reports for it.
+            TokenTransfer.TryRead(Identity, ProcessId, out WinToken ChildToken);
+
             Process = new WinProcess
             {
                 PID = ProcessId,
@@ -724,7 +775,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 HostImagePath = HostImage,
                 Arch = ImageInformation.Machine == MachineAmd64 ? BinaryArchitecture.x64 : BinaryArchitecture.x86,
                 CreationTime = Instance.GetEmulatedSystemTimeFileTimeUtc(),
-                RunningUser = Instance.WinHelper.CurrentUser,
+                PrimaryToken = ChildToken,
                 MainThreadId = MainThreadId,
                 ImageInformation = ImageInformation,
                 Remote = RemoteGuestProcess.Adopt(ProcessId, HostProcess, Instance, PebAddress, StartupParameters),

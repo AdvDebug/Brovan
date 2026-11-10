@@ -204,8 +204,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Captured.Owner.IsEmpty || Captured.Group.IsEmpty)
                 return NTSTATUS.STATUS_INVALID_SECURITY_DESCR;
 
-            WinProcess OwnerProcess = OwnerOf(Instance, Token);
-            Label Integrity = CheckLabel(Captured, Token, OwnerProcess, Desired, Mapping);
+            Label Integrity = CheckLabel(Captured, Token, Desired, Mapping);
             if (Integrity.DeniesAll)
                 return Finish(Helper, GrantedAccessPtr, AccessStatusPtr, 0, NTSTATUS.STATUS_ACCESS_DENIED);
 
@@ -227,28 +226,28 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return Status;
             }
 
-            NTSTATUS AccessStatus = Grant(Captured, Token, OwnerProcess, Self, Desired, Mapping, Integrity, out uint Granted);
+            NTSTATUS AccessStatus = Grant(Captured, Token, Self, Desired, Mapping, Integrity, out uint Granted);
             if (AccessStatus == NTSTATUS.STATUS_NOT_IMPLEMENTED)
                 return AccessStatus;
 
             return Finish(Helper, GrantedAccessPtr, AccessStatusPtr, Granted, AccessStatus);
         }
 
-        internal static NTSTATUS CheckHost(ReadOnlySpan<byte> SelfRelative, WinToken Token, WinProcess OwnerProcess, ReadOnlySpan<byte> Self, uint Desired,
+        internal static NTSTATUS CheckHost(ReadOnlySpan<byte> SelfRelative, WinToken Token, ReadOnlySpan<byte> Self, uint Desired,
             in GENERIC_MAPPING Mapping, out uint Granted)
         {
             Granted = 0;
             if (!TryParseSelfRelative(SelfRelative, out Descriptor Captured) || Captured.Owner.IsEmpty || Captured.Group.IsEmpty)
                 return NTSTATUS.STATUS_INVALID_SECURITY_DESCR;
 
-            Label Integrity = CheckLabel(Captured, Token, OwnerProcess, Desired, Mapping);
+            Label Integrity = CheckLabel(Captured, Token, Desired, Mapping);
             if (Integrity.DeniesAll)
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
             if ((Desired & AccessSystemSecurity) != 0)
                 return NTSTATUS.STATUS_PRIVILEGE_NOT_HELD;
 
-            return Grant(Captured, Token, OwnerProcess, Self, Desired, Mapping, Integrity, out Granted);
+            return Grant(Captured, Token, Self, Desired, Mapping, Integrity, out Granted);
         }
 
         private readonly record struct Label(uint Mask, bool Restricts, bool Denies, bool PackageMayOverride)
@@ -256,9 +255,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             internal bool DeniesAll => Denies && !PackageMayOverride;
         }
 
-        private static Label CheckLabel(in Descriptor Captured, WinToken Token, WinProcess OwnerProcess, uint Desired, in GENERIC_MAPPING Mapping)
+        private static Label CheckLabel(in Descriptor Captured, WinToken Token, uint Desired, in GENERIC_MAPPING Mapping)
         {
-            uint IntegrityRid = IntegrityRidOf(Token, OwnerProcess);
+            uint IntegrityRid = IntegrityRidOf(Token);
             uint Requested = Desired & ~MaximumAllowed;
             bool Maximum = (Desired & MaximumAllowed) != 0;
             uint IntegrityMask = IntegrityAllowedMask(Captured.Sacl, IntegrityRid, Mapping, out uint ObjectRid);
@@ -269,11 +268,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             return new Label(IntegrityMask, IntegrityRid < ObjectRid, IntegrityDenies, PackageMayOverrideLabel);
         }
 
-        private static NTSTATUS Grant(in Descriptor Captured, WinToken Token, WinProcess OwnerProcess, scoped ReadOnlySpan<byte> Self, uint Desired,
+        private static NTSTATUS Grant(in Descriptor Captured, WinToken Token, scoped ReadOnlySpan<byte> Self, uint Desired,
             in GENERIC_MAPPING Mapping, in Label Integrity, out uint Granted)
         {
             bool Maximum = (Desired & MaximumAllowed) != 0;
-            Identity Client = new Identity(UserSidOf(Token, OwnerProcess), GroupsOf(Token, OwnerProcess), Token, Captured.Owner);
+            Identity Client = new Identity(UserSidOf(Token), GroupsOf(Token), Token, Captured.Owner);
             Granted = 0;
             if ((Desired & (MaximumAllowed | OwnerImpliedRights)) != 0 && Client.IsOwner() && !OwnerRightsAcePresent(Captured.Dacl))
             {
@@ -446,7 +445,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             int Size;
             if (Field <= GroupField)
             {
-                if (Offset > (uint)(Bytes.Length - 2) || Bytes[(int)Offset] != SidRevision || Bytes[(int)Offset + 1] > MaxSubAuthorities)
+                if (Offset > (uint)(Bytes.Length - 2) || !IsValidSidHeader(Bytes[(int)Offset], Bytes[(int)Offset + 1]))
                     return false;
                 Size = SidLength(Bytes[(int)Offset + 1]);
             }
@@ -584,7 +583,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Span<byte> Head = stackalloc byte[2];
             if (!Instance.ReadMemory(SidPtr, Head))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            if (Head[0] != SidRevision || Head[1] > MaxSubAuthorities)
+            if (!IsValidSidHeader(Head[0], Head[1]))
                 return NTSTATUS.STATUS_INVALID_SID;
             Size = SidLength(Head[1]);
             return NTSTATUS.STATUS_SUCCESS;
@@ -780,7 +779,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static bool PackageMatches(ReadOnlySpan<byte> AceSid, WinToken Token)
         {
             return AceSid.SequenceEqual(AllApplicationPackagesSid) || AceSid.SequenceEqual(AllRestrictedApplicationPackagesSid)
-                || AceSid.SequenceEqual(Token.AppContainerSid) || Token.HasCapability(AceSid);
+                || AceSid.SequenceEqual(Token.AppContainerSid.AsSpan()) || Token.HasCapability(AceSid);
         }
 
         private static bool Matches(scoped ReadOnlySpan<byte> AceSid, ref Identity Client, scoped ReadOnlySpan<byte> Self, uint GroupAttributes)

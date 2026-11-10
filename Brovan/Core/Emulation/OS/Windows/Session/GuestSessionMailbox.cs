@@ -31,9 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int SharedLane = GuestSession.SlotCount;
         private const int LaneSize = 0x10000;
 
-        private const int DoorbellOffset = 0x00;
-        private const int TargetHeaderSize = 0x40;
-        private const int TargetSize = TargetHeaderSize + LaneCount * LaneSize;
+        private const int TargetSize = LaneCount * LaneSize;
 
         private const int RequestSequenceOffset = 0x00;
         private const int AnswerSequenceOffset = 0x04;
@@ -61,8 +59,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static bool _unavailable;
 
         private static readonly uint[] _handledSequences = new uint[LaneCount];
-        private static uint _seenDoorbell;
-        private static bool _rescan;
         private static int _nextLane;
         private static int _activeLane = -1;
 
@@ -97,7 +93,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             while (true)
             {
-                Claim Claimed = TryClaim(Target, Lane, Operation, Address, Argument, Input, Output.Length, out Sequence);
+                Claim Claimed = TryClaim(Slot, Lane, Operation, Address, Argument, Input, Output.Length, out Sequence);
                 if (Claimed == Claim.Unavailable)
                     return NTSTATUS.STATUS_NOT_SUPPORTED;
                 if (Claimed == Claim.Claimed)
@@ -145,7 +141,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static Claim TryClaim(long Target, long Lane, SessionOperation Operation, ulong Address, ulong Argument, ReadOnlySpan<byte> Input,
+        private static Claim TryClaim(int Slot, long Lane, SessionOperation Operation, ulong Address, ulong Argument, ReadOnlySpan<byte> Input,
             int OutputLength, out uint Sequence)
         {
             Sequence = 0;
@@ -167,7 +163,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Sequence = Last + 1;
             _view.Write(Lane + RequestSequenceOffset, Sequence);
-            _view.Write(Target + DoorbellOffset, _view.ReadUInt32(Target + DoorbellOffset) + 1);
+            SessionPump.Ring(Slot);
             return Claim.Claimed;
         }
 
@@ -201,16 +197,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Slot < 0 || _view == null)
                 return false;
 
-            // Peeked without the lock because the scheduler calls this every slice.
-            long Target = TargetOffset(Slot);
-            if (!_rescan && Peek(Target + DoorbellOffset) == _seenDoorbell)
-                return false;
-
             using SessionLock Lock = GuestSession.Acquire();
             if (!Lock.Held)
+            {
+                SessionPump.Rescan();
                 return false;
+            }
 
-            _seenDoorbell = _view.ReadUInt32(Target + DoorbellOffset);
+            long Target = TargetOffset(Slot);
             for (int i = 0; i < LaneCount; i++)
             {
                 int Index = (_nextLane + i) % LaneCount;
@@ -228,11 +222,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 _handledSequences[Index] = Sequence;
                 _activeLane = Index;
                 _nextLane = (Index + 1) % LaneCount;
-                _rescan = true;
                 return true;
             }
 
-            _rescan = false;
             return false;
         }
 
@@ -264,7 +256,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             long Target = TargetOffset(Slot);
-            new Span<byte>(_viewBase + Target, TargetHeaderSize).Clear();
             for (int Index = 0; Index < LaneCount; Index++)
                 new Span<byte>(_viewBase + LaneOffset(Target, Index), LaneHeaderSize).Clear();
 
@@ -278,8 +269,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Array.Clear(_handledSequences);
-            _seenDoorbell = 0;
-            _rescan = false;
             _nextLane = 0;
             _activeLane = -1;
         }
@@ -343,7 +332,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static long TargetOffset(int Slot) => (long)Slot * TargetSize;
 
         private static long LaneOffset(long Target, int Sender)
-            => Target + TargetHeaderSize + (long)(Sender >= 0 ? Sender : SharedLane) * LaneSize;
+            => Target + (long)(Sender >= 0 ? Sender : SharedLane) * LaneSize;
 
         private struct Backoff
         {

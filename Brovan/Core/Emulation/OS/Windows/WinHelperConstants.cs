@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -241,6 +242,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_INVALID_DEVICE_REQUEST = 0xC0000010,
         STATUS_FILE_CORRUPT_ERROR = 0xC0000102,
         STATUS_INVALID_MESSAGE = 0xC0000702,
+        STATUS_MESSAGE_LOST = 0xC0000701,
         STATUS_LPC_REQUESTS_NOT_ALLOWED = 0xC0000707,
         STATUS_ALREADY_REGISTERED = 0xC0000718,
         STATUS_END_OF_FILE = 0xC0000011,
@@ -1228,6 +1230,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     public sealed class WinToken : IHandleObject
     {
         public const ulong SystemLogonId = 0x3E7;
+        public const ulong AnonymousLogonId = 0x3E6;
         public const ulong LocalServiceLogonId = 0x3E5;
         public const ulong InteractiveLogonId = 0x2F1B4;
         public const ulong InteractiveSourceId = 0x2F0C9;
@@ -1236,46 +1239,50 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const ulong InteractiveUserContext = 0x2F1D2;
         public static readonly string InteractiveSessionDirectory = $"\\Sessions\\{InteractiveSessionId}";
 
-        public TokenType Type;
-        public uint SessionId;
-        public bool IsAnonymous;
-        public bool IsElevated;
-        public bool IsRestricted;
-        public bool EffectiveOnly;
-        public SecurityImpersonationLevel ImpersonationLevel = SecurityImpersonationLevel.SecurityImpersonation;
-        public ulong OwningProcessId;
-        public ulong OwningThreadId;
-        public ulong TokenId;
-        public ulong ModifiedId;
-        public byte[] AppContainerSid;
-        public uint AppContainerNumber;
-        public byte[][] CapabilitySids = Array.Empty<byte[]>();
-        public WinTokenSecurityAttribute[] SecurityAttributes = Array.Empty<WinTokenSecurityAttribute>();
+        public TokenType Type { get; init; }
+        public User User { get; init; }
+        public uint SessionId { get; init; }
+        public bool IsRestricted { get; init; }
+        public bool EffectiveOnly { get; init; }
+        public SecurityImpersonationLevel ImpersonationLevel { get; init; } = SecurityImpersonationLevel.SecurityImpersonation;
+        public ulong OwningProcessId { get; init; }
+        public ulong OwningThreadId { get; init; }
+        public ulong TokenId { get; private init; }
+        public ulong ModifiedId { get; private init; }
+        public ImmutableArray<byte> AppContainerSid { get; init; }
+        public uint AppContainerNumber { get; init; }
+        public ImmutableArray<ImmutableArray<byte>> CapabilitySids { get; init; } = ImmutableArray<ImmutableArray<byte>>.Empty;
+        public ImmutableArray<WinTokenSecurityAttribute> SecurityAttributes { get; init; } = ImmutableArray<WinTokenSecurityAttribute>.Empty;
         public string ObjectId => "Token";
         public HandleType ObjectType => HandleType.TokenHandle;
 
-        public bool IsAppContainer => AppContainerSid != null;
+        public bool IsAnonymous => User == User.Anonymous;
+
+        public bool IsElevated => User == User.Admin;
+
+        public bool IsAppContainer => !AppContainerSid.IsDefaultOrEmpty;
 
         // NT: WIN://SYSAPPID holds the package full name, the application id and the package family name.
         public string PackageFamilyName
-        {
-            get
-            {
-                foreach (WinTokenSecurityAttribute Attribute in SecurityAttributes)
-                {
-                    if (Attribute.Name == WinTokenSecurityAttribute.SysAppIdName && Attribute.StringValues.Length > 2)
-                        return Attribute.StringValues[2];
-                }
+            => FindAttribute(WinTokenSecurityAttribute.SysAppIdName) is { StringValues.Length: > 2 } AppId ? AppId.StringValues[2] : null;
 
-                return null;
+        // NT compares attribute names without regard to case.
+        public WinTokenSecurityAttribute? FindAttribute(string Name)
+        {
+            foreach (WinTokenSecurityAttribute Attribute in SecurityAttributes)
+            {
+                if (string.Equals(Attribute.Name, Name, StringComparison.OrdinalIgnoreCase))
+                    return Attribute;
             }
+
+            return null;
         }
 
         public bool HasCapability(ReadOnlySpan<byte> Sid)
         {
-            foreach (byte[] Capability in CapabilitySids)
+            foreach (ImmutableArray<byte> Capability in CapabilitySids)
             {
-                if (Sid.SequenceEqual(Capability))
+                if (Sid.SequenceEqual(Capability.AsSpan()))
                     return true;
             }
 
@@ -1288,24 +1295,76 @@ namespace Brovan.Core.Emulation.OS.Windows
             ModifiedId = TokenId;
         }
 
-        public void CopyIdentityFrom(WinToken Source)
+        internal WinToken(ulong TokenId, ulong ModifiedId)
         {
+            this.TokenId = TokenId;
+            this.ModifiedId = ModifiedId;
+        }
+
+        // NT gives a copy a new TokenId and keeps the ModifiedId.
+        private WinToken(WinToken Source) : this()
+        {
+            ModifiedId = Source.ModifiedId;
+            Type = Source.Type;
+            User = Source.User;
+            SessionId = Source.SessionId;
+            IsRestricted = Source.IsRestricted;
+            EffectiveOnly = Source.EffectiveOnly;
+            ImpersonationLevel = Source.ImpersonationLevel;
+            OwningProcessId = Source.OwningProcessId;
+            OwningThreadId = Source.OwningThreadId;
             AppContainerSid = Source.AppContainerSid;
             AppContainerNumber = Source.AppContainerNumber;
             CapabilitySids = Source.CapabilitySids;
             SecurityAttributes = Source.SecurityAttributes;
         }
 
-        // NT gives a duplicate a new TokenId and keeps the ModifiedId.
         public WinToken Duplicate(TokenType NewType, SecurityImpersonationLevel NewLevel, bool NewEffectiveOnly)
+            => new WinToken(this) { Type = NewType, ImpersonationLevel = NewLevel, EffectiveOnly = NewEffectiveOnly };
+
+        // NT filters the attributes this way for each new process token (AuthzBasepDuplicateSecurityAttributes).
+        public WinToken AssignPrimary(ulong ProcessId)
         {
-            WinToken Copy = (WinToken)MemberwiseClone();
-            Copy.TokenId = NtAllocateLocallyUniqueId.Allocate();
-            Copy.Type = NewType;
-            Copy.ImpersonationLevel = NewLevel;
-            Copy.EffectiveOnly = NewEffectiveOnly;
-            return Copy;
+            ImmutableArray<WinTokenSecurityAttribute>.Builder Passed = ImmutableArray.CreateBuilder<WinTokenSecurityAttribute>(SecurityAttributes.Length);
+            foreach (WinTokenSecurityAttribute Attribute in SecurityAttributes)
+            {
+                if ((Attribute.Flags & WinTokenSecurityAttribute.NonInheritable) != 0)
+                    continue;
+
+                Passed.Add((Attribute.Flags & WinTokenSecurityAttribute.InheritOnce) == 0
+                    ? Attribute
+                    : Attribute.WithFlags((Attribute.Flags & ~WinTokenSecurityAttribute.InheritOnce) | WinTokenSecurityAttribute.NonInheritable));
+            }
+
+            return new WinToken(this)
+            {
+                Type = TokenType.Primary,
+                ImpersonationLevel = SecurityImpersonationLevel.SecurityImpersonation,
+                EffectiveOnly = false,
+                OwningProcessId = ProcessId,
+                OwningThreadId = 0,
+                SecurityAttributes = Passed.ToImmutable(),
+            };
         }
+
+        public static WinToken CreatePrimary(User User, ulong ProcessId) => new WinToken
+        {
+            Type = TokenType.Primary,
+            User = User,
+            SessionId = InteractiveSessionId,
+            OwningProcessId = ProcessId,
+        };
+
+        public WinToken WithPackageIdentity(ImmutableArray<WinTokenSecurityAttribute> Attributes, ImmutableArray<byte> AppContainer, uint Number,
+            ImmutableArray<ImmutableArray<byte>> Capabilities)
+            => new WinToken(this)
+            {
+                ModifiedId = NtAllocateLocallyUniqueId.Allocate(),
+                SecurityAttributes = Attributes,
+                AppContainerSid = AppContainer,
+                AppContainerNumber = AppContainer.IsDefaultOrEmpty ? 0 : Number,
+                CapabilitySids = AppContainer.IsDefaultOrEmpty ? ImmutableArray<ImmutableArray<byte>>.Empty : Capabilities,
+            };
     }
 
     public sealed class WinTokenSecurityAttribute
@@ -1314,17 +1373,24 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const ushort TypeUInt64 = 2;
         public const ushort TypeString = 3;
 
+        // NT: TOKEN_SECURITY_ATTRIBUTE_NON_INHERITABLE, and the flag that SeSubProcessToken turns into it.
+        public const uint NonInheritable = 0x1;
+        public const uint InheritOnce = 0x80;
+
         public const string SysAppIdName = "WIN://SYSAPPID";
         public const string PackageClaimsName = "WIN://PKG";
         public const string PackageHostIdName = "WIN://PKGHOSTID";
 
-        public string Name;
-        public ushort ValueType;
-        public uint Flags;
-        public ulong[] UInt64Values = Array.Empty<ulong>();
-        public string[] StringValues = Array.Empty<string>();
+        public string Name { get; init; }
+        public ushort ValueType { get; init; }
+        public uint Flags { get; init; }
+        public ImmutableArray<ulong> UInt64Values { get; init; } = ImmutableArray<ulong>.Empty;
+        public ImmutableArray<string> StringValues { get; init; } = ImmutableArray<string>.Empty;
 
         public int ValueCount => ValueType == TypeString ? StringValues.Length : UInt64Values.Length;
+
+        public WinTokenSecurityAttribute WithFlags(uint NewFlags)
+            => new WinTokenSecurityAttribute { Name = Name, ValueType = ValueType, Flags = NewFlags, UInt64Values = UInt64Values, StringValues = StringValues };
     }
 
     public class WinHandle
@@ -1374,6 +1440,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         LocalService = 3,
         WindowManager = 4,
         FontManager = 5,
+        Anonymous = 6,
     }
 
     public enum TokenType
@@ -1491,7 +1558,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public string Path;
         public string HostImagePath;
         public ProtectionStatus Status;
-        public User RunningUser;
+
+        private User SeedUser;
+        public User RunningUser { get => PrimaryToken?.User ?? SeedUser; init => SeedUser = value; }
+
         public bool Critical;
         public long CreationTime;
         public long ExitTime;
@@ -1508,7 +1578,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public BinaryArchitecture Arch;
         public WinToken PrimaryToken;
 
-        public WinToken GetPrimaryToken() => PrimaryToken ??= new WinToken { Type = TokenType.Primary, SessionId = WinToken.InteractiveSessionId, OwningProcessId = PID };
+        public WinToken GetPrimaryToken() => PrimaryToken ??= WinToken.CreatePrimary(SeedUser, PID);
         public ulong InstrumentationCallback;
         public WinJob Job;
 
@@ -2977,6 +3047,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal bool AcceptsRequests;
         internal WinSemaphore WaitSemaphore;
+
+        internal AlpcSessionPort SessionRecord;
+
+        // Another process of the session serves this port, so it has no queue.
+        internal bool IsRemote;
+
+        // Made by NtAlpcConnectPort for a name that nothing serves, so a session port of that name comes first.
+        internal bool Fallback;
 
         // NT keeps the security contexts of a port in the ALPC handle table of the port.
         internal Dictionary<ulong, AlpcSecurityContext> SecurityContexts;

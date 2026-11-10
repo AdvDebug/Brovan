@@ -15,6 +15,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint ImageFileShareAccess = 0x5;
         private const uint ImageFileOpenOptions = 0x60;
 
+        // NT: kernelbase CreateProcessInternalW marks the token attribute input and additive.
+        private const ulong PsAttributeToken = 2 | 0x20000 | 0x40000;
         private const ulong PsAttributeClientId = 3 | 0x10000;
         private const ulong PsAttributeImageName = 5 | 0x20000;
         private const ulong PsAttributeImageInfo = 6;
@@ -85,10 +87,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (EnvironmentStatus != NTSTATUS.STATUS_SUCCESS)
                 return EnvironmentStatus;
 
-            Func<uint, byte[]> InheritRecordFor = ImageSubsystem => ProcessInheritance.Build(
-                Instance, ProcessParameters, Environment, InheritHandles, HandleList, StdHandleState, StdHandleSubsystem, ImageSubsystem);
+            ulong TokenHandle = TryFindAttribute(Instance, AttributeList, PsAttributeToken, out ulong NamedToken, out _) ? NamedToken : 0;
+            NTSTATUS TokenStatus = GuestProcessLauncher.ResolveLaunchToken(Instance, TokenHandle, Instance.WinHelper.OwnProcess, out WinToken Launch);
+            if (TokenStatus != NTSTATUS.STATUS_SUCCESS)
+                return TokenStatus;
 
-            if (!GuestProcessLauncher.TryLaunch(Instance, ProcessParameters, ImageNameHint, StartSuspended, InheritRecordFor, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status))
+            Func<uint, byte[], byte[]> InheritRecordFor = (ImageSubsystem, Identity) => ProcessInheritance.Build(
+                Instance, ProcessParameters, Environment, InheritHandles, HandleList, StdHandleState, StdHandleSubsystem, ImageSubsystem, Identity);
+
+            if (!GuestProcessLauncher.TryLaunch(Instance, ProcessParameters, ImageNameHint, StartSuspended, Launch.AssignPrimary(0), InheritRecordFor, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status))
                 return Status;
 
             WinRemoteThread Thread = new WinRemoteThread

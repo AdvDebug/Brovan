@@ -46,6 +46,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             GenericAll = 0x001F0013,
         };
 
+        // Temporary names that Brovan gives out in place of the kernel, each with its own sequence.
+        internal static readonly ulong ServiceStateName = Encode(1, NameLifetime.Temporary, DataScope.System);
+        internal static readonly ulong PowerSettingSetName = Encode(2, NameLifetime.Temporary, DataScope.Machine);
+        internal static readonly ulong AcDcPowerSourceName = Encode(3, NameLifetime.Temporary, DataScope.Machine);
+
         internal static ulong Encode(ulong Sequence, NameLifetime Lifetime, DataScope Scope)
         {
             ulong Raw = Sequence << SequenceShift | (ulong)Scope << ScopeShift | (ulong)Lifetime << LifetimeShift | NameVersion;

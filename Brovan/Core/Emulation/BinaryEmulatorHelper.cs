@@ -127,6 +127,13 @@ namespace Brovan.Core.Emulation
         void OnThreadContextLoaded(BinaryEmulator Instance, EmulatedThread Thread);
         void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread);
         bool HasPendingGuestWork(BinaryEmulator Instance, EmulatedThread Thread);
+
+        // Runs between slices. True when finished host work needs a wakeup scan.
+        bool PollHostWork(BinaryEmulator Instance) => false;
+
+        // True while host work or another process can still wake a thread, so the scheduler waits instead of ending.
+        bool AwaitsHostWork(BinaryEmulator Instance) => false;
+
         bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle);
         bool ExecuteThreadSlice(BinaryEmulator Instance, EmulatedThread Thread, uint QuantumInstructions, out bool State);
         void OnThreadWaitSatisfied(BinaryEmulator Instance, EmulatedThread Thread);

@@ -21,7 +21,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(PortName))
                 return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
 
-            WinPort Port = NtConnectPort.FindPortForOpen(Instance, PortName);
+            WinPort Port = NtAlpcConnectPort.FindPort(Instance, PortName);
             if (Port == null)
             {
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)

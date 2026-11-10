@@ -2255,6 +2255,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Windows.User.Standard;
         }
 
+        // A process that another member launched runs with the token it was given, or not at all.
+        private WinToken TakeLaunchToken(byte[] Identity)
+        {
+            if (!ProcessInheritance.IsLaunched)
+                return WinToken.CreatePrimary(User.Standard, PID);
+
+            if (Identity != null && TokenTransfer.TryRead(Identity, PID, out WinToken Token))
+                return Token;
+
+            Utils.LogError("[ProcessInheritance] This process was launched without a token it can take, so it does not start.");
+            System.Environment.Exit(unchecked((int)NTSTATUS.STATUS_ACCESS_DENIED));
+            return null;
+        }
+
         private WinProcess AddHostService(uint ServicesPID, User RunningUser)
         {
             WinProcess Service = new WinProcess { PID = GenerateRandomPID(), PPID = ServicesPID, Name = "svchost.exe", Path = "C:\\Windows\\System32\\svchost.exe", Status = ProtectionStatus.None, RunningUser = RunningUser, Critical = true, Arch = BinaryArchitecture.x64 };
@@ -2467,7 +2481,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             return State.PrioritySaturation != 0 ? 16 * State.PrioritySaturation : Thread.BasePriority - (int)CurrentPriority;
         }
-        public User CurrentUser = User.Standard;
+        public User CurrentUser => OwnProcess?.GetPrimaryToken().User ?? User.Standard;
         public string CurrentUserSid => NtQueryInformationToken.InteractiveUserSidText;
         public const string CurrentUserName = "User";
         public const string CurrentUserProfile = @"C:\Users\" + CurrentUserName;
@@ -3071,9 +3085,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             NamedObjectRoots = new[] { GlobalNamedObjects, SessionNamedObjects, SessionLinks, AppContainerNamedObjects };
 
             // Before any handle of this process, so every inherited one keeps its value.
-            ulong[] InheritedStd = ProcessInheritance.Apply(Emulator, this);
+            ulong[] InheritedStd = ProcessInheritance.Apply(Emulator, this, out byte[] InheritedIdentity);
             KuserSharedData = new KuserSharedDataManager(Emulator);
             PID = AdoptHostProcessId();
+            WinToken OwnToken = TakeLaunchToken(InheritedIdentity);
 
             // Must be set before startup is published. The creator reports it as the new process's thread.
             InitialThreadId = GenerateRandomPID();
@@ -3129,7 +3144,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "Registry", Path = "Registry", Status = ProtectionStatus.Full, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "smss.exe", Path = "C:\\Windows\\System32\\smss.exe", Status = ProtectionStatus.LightTCB, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = GenerateRandomPID(), PPID = 4, Name = "Memory Compression", Path = "MemCompression", Status = ProtectionStatus.Full, RunningUser = User.System, Critical = true, Arch = BinaryArchitecture.x64 },
-                new WinProcess{ PID = PID, PPID = PPID, Name = FileName, Path = Emulator.GuestImagePath, Status = ProtectionStatus.None, RunningUser = CurrentUser, Critical = false, Arch = Binary.Architecture, MainThreadId = InitialThreadId, PrimaryToken = new WinToken{SessionId = WinToken.InteractiveSessionId, IsElevated = false, IsRestricted = false, OwningProcessId = PID, OwningThreadId = 0, Type = TokenType.Primary } },
+                new WinProcess{ PID = PID, PPID = PPID, Name = FileName, Path = Emulator.GuestImagePath, Status = ProtectionStatus.None, Critical = false, Arch = Binary.Architecture, MainThreadId = InitialThreadId, PrimaryToken = OwnToken },
                 new WinProcess{ PID = ShellPID, PPID = GenerateRandomPID(), Name = "explorer.exe", Path = "C:\\Windows\\explorer.exe", Status = ProtectionStatus.None, RunningUser = User.Standard, Critical = false, Arch = BinaryArchitecture.x64 },
                 new WinProcess{ PID = FirefoxParent, PPID = ShellPID, Name = "firefox.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\firefox.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},
                 new WinProcess{ PID = GenerateRandomPID(), PPID = FirefoxParent, Name = "crashhelper.exe", Arch = BinaryArchitecture.x64, Critical = false, Path = "C:\\Program Files\\Mozilla Firefox\\crashhelper.exe", RunningUser = User.Standard, Status = ProtectionStatus.None},

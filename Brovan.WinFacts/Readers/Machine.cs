@@ -30,6 +30,7 @@ namespace Brovan.WinFacts.Readers
         private const int TbRemoveCache = ControlRemoveCache | (2 << 26) | (ControlWrite << 30);
         private static readonly byte[] Halt = { 0xF4 };
         private static readonly Registers[] ArgumentRegisters = { Registers.UC_X86_REG_RCX, Registers.UC_X86_REG_RDX, Registers.UC_X86_REG_R8, Registers.UC_X86_REG_R9 };
+        private static readonly Registers[] FloatArgumentRegisters = { Registers.UC_X86_REG_XMM0, Registers.UC_X86_REG_XMM1, Registers.UC_X86_REG_XMM2, Registers.UC_X86_REG_XMM3 };
 
         private readonly IntPtr Uc;
         private readonly PeImage Image;
@@ -354,6 +355,12 @@ namespace Brovan.WinFacts.Readers
             using MemoryStream Stream = new();
             Asm.Assemble(new StreamCodeWriter(Stream), Address);
             return Stream.ToArray();
+        }
+
+        internal void WriteFloatArgument(int Position, float Value)
+        {
+            ulong* Lanes = stackalloc ulong[] { BitConverter.SingleToUInt32Bits(Value), 0 };
+            Check(uc_reg_write(Uc, (int)FloatArgumentRegisters[Position], Lanes), "xmm write");
         }
 
         private void WriteRegister(Registers Register, ulong Value) => Check(uc_reg_write(Uc, (int)Register, &Value), "reg write");
