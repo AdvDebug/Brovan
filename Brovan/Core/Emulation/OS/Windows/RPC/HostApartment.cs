@@ -15,9 +15,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         internal const uint ObjectFlags = 0xE80;
         internal const uint PublicRefs = 5;
 
-        internal ulong Oid { get; } = Orpc.NewId();
+        // NT: rpcss is one per machine, so an OID never names objects of two processes.
+        internal ulong Oid { get; } = SessionIds.Next(SessionIdKind.ObjectExporter);
 
         internal virtual bool Permanent => false;
+
+        // For a caller in another process, HostCall.Instance is the emulator that serves the call, not the caller's.
+        internal virtual bool AnswersOtherProcesses => false;
 
         // Implementations also answer true for IUnknown.
         internal abstract bool Supports(Guid Interface);
@@ -145,12 +149,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
 
         internal string Endpoint { get; } = "OLE" + Convert.ToHexString(RandomNumberGenerator.GetBytes(14));
         internal string PortName { get; }
-        internal ulong Oxid { get; } = Orpc.NewId();
+        internal ulong Oxid { get; } = SessionIds.Next(SessionIdKind.ObjectExporter);
         internal Guid ProcessIdentifier { get; } = Guid.NewGuid();
         internal Guid RemUnknownIpid { get; }
 
         private readonly Dictionary<Guid, InterfaceEntry> Interfaces = new Dictionary<Guid, InterfaceEntry>();
         private readonly Dictionary<HostObject, ObjectEntry> Objects = new Dictionary<HostObject, ObjectEntry>();
+
+        internal WinPort SessionPort { get; set; }
+        private bool Published;
 
         // NT: combase registers an interface with RPC when it first marshals it, and keeps it registered.
         private readonly List<Guid> Registered = new List<Guid> { Orpc.RemUnknownInterface, Orpc.RemUnknown2Interface, Orpc.RundownInterface };
@@ -217,6 +224,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         {
             foreach (HostCall.Export Export in Call.Exports)
             {
+                if (!Published && SessionPort != null && Export.Object.AnswersOtherProcesses)
+                    PublishToSession(Call.Instance);
+
                 if (!Objects.TryGetValue(Export.Object, out ObjectEntry Entry))
                 {
                     Entry = new ObjectEntry();
@@ -243,6 +253,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             Call.Exports.Clear();
         }
 
+        private void PublishToSession(BinaryEmulator Instance)
+        {
+            Published = true;
+            if (AlpcMessaging.Publish(Instance, SessionPort) != NTSTATUS.STATUS_SUCCESS)
+                Utils.LogError($"[-] Host COM: the apartment of process {ProcessId} cannot take its port name in the session.");
+            else if (SessionPort.SessionRecord != null)
+                RpcssPortHandler.PublishHostApartment(Instance, this);
+        }
+
         internal byte[] Respond(in LrpcMessage Message, HostCall Call, ReadOnlySpan<byte> Stub)
         {
             if (Stub.Length <= LrpcPacket.MaxResponseStubLength)
@@ -253,11 +272,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
 
         public NTSTATUS Handle(WinPort Port, byte[] SendData, PortReply Reply, BinaryEmulator Instance)
         {
-            Reply.Data = Serve(SendData, Reply.Client.Bindings, Instance);
+            Reply.Data = Serve(SendData, Reply.Client.Bindings, Instance, FromOtherProcess: false);
             return Reply.Data == null ? NTSTATUS.STATUS_INVALID_PARAMETER : NTSTATUS.STATUS_SUCCESS;
         }
 
-        internal byte[] Serve(byte[] SendData, LrpcBindingTable Bindings, BinaryEmulator Instance)
+        internal byte[] Serve(byte[] SendData, LrpcBindingTable Bindings, BinaryEmulator Instance, bool FromOtherProcess)
         {
             if (!LrpcPacket.TryParse(SendData, out LrpcMessage Message))
                 return null;
@@ -274,7 +293,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             }
             else if (Message.Type == LrpcMessageType.Request)
             {
-                Reply = HandleRequest(Message, Bindings, Instance);
+                Reply = HandleRequest(Message, Bindings, Instance, FromOtherProcess);
             }
 
             return Reply ?? LrpcPacket.EchoHeader(SendData);
@@ -295,7 +314,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             if (!WaitsForReply && !LrpcPacket.ExpectsAnswer(Message))
                 return NTSTATUS.STATUS_SUCCESS;
 
-            byte[] Whole = Serve(Message, (LrpcBindingTable)Connection.HostServerState, Instance);
+            byte[] Whole = Serve(Message, (LrpcBindingTable)Connection.HostServerState, Instance, Connection.Remote != null);
             if (Whole == null)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -307,7 +326,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         {
         }
 
-        private byte[] HandleRequest(in LrpcMessage Message, LrpcBindingTable Bindings, BinaryEmulator Instance)
+        private byte[] HandleRequest(in LrpcMessage Message, LrpcBindingTable Bindings, BinaryEmulator Instance, bool FromOtherProcess)
         {
             if (!LrpcBindings.TryResolve(Bindings, Message, out Guid Interface, out Guid Ipid))
                 return LrpcPacket.BuildFault(Message, LrpcPacket.RpcSUnknownIf);
@@ -328,6 +347,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             if (!Interfaces.TryGetValue(Ipid, out InterfaceEntry Entry) || Entry.Interface != Interface)
             {
                 Utils.LogError($"[-] Host COM: process {ProcessId} has no interface {Interface} at IPID {Ipid}.");
+                return LrpcPacket.BuildFault(Message, RpcEInvalidIpid);
+            }
+
+            if (FromOtherProcess && !Entry.Object.AnswersOtherProcesses)
+            {
+                Utils.LogError($"[-] Host COM: {Entry.Object.GetType().Name} of process {ProcessId} answers only its own process.");
                 return LrpcPacket.BuildFault(Message, RpcEInvalidIpid);
             }
 

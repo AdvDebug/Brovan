@@ -7,6 +7,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
         internal const string ClassId = "Windows.System.User";
 
         private static readonly Guid UserStaticsInterface = new Guid("155eb23b-242a-45e0-a2e9-3171fc6a7fdd");
+        private static readonly Guid UserStatics2Interface = new Guid("74a37e11-2eb5-4487-b0d5-2c6790e013e9");
 
         // The interfaces of the native factory's GetIids.
         private static readonly Guid[] Interfaces =
@@ -15,10 +16,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
             Orpc.IInspectableId,
             new Guid("00000035-0000-0000-c000-000000000046"),
             UserStaticsInterface,
-            new Guid("74a37e11-2eb5-4487-b0d5-2c6790e013e9"),
+            UserStatics2Interface,
         };
 
         private const uint ProcGetFromId = 10;
+        private const uint ProcGetDefault = 6;
 
         private readonly UserManagerService Service;
 
@@ -31,6 +33,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
         internal override bool TryCall(HostCall Call, Guid Interface, uint ProcNumber, ReadOnlySpan<byte> Parameters, out byte[] Stub)
         {
             Stub = null;
+            if (Interface == UserStatics2Interface && ProcNumber == ProcGetDefault)
+            {
+                Stub = GetDefault(Call, Service.DefaultUser(Call.Instance, out uint Result), Result);
+                return true;
+            }
+
             if (Interface != UserStaticsInterface || ProcNumber != ProcGetFromId)
                 return false;
 
@@ -38,6 +46,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
             if (Reader.TryReadUInt32(out uint Marker) && Marker == Orpc.UserMarshalMarker && Orpc.TryReadHstringBody(ref Reader, out ReadOnlySpan<char> Id))
                 Stub = GetFromId(Call, Service.FindUser(Call.Instance, Id));
             return true;
+        }
+
+        private static byte[] GetDefault(HostCall Call, SessionUserObject User, uint Result)
+        {
+            Ndr20Writer Writer = new Ndr20Writer(0x100);
+            Orpc.WriteResponseHeader(ref Writer);
+            uint Written = WriteOutInterface(ref Writer, Call, User, SessionUserObject.UserInterface);
+            Writer.WriteUInt32(User == null ? Result : Written);
+            return Writer.ToArray();
         }
 
         // NT: an id that names no user is S_OK with a null user.

@@ -13,6 +13,13 @@ namespace Brovan.Core.Emulation.OS.Windows
     // True only means the request was accepted. The process reports itself in the session table under SpawnToken.
     internal delegate bool GuestHostLauncher(string HostImage, string GuestArguments, string GuestDirectory, string SessionId, uint SpawnToken, int Depth);
 
+    internal readonly record struct LaunchRequest(string ImagePath, string CommandLine, string CurrentDirectory, bool StartSuspended, WinToken Token,
+        List<string> EmulatorOptions, uint ParentProcessId, ushort RequiredMachine = 0);
+
+    // HostProcess is null when the host launcher starts the process.
+    internal readonly record struct StartedProcess(Process HostProcess, uint SpawnToken, string HostImage, string InheritPath, byte[] Identity, int Depth,
+        SECTION_IMAGE_INFORMATION ImageInformation);
+
     // Handles and environment a new process gets from its creator, passed in a session file named by the spawn token.
     internal static class ProcessInheritance
     {
@@ -179,17 +186,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             using MemoryStream Buffer = new MemoryStream();
             using BinaryWriter Writer = new BinaryWriter(Buffer, Encoding.UTF8);
-            Writer.Write(Magic);
-            Writer.Write(Version);
-            Writer.Write(Std[0]);
-            Writer.Write(Std[1]);
-            Writer.Write(Std[2]);
-            Writer.Write(Environment?.Length ?? 0);
-            if (Environment != null)
-                Writer.Write(Environment);
-
-            Writer.Write(Identity.Length);
-            Writer.Write(Identity);
+            WriteRecordHeader(Writer, Std, Environment, Identity);
 
             long CountPosition = Buffer.Position;
             Writer.Write(0);
@@ -227,6 +224,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             Buffer.Position = CountPosition;
             Writer.Write(Count);
             return Buffer.ToArray();
+        }
+
+        internal static byte[] BuildWithoutHandles(byte[] Identity)
+        {
+            using MemoryStream Buffer = new MemoryStream();
+            using BinaryWriter Writer = new BinaryWriter(Buffer, Encoding.UTF8);
+            WriteRecordHeader(Writer, new ulong[3], null, Identity);
+            Writer.Write(0);
+            return Buffer.ToArray();
+        }
+
+        private static void WriteRecordHeader(BinaryWriter Writer, ulong[] Std, byte[] Environment, byte[] Identity)
+        {
+            Writer.Write(Magic);
+            Writer.Write(Version);
+            Writer.Write(Std[0]);
+            Writer.Write(Std[1]);
+            Writer.Write(Std[2]);
+            Writer.Write(Environment?.Length ?? 0);
+            if (Environment != null)
+                Writer.Write(Environment);
+
+            Writer.Write(Identity.Length);
+            Writer.Write(Identity);
         }
 
         private static bool TryWriteFile(BinaryWriter Writer, ulong Handle, HandleEntry Entry, WinFile File)
@@ -585,6 +606,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const int MaxSessionProcesses = 6;
 
+        internal const ushort MachineAmd64 = 0x8664;
+
         private const int MaxCommandLineChars = 8000;
 
         private const ulong ParamsCurrentDirectory64 = 0x38;
@@ -598,7 +621,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int MaxStringBytes = 0x8000;
 
         private const int StartupTimeoutMilliseconds = 60000;
-        private const int StartupPollMilliseconds = 10;
+        internal const int StartupPollMilliseconds = 10;
 
         private const int HeaderBytes = 0x400;
         private const ushort DosSignature = 0x5A4D;
@@ -632,26 +655,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <param name="InheritRecordFor">Builds the inheritance record from the image subsystem and the token form.</param>
         internal static bool TryLaunch(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, bool StartSuspended, WinToken Assigned, Func<uint, byte[], byte[]> InheritRecordFor, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
         {
-            string InheritPath = null;
-            bool Launched = TryLaunchWithRecord(Instance, ProcessParameters, ImageNameHint, StartSuspended, Assigned, InheritRecordFor, ref InheritPath, out Process, out ImageInformation, out Status);
-
-            if (!Launched && InheritPath != null)
-            {
-                try
-                {
-                    File.Delete(InheritPath);
-                }
-                catch (Exception Error)
-                {
-                    Utils.LogError($"[GuestProcessLauncher] Cannot remove an unused handle record: {Error.Message}");
-                }
-            }
-
-            return Launched;
-        }
-
-        private static bool TryLaunchWithRecord(BinaryEmulator Instance, ulong ProcessParameters, string ImageNameHint, bool StartSuspended, WinToken Assigned, Func<uint, byte[], byte[]> InheritRecordFor, ref string InheritPath, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status)
-        {
             Process = null;
             ImageInformation = default;
 
@@ -662,6 +665,87 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (string.IsNullOrWhiteSpace(ImagePath))
                 ImagePath = ImageNameHint;
+
+            LaunchRequest Request = new LaunchRequest(ImagePath, CommandLine, CurrentDirectory, StartSuspended, Assigned, EmulatorOptions(Instance), Instance.WinHelper.PID);
+            if (!TryStart(Request, InheritRecordFor, out StartedProcess Started, out Status))
+                return false;
+
+            ImageInformation = Started.ImageInformation;
+            if (!WaitForStartup(Started.HostProcess, Started.SpawnToken, Environment.TickCount64 + StartupTimeoutMilliseconds, CancellationToken.None,
+                    out uint ProcessId, out _, out ulong PebAddress, out ulong StartupParameters, out uint MainThreadId))
+            {
+                Utils.LogError($"[GuestProcessLauncher] {Path.GetFileName(Started.HostImage)} never reached guest startup.");
+                Abandon(Started);
+                Status = NTSTATUS.STATUS_TIMEOUT;
+                return false;
+            }
+
+            // The creator keeps the token it gave, under the identity the child reports for it.
+            TokenTransfer.TryRead(Started.Identity, ProcessId, out WinToken ChildToken);
+
+            Process = new WinProcess
+            {
+                PID = ProcessId,
+                PPID = Instance.WinHelper.PID,
+                Name = Path.GetFileName(Started.HostImage),
+                Path = ImagePath,
+                HostImagePath = Started.HostImage,
+                Arch = ImageInformation.Machine == MachineAmd64 ? BinaryArchitecture.x64 : BinaryArchitecture.x86,
+                CreationTime = Instance.GetEmulatedSystemTimeFileTimeUtc(),
+                PrimaryToken = ChildToken,
+                MainThreadId = MainThreadId,
+                ImageInformation = ImageInformation,
+                Remote = RemoteGuestProcess.Adopt(ProcessId, Started.HostProcess, Instance, PebAddress, StartupParameters),
+            };
+
+            Instance.WinHelper.ClaimProcessId(ProcessId);
+            if (MainThreadId != 0)
+                Instance.WinHelper.ClaimProcessId(MainThreadId);
+
+            Instance.TriggerEventMessage($"[GuestProcessLauncher] Launched {Process.Name} as guest process {Process.PID} (depth {Started.Depth + 1}).", LogFlags.Syscall);
+
+            Status = NTSTATUS.STATUS_SUCCESS;
+            return true;
+        }
+
+        // Only InheritRecordFor reads emulator state, so a caller off KernelLock passes one that reads none.
+        internal static bool TryStart(in LaunchRequest Request, Func<uint, byte[], byte[]> InheritRecordFor, out StartedProcess Started, out NTSTATUS Status)
+        {
+            string InheritPath = null;
+            bool Done = TryStartWithRecord(Request, InheritRecordFor, ref InheritPath, out Started, out Status);
+            if (!Done)
+                DeleteRecord(InheritPath);
+
+            return Done;
+        }
+
+        internal static void Abandon(in StartedProcess Started)
+        {
+            Terminate(Started.HostProcess);
+            DeleteRecord(Started.InheritPath);
+        }
+
+        private static void DeleteRecord(string InheritPath)
+        {
+            if (InheritPath == null)
+                return;
+
+            try
+            {
+                File.Delete(InheritPath);
+            }
+            catch (Exception Error)
+            {
+                Utils.LogError($"[GuestProcessLauncher] Cannot remove an unused handle record: {Error.Message}");
+            }
+        }
+
+        private static bool TryStartWithRecord(in LaunchRequest Request, Func<uint, byte[], byte[]> InheritRecordFor, ref string InheritPath, out StartedProcess Started, out NTSTATUS Status)
+        {
+            Started = default;
+            string ImagePath = Request.ImagePath;
+            string CommandLine = Request.CommandLine;
+            string CurrentDirectory = Request.CurrentDirectory;
 
             if (string.IsNullOrWhiteSpace(ImagePath))
             {
@@ -683,10 +767,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             }
 
-            if (!TryReadImageInformation(HostImage, out ImageInformation))
+            if (!TryReadImageInformation(HostImage, out SECTION_IMAGE_INFORMATION ImageInformation))
             {
                 Utils.LogError($"[GuestProcessLauncher] Refusing to launch {HostImage}: not a PE image.");
                 Status = NTSTATUS.STATUS_INVALID_IMAGE_FORMAT;
+                return false;
+            }
+
+            if (Request.RequiredMachine != 0 && ImageInformation.Machine != Request.RequiredMachine)
+            {
+                Status = NTSTATUS.STATUS_IMAGE_MACHINE_TYPE_MISMATCH;
                 return false;
             }
 
@@ -711,7 +801,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             string WorkingDirectory = ResolveWorkingDirectory(CurrentDirectory, HostImage);
             uint SpawnToken = NextSpawnToken();
 
-            byte[] Identity = TokenTransfer.Write(Assigned);
+            byte[] Identity = TokenTransfer.Write(Request.Token);
             if (Identity == null)
             {
                 Utils.LogError($"[GuestProcessLauncher] The token of {Path.GetFileName(HostImage)} does not fit the token form.");
@@ -747,46 +837,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 HostProcess = null;
             }
-            else if (!TryStartEmulator(Instance, HostImage, GuestArguments, CurrentDirectory, WorkingDirectory, SpawnToken, Depth, StartSuspended, out HostProcess))
+            else if (!TryStartEmulator(Request, HostImage, GuestArguments, WorkingDirectory, SpawnToken, Depth, out HostProcess))
             {
                 Status = NTSTATUS.STATUS_NOT_SUPPORTED;
                 return false;
             }
 
-            if (!WaitForStartup(HostProcess, SpawnToken, out uint ProcessId, out ulong PebAddress, out ulong StartupParameters, out uint MainThreadId))
-            {
-                Utils.LogError($"[GuestProcessLauncher] {Path.GetFileName(HostImage)} never reached guest startup.");
-                Terminate(HostProcess);
-                Status = NTSTATUS.STATUS_TIMEOUT;
-                return false;
-            }
-
-            const ushort MachineAmd64 = 0x8664;
-
-            // The creator keeps the token it gave, under the identity the child reports for it.
-            TokenTransfer.TryRead(Identity, ProcessId, out WinToken ChildToken);
-
-            Process = new WinProcess
-            {
-                PID = ProcessId,
-                PPID = Instance.WinHelper.PID,
-                Name = Path.GetFileName(HostImage),
-                Path = ImagePath,
-                HostImagePath = HostImage,
-                Arch = ImageInformation.Machine == MachineAmd64 ? BinaryArchitecture.x64 : BinaryArchitecture.x86,
-                CreationTime = Instance.GetEmulatedSystemTimeFileTimeUtc(),
-                PrimaryToken = ChildToken,
-                MainThreadId = MainThreadId,
-                ImageInformation = ImageInformation,
-                Remote = RemoteGuestProcess.Adopt(ProcessId, HostProcess, Instance, PebAddress, StartupParameters),
-            };
-
-            Instance.WinHelper.ClaimProcessId(ProcessId);
-            if (MainThreadId != 0)
-                Instance.WinHelper.ClaimProcessId(MainThreadId);
-
-            Instance.TriggerEventMessage($"[GuestProcessLauncher] Launched {Process.Name} as guest process {Process.PID} (depth {Depth + 1}).", LogFlags.Syscall);
-
+            Started = new StartedProcess(HostProcess, SpawnToken, HostImage, InheritPath, Identity, Depth, ImageInformation);
             Status = NTSTATUS.STATUS_SUCCESS;
             return true;
         }
@@ -820,14 +877,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         private static bool TryStartEmulator(
-            BinaryEmulator Instance,
+            in LaunchRequest Request,
             string HostImage,
             string GuestArguments,
-            string CurrentDirectory,
             string WorkingDirectory,
             uint SpawnToken,
             int Depth,
-            bool StartSuspended,
             out Process HostProcess)
         {
             HostProcess = null;
@@ -848,7 +903,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ManagedEntry != null)
                 StartInfo.ArgumentList.Add(ManagedEntry);
 
-            AppendEmulatorOptions(Instance, StartInfo.ArgumentList);
+            foreach (string Option in Request.EmulatorOptions)
+                StartInfo.ArgumentList.Add(Option);
 
             if (!string.IsNullOrEmpty(GuestArguments))
             {
@@ -856,21 +912,21 @@ namespace Brovan.Core.Emulation.OS.Windows
                 StartInfo.ArgumentList.Add(Encode(GuestArguments));
             }
 
-            if (!string.IsNullOrWhiteSpace(CurrentDirectory))
+            if (!string.IsNullOrWhiteSpace(Request.CurrentDirectory))
             {
                 StartInfo.ArgumentList.Add("--cwd");
-                StartInfo.ArgumentList.Add(Encode(StripNtPrefix(CurrentDirectory)));
+                StartInfo.ArgumentList.Add(Encode(StripNtPrefix(Request.CurrentDirectory)));
             }
 
             StartInfo.ArgumentList.Add(HostImage);
             StartInfo.Environment[SpawnDepthVariable] = (Depth + 1).ToString();
             StartInfo.Environment[SessionVariable] = GuestSession.SessionId;
             StartInfo.Environment[SpawnTokenVariable] = SpawnToken.ToString();
-            StartInfo.Environment[ParentProcessVariable] = Instance.WinHelper.PID.ToString();
+            StartInfo.Environment[ParentProcessVariable] = Request.ParentProcessId.ToString();
 
             // The child inherits this emulator's environment, so a suspended process must clear the request
             // again or every process it goes on to spawn starts held as well.
-            if (StartSuspended)
+            if (Request.StartSuspended)
                 StartInfo.Environment[StartSuspendedVariable] = "1";
             else
                 StartInfo.Environment.Remove(StartSuspendedVariable);
@@ -899,25 +955,25 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// The child only owns a PEB and answers cross-process requests once its emulator booted, and the creating
         /// kernel32 uses both as soon as this returns. Windows hands back an address space that already exists.
         /// </summary>
-        private static bool WaitForStartup(Process HostProcess, uint SpawnToken, out uint ProcessId, out ulong PebAddress, out ulong StartupParameters, out uint MainThreadId)
+        internal static bool WaitForStartup(Process HostProcess, uint SpawnToken, long Deadline, CancellationToken Cancel, out uint ProcessId, out uint HostProcessId,
+            out ulong PebAddress, out ulong StartupParameters, out uint MainThreadId)
         {
-            long Deadline = Environment.TickCount64 + StartupTimeoutMilliseconds;
-
             while (true)
             {
-                if (GuestSession.TryResolveSpawn(SpawnToken, out ProcessId, out _, out PebAddress, out StartupParameters, out MainThreadId))
+                if (GuestSession.TryResolveSpawn(SpawnToken, out ProcessId, out HostProcessId, out PebAddress, out StartupParameters, out MainThreadId))
                     return true;
 
-                if ((HostProcess != null && HostProcess.HasExited) || Environment.TickCount64 >= Deadline)
+                if ((HostProcess != null && HostProcess.HasExited) || Environment.TickCount64 >= Deadline || Cancel.IsCancellationRequested)
                 {
                     ProcessId = 0;
+                    HostProcessId = 0;
                     PebAddress = 0;
                     StartupParameters = 0;
                     MainThreadId = 0;
                     return false;
                 }
 
-                Thread.Sleep(StartupPollMilliseconds);
+                Cancel.WaitHandle.WaitOne(StartupPollMilliseconds);
             }
         }
 
@@ -949,8 +1005,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Path.GetDirectoryName(HostImage) ?? Environment.CurrentDirectory;
         }
 
-        private static void AppendEmulatorOptions(BinaryEmulator Instance, System.Collections.ObjectModel.Collection<string> Arguments)
+        internal static List<string> EmulatorOptions(BinaryEmulator Instance)
         {
+            List<string> Arguments = new List<string>();
             string Backend = Instance.Settings.BackendKind switch
             {
                 EmulationBackendKind.Whp => "whp",
@@ -986,9 +1043,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Arguments.Add("-c");
             Arguments.Add("start;exit");
+            return Arguments;
         }
 
-        private static void ForwardHostOptions(System.Collections.ObjectModel.Collection<string> Arguments)
+        private static void ForwardHostOptions(List<string> Arguments)
         {
             string[] HostArguments = Environment.GetCommandLineArgs();
 
@@ -1178,19 +1236,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrWhiteSpace(CommandLine))
                 return null;
 
-            int Index = 0;
-            if (CommandLine[0] == '"')
+            int Index = Argv0Length(CommandLine);
+            return Index >= CommandLine.Length ? null : CommandLine.Substring(Index).TrimStart(' ', '\t');
+        }
+
+        internal static string Argv0(string CommandLine) => CommandLine.Substring(0, Argv0Length(CommandLine)).Trim('"');
+
+        private static int Argv0Length(string CommandLine)
+        {
+            if (CommandLine.Length != 0 && CommandLine[0] == '"')
             {
-                Index = CommandLine.IndexOf('"', 1);
-                Index = Index < 0 ? CommandLine.Length : Index + 1;
-            }
-            else
-            {
-                while (Index < CommandLine.Length && CommandLine[Index] != ' ' && CommandLine[Index] != '\t')
-                    Index++;
+                int Quote = CommandLine.IndexOf('"', 1);
+                return Quote < 0 ? CommandLine.Length : Quote + 1;
             }
 
-            return Index >= CommandLine.Length ? null : CommandLine.Substring(Index).TrimStart(' ', '\t');
+            int Index = 0;
+            while (Index < CommandLine.Length && CommandLine[Index] != ' ' && CommandLine[Index] != '\t')
+                Index++;
+            return Index;
         }
     }
 }

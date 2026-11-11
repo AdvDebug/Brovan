@@ -56,6 +56,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
             return Service;
         }
 
+        // NT: UserStatics::GetDefault gives the default account's user, else the user of the caller's token.
+        internal SessionUserObject DefaultUser(BinaryEmulator Instance, out uint Result)
+        {
+            WinToken Caller = EffectiveToken(Instance);
+            bool SessionUser = Caller != null && UserSidOf(Caller).AsSpan().SequenceEqual(InteractiveUserSid);
+            Result = SessionUser ? Orpc.SOk : ErrorNoSuchLogonSession;
+            return SessionUser ? User : null;
+        }
+
         // The checks and their order follow UserStatics::TryFindUserByNonRoamableId.
         internal SessionUserObject FindUser(BinaryEmulator Instance, ReadOnlySpan<char> NonRoamableId)
         {

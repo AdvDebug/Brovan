@@ -1266,6 +1266,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public string PackageFamilyName
             => FindAttribute(WinTokenSecurityAttribute.SysAppIdName) is { StringValues.Length: > 2 } AppId ? AppId.StringValues[2] : null;
 
+        public string PackageFullName
+            => FindAttribute(WinTokenSecurityAttribute.SysAppIdName) is { StringValues.Length: > 0 } AppId ? AppId.StringValues[0] : null;
+
         // NT compares attribute names without regard to case.
         public WinTokenSecurityAttribute? FindAttribute(string Name)
         {
@@ -3013,7 +3016,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal ulong HandleKey;
         private ServedClient? Served;
 
+        internal bool SenderWaits;
+        internal AlpcRequestFacts Facts;
+        internal DeferredAnswer Deferred;
+
         internal ServedClient Client => Served ??= AlpcMessaging.ServedClientOf(Port, HandleKey);
+
+        // Null when the answer cannot wait, and the handler then answers now. One that gets it answers only through it.
+        internal DeferredAnswer TakeDeferredAnswer()
+        {
+            if (Deferred != null)
+                return null;
+
+            Deferred = AlpcMessaging.TakeDeferredAnswer(Port, Client, Facts, SenderWaits);
+            return Deferred;
+        }
 
         public void AttachHandle(ulong Handle)
         {

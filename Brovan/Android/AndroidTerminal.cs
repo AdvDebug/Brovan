@@ -162,7 +162,7 @@ namespace Brovan.Android
                 return;
 
             const uint exitCode = (uint)NTSTATUS.STATUS_CONTROL_C_EXIT;
-            GuestSession.PublishExit(exitCode);
+            Core.Emulation.Guests.WindowsGuest.PublishExit(exitCode);
             Utils.SetGuestExitCode(exitCode);
             emulator.RequestTermination();
         }

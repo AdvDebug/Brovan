@@ -79,6 +79,9 @@ namespace Brovan.Core.Settings
         // Interfaces one COM apartment the host runs has exported at a time.
         public static int HostObjects { get; private set; }
 
+        // Class objects one guest process has registered with RPCSS at a time.
+        public static int RpcssRegistrations { get; private set; }
+
         public static int DxgkHandles { get; private set; }
 
         public static int DxgkQueuedPackets { get; private set; }
@@ -154,6 +157,7 @@ namespace Brovan.Core.Settings
             CoreMessagingRegistrations = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
             HostMessagingObjects = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
             HostObjects = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
+            RpcssRegistrations = (int)Pick(Off: 4096, Minimal: 4096, Medium: 2048, High: 1024, Aggressive: 512);
             DxgkHandles = (int)Pick(Off: 65536, Minimal: 49152, Medium: 32768, High: 16384, Aggressive: 8192);
             DxgkQueuedPackets = (int)Pick(Off: 16384, Minimal: 12288, Medium: 8192, High: 4096, Aggressive: 2048);
             DxgkPendingPresents = (int)Pick(Off: 64, Minimal: 64, Medium: 48, High: 32, Aggressive: 16);

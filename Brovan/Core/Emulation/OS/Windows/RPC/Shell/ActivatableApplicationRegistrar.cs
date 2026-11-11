@@ -147,7 +147,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Shell
                     return;
                 }
 
-                if (!RpcssPortHandler.TryGetServerOxid(App.Object.Oxid, out RpcssPortHandler.ServerOxid Server))
+                if (!RpcssPortHandler.TryGetServerOxid(Instance, App.Object.Oxid, out RpcssPortHandler.ServerOxid Server))
                 {
                     Utils.LogError("[-] ActivationManager: the resolver knows no endpoint for the apartment of the registered application.");
                     return;

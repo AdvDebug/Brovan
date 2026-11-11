@@ -50,6 +50,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal const byte SidRevision = 1;
         internal const int MaxSubAuthorities = 15;
+        internal const int MaxSidLength = 8 + 4 * MaxSubAuthorities;
         internal const byte AppPackageAuthority = 15;
         internal const uint AppPackageBaseRid = 2;
         internal const uint AppCapabilityBaseRid = 3;

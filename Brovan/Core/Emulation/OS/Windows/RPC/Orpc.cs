@@ -143,6 +143,18 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             return true;
         }
 
+        public static bool TryRenewCallId(Span<byte> Stub)
+        {
+            if (!TryGetRequestParameters(Stub, out _))
+                return false;
+
+            int Position = OrpcThisSize;
+            if (BinaryPrimitives.ReadUInt32LittleEndian(Stub.Slice(OffOrpcThisExtensions)) != 0)
+                TrySkipExtentArray(Stub, ref Position);
+
+            return Guid.NewGuid().TryWriteBytes(Stub.Slice(Position + OffLocalThisCallId));
+        }
+
         private static bool TrySkipExtentArray(ReadOnlySpan<byte> Stub, ref int Position)
         {
             if (Stub.Length - Position < ExtentArrayHeaderSize)

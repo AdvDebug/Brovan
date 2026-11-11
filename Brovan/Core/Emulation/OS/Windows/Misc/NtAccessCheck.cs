@@ -703,16 +703,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if ((Entry.Flags & InheritOnlyAce) != 0 || !Entry.AppliesToObject)
                     continue;
 
-                // Conditions are not evaluated, so one that applies fails the check (SepNormalAccessCheck).
-                if (Entry.Type == AccessAllowedCallbackAce)
+                // Conditions are not evaluated, so one that applies fails the check (SepNormalAccessCheck), unless every
+                // right it could grant or deny is already decided.
+                if (Entry.Type is AccessAllowedCallbackAce or AccessDeniedCallbackAce or AccessAllowedCallbackObjectAce or AccessDeniedCallbackObjectAce)
                 {
                     if (!Entry.HasCondition)
                         continue;
 
-                    bool Applies = PackageWanted != 0 && IsPackageOrCapabilitySid(Entry.Sid)
-                        ? PackageMatches(Entry.Sid, Client.Token)
-                        : Matches(Entry.Sid, ref Client, Self, AllowGroups);
-                    if (Applies)
+                    bool Allowing = Entry.Type is AccessAllowedCallbackAce or AccessAllowedCallbackObjectAce;
+                    bool Package = Allowing && PackageWanted != 0 && IsPackageOrCapabilitySid(Entry.Sid);
+                    bool Applies = Package ? PackageMatches(Entry.Sid, Client.Token) : Matches(Entry.Sid, ref Client, Self, Allowing ? AllowGroups : DenyGroups);
+                    uint Undecided = Package ? Entry.Mask & PackageWanted & ~PackageGranted : Entry.Mask & (Maximum ? ~(Allowed | Denied) : Remaining);
+                    if (Applies && Undecided != 0)
                     {
                         Utils.LogError("[-] NtAccessCheck: a callback ACE with a condition applies to the client; conditions are not evaluated.");
                         return NTSTATUS.STATUS_NOT_IMPLEMENTED;

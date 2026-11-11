@@ -58,7 +58,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.TriggerEventMessage($"[{(ExitCode == 0 ? '+' : '!')}] Process asked to be terminated with exit code 0x{ExitCode:X}", LogFlags.Important);
 
             NtTerminateJobObject.CloseJobsOfExitingProcess(Instance);
-            GuestSession.PublishExit(ExitCode);
+            Guests.WindowsGuest.PublishExit(ExitCode);
             Utils.SetGuestExitCode(ExitCode);
             TerminateThreads(Instance, ExitCode, false);
             Instance.WinHelper.HideDesktopWindow();

@@ -460,6 +460,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Win32kQueuePort.ReleasePort(Emulator, WinEmulatedThread.TryGetState(Thread));
             NtTimerHelpers.RundownTimers(Emulator, Thread);
             AlpcMessaging.DeliverConnectReplies(Emulator, Thread.ThreadId);
+            AlpcMessaging.EndThreadAnswers(Emulator, Thread.ThreadId);
             WinEmulatedThread.TryGetState(Thread)?.MmcssRegistration?.Leave(Emulator);
 
             bool Current = Emulator.CurrentThreadId == (int)Thread.ThreadId;
@@ -2276,12 +2277,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Service;
         }
 
-        private void AddHostApartmentPort(RPC.HostApartment Apartment)
+        private void AddHostApartmentPort(RPC.HostApartment Apartment, bool SessionWide = false)
         {
-            if (AlpcMessaging.Supported(this))
-                WinPorts.Add(AlpcMessaging.CreateHostPort(Apartment.PortName, Apartment));
-            else
+            if (!AlpcMessaging.Supported(this))
+            {
                 WinPorts.Add(new WinPort { Name = Apartment.PortName, Handler = Apartment.Handle });
+                return;
+            }
+
+            WinPort Port = AlpcMessaging.CreateHostPort(Apartment.PortName, Apartment);
+            WinPorts.Add(Port);
+            if (SessionWide)
+                Apartment.SessionPort = Port;
         }
 
         public void InitializeProcessTimes(WinProcess Process, long AgeMilliseconds, bool GenerateCpuTimes)
@@ -3266,7 +3273,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ShellNavigation = RPC.CoreUI.NavigationServer.Create(this, CoreMessagingRegistrar, ShellProcess.PID, GenerateRandomPID());
 
             RPC.HostApartment UserManagerApartment = new RPC.HostApartment(UserManagerProcess.PID, GenerateRandomPID());
-            AddHostApartmentPort(UserManagerApartment);
+            AddHostApartmentPort(UserManagerApartment, SessionWide: true);
             UserManager = RPC.UserManager.UserManagerService.Create(this, UserManagerProcess, UserManagerApartment);
 
             // The kernel publishes these under \KernelObjects on every system. ntdll's commit-condition

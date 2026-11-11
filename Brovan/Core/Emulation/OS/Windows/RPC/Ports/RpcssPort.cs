@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Brovan.Core.Helpers;
+using Brovan.Core.Settings;
 
 namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 {
@@ -14,6 +15,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private static readonly Guid LocalObjectExporter = new Guid("e60c73e6-88f9-11cf-9af1-0020af6e72f4");
         private static readonly Guid Scm = new Guid("412f241e-c12a-11ce-abff-0020af6e7a17");
         private static readonly Guid ScmLocalActivator = new Guid("00000136-0000-0000-c000-000000000046");
+        private static readonly Guid LocalSystemActivator = new Guid("00000132-0000-0000-c000-000000000046");
         private static readonly Guid ErrorExtension = new Guid("0000031c-0000-0000-c000-000000000046");
         private static readonly Guid RestrictedErrorObject = new Guid("00000352-0000-0000-c000-000000000046");
         private static readonly Guid ActivationPropertiesOut = new Guid("00000339-0000-0000-c000-000000000046");
@@ -31,10 +33,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint ProcSetAppId = 1;
         private const uint ProcAllocateReservedIds = 3;
         private const uint ProcBulkUpdateOIDs = 4;
+        private const uint ProcClientResolveOXID = 5;
         private const uint ProcServerAllocateOXIDAndOIDs = 6;
         private const uint ProcServerAllocateOIDs = 7;
         private const uint ProcServerFreeOXIDAndOIDs = 8;
         private const uint ProcDisconnect = 10;
+        private const uint ProcNotifyStarted = 0;
+        private const uint ProcNotifyStopped = 1;
         private const uint ProcRegisterWindowPropInterface = 6;
         private const uint ProcGetWindowPropInterface = 7;
         private const uint ProcNotifyDragDropStartOrStop = 13;
@@ -44,6 +49,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const int ProxyDecodeInfoSize = 96;
         private const int PingPeriodSeconds = 120;
         private const uint ScmProcessId = 0x3F8;
+
+        // Any rpcss thread id works, because a server reads only the process id of its caller.
+        private const uint ScmThreadId = 0x400;
         private const uint AuthnLevelConnect = 2;
         private const uint ImpLevelIdentify = 2;
         private const int SecurityDescriptorCount = 5;
@@ -60,11 +68,42 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const int FreeOxidOffset = 24;
 
         private const uint RegdbEClassNotReg = 0x80040154;
+        private const uint CoEServerStopping = 0x80080008;
+
+        // _RegInput entries: CLSID, OXID, IPID, REGCLS flags and service id.
+        private const int RegistrationEntrySize = 48;
+        private const int RegistrationFormOffset = Ndr20Writer.ContextHandleSize;
+        private const int OldFormEntriesOffset = (RegistrationFormOffset + 2 * sizeof(uint) + 7) & ~7;
+        private const uint MaxRegistrations = 0x1000;
+        private const uint MaxPackageGraph = 0x400;
+
+        // REGCLS_SINGLEUSE is the value 0 of these bits.
+        private const uint RegclsUseMask = 3;
+
+        // NT: rpcss sets this ORPCTHIS flag on the activation it forwards and gives its LOCALTHIS a new call id
+        // (CServerListEntry::CallServer).
+        private const uint ForwardedOrpcFlag = 0x8;
+        private const int OrpcThisFlagsOffset = 4;
 
         private const int SerializationHeaderSize = 0x10;
         private const int ActivationBlobPrefixSize = 8;
         private const ulong SerializationCommonHeader = 0xCCCCCCCC00081001;
         private const uint MaxActivationProperties = 10;
+
+        // The flat part of an OXID_INFO as NDR lays it out.
+        internal const int OxidInfoSize = 0x80;
+        private const int OxidInfoProcessId = 0x04;
+        private const int OxidInfoAuthnHint = 0x08;
+        private const int OxidInfoVersion = 0x0C;
+        private const int OxidInfoContainerVersion = 0x10;
+        private const int OxidInfoExtensions = 0x20;
+        private const int OxidInfoRemUnknownIpid = 0x24;
+        private const int OxidInfoFlags = 0x34;
+        private const int OxidInfoBindings = 0x38;
+        private const int OxidInfoProcessIdentifier = 0x3C;
+        private const int OxidInfoHstrings = 0x5C;
+        private const int OxidInfoPrimaryOxid = 0x68;
+        private const int OxidInfoPrimaryRemUnknownIpid = 0x70;
 
         // The package name, the user SID and the AppContainer SID of an OXID_INFO.
         private const int OxidInfoHstringCount = 3;
@@ -72,7 +111,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private const uint MultithreadedApartmentTid = 0xFFFFFFFF;
         private const uint ContainerVersion = 3;
-        private const uint OxidInfoFlags = 0x02000000;
+        private const uint HostOxidFlags = 0x02000000;
         private const ushort AuthnWinNt = 10;
         private const ushort AuthzNone = 0xFFFF;
 
@@ -85,13 +124,43 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private static readonly Guid ResolverHandle = Guid.NewGuid();
         private static readonly Guid ProcessIdentifier = Guid.NewGuid();
         private static readonly ulong ProcessSignature = Orpc.NewId();
-        private static readonly ulong LocalMachineId = Orpc.NewId();
 
-        internal readonly record struct ServerOxid(string Endpoint, Guid RemUnknownIpid);
+        // NT: one resolver serves the machine, so every process of the session reports one MID.
+        private static readonly ulong LocalMachineId = SessionNames.Hash(GuestSession.SessionId);
+
+        // SecurityBindings keeps the two terminators of the list.
+        internal readonly record struct ServerOxid(byte[] Info, string Endpoint, string SecurityBindings, string PackageFullName, string UserSid, string AppContainerSid)
+        {
+            internal Guid RemUnknownIpid => new Guid(Info.AsSpan(OxidInfoRemUnknownIpid, 16));
+        }
 
         internal readonly record struct HostClass(HostApartment Apartment, HostObject Object);
 
         private static readonly Dictionary<ulong, ServerOxid> ServerOxids = new Dictionary<ulong, ServerOxid>();
+
+        internal readonly record struct ClassRegistration(uint Key, Guid Class, ulong Oxid, Guid Ipid, uint Flags, uint ProcessId, byte[] UserSid,
+            string PackageFullName);
+
+        internal readonly struct LaunchKey
+        {
+            internal LaunchKey(Guid Class, bool PerPackage, string PackageFullName, byte[] UserSid)
+            {
+                this.Class = Class;
+                this.PerPackage = PerPackage;
+                this.PackageFullName = PerPackage ? PackageFullName ?? string.Empty : string.Empty;
+                this.UserSid = UserSid;
+            }
+
+            internal Guid Class { get; }
+            internal bool PerPackage { get; }
+            internal string PackageFullName { get; }
+            internal byte[] UserSid { get; }
+        }
+
+        private static readonly Dictionary<uint, ClassRegistration> Registrations = new Dictionary<uint, ClassRegistration>();
+        private static uint NextRegistrationKey;
+
+        private static readonly List<PendingActivation> Launching = new List<PendingActivation>();
 
         // rpcss makes one primary OXID per process at its first registration and returns it from every one.
         private static ulong PrimaryOxid;
@@ -123,8 +192,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             if (Target == ScmLocalActivator)
             {
-                Reply = HandleScmLocalActivator(Message, Instance);
-                return Reply != null;
+                Reply = HandleScmLocalActivator(Message, Served, Instance);
+                return Reply != null || Served.Deferred != null;
             }
 
             if (Target == EndpointMapper.Interface)
@@ -135,9 +204,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             byte[] Stub = null;
             if (Target == LocalObjectExporter)
-                Stub = HandleLocalObjectExporter(Message.ProcNumber, Message.StubData, Instance.WinHelper.PID);
+                Stub = HandleLocalObjectExporter(Message.ProcNumber, Message.StubData, Instance);
             else if (Target == Scm)
-                Stub = HandleScm(Message.ProcNumber, Message.StubData);
+                Stub = HandleScm(Message.ProcNumber, Message.StubData, Instance);
 
             if (Stub == null)
                 return false;
@@ -146,12 +215,12 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return true;
         }
 
-        private static byte[] HandleLocalObjectExporter(uint ProcNumber, ReadOnlySpan<byte> Stub, uint ProcessId)
+        private static byte[] HandleLocalObjectExporter(uint ProcNumber, ReadOnlySpan<byte> Stub, BinaryEmulator Instance)
         {
             switch (ProcNumber)
             {
                 case ProcConnect:
-                    return Connect(Stub, ProcessId);
+                    return Connect(Stub, Instance.WinHelper.PID);
 
                 case ProcSetAppId:
                     return SetAppId(Stub);
@@ -161,6 +230,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
                 case ProcBulkUpdateOIDs:
                     return BulkUpdateOIDs(Stub);
+
+                case ProcClientResolveOXID:
+                    return ClientResolveOXID(Stub, Instance);
 
                 case ProcServerAllocateOXIDAndOIDs:
                     return ServerAllocateOXIDAndOIDs(Stub);
@@ -178,10 +250,16 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return null;
         }
 
-        private static byte[] HandleScm(uint ProcNumber, ReadOnlySpan<byte> Stub)
+        private static byte[] HandleScm(uint ProcNumber, ReadOnlySpan<byte> Stub, BinaryEmulator Instance)
         {
             switch (ProcNumber)
             {
+                case ProcNotifyStarted:
+                    return NotifyStarted(Stub, Instance);
+
+                case ProcNotifyStopped:
+                    return NotifyStopped(Stub);
+
                 case ProcRegisterWindowPropInterface:
                     return RegisterWindowPropInterface(Stub);
 
@@ -195,7 +273,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return null;
         }
 
-        private static byte[] HandleScmLocalActivator(in LrpcMessage Message, BinaryEmulator Instance)
+        private static byte[] HandleScmLocalActivator(in LrpcMessage Message, PortReply Served, BinaryEmulator Instance)
         {
             uint ProcNumber = Message.ProcNumber;
             if (ProcNumber != ProcGetClassObject && ProcNumber != ProcCreateInstance)
@@ -208,8 +286,488 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (TryResolveHostClass(Instance.WinHelper, ProcNumber, Class, Blob, out HostClass Host))
                 return BuildActivationReply(Message, Instance, Host, Interfaces);
 
-            return LrpcPacket.BuildResponse(Message, ClassNotRegisteredReply);
+            PendingActivation Forward = Class == Guid.Empty ? null : StartForward(Message, Class, Instance);
+            if (Forward == null)
+                return LrpcPacket.BuildResponse(Message, ClassNotRegisteredReply);
+
+            if (Forward.Reply != null)
+                return Forward.Reply;
+
+            DeferredAnswer Answer = Served.TakeDeferredAnswer();
+            if (Answer == null)
+            {
+                Forward.End();
+                Utils.LogError($"[-] RPCSS: the activation of {Class} cannot wait for its server here.");
+                return LrpcPacket.BuildResponse(Message, ClassNotRegisteredReply);
+            }
+
+            Forward.AnswerThrough(Answer);
+            return null;
         }
+
+        private static byte[] NotifyStarted(ReadOnlySpan<byte> Stub, BinaryEmulator Instance)
+        {
+            if (!TryReadRegistrations(Stub, out ReadOnlySpan<byte> Entries, out uint Count))
+                return null;
+
+            if (Registrations.Count + Count > MemoryBudget.RpcssRegistrations)
+            {
+                Utils.LogError($"[-] RPCSS: a process registers more than {MemoryBudget.RpcssRegistrations} class objects.");
+                Ndr20Writer Refused = new Ndr20Writer(12);
+                Refused.WriteUInt32(0);
+                Refused.WriteUInt32(OrOk);
+                Refused.WriteUInt32(Orpc.EOutOfMemory);
+                return Refused.ToArray();
+            }
+
+            WinToken Token = NtQueryInformationToken.EffectiveToken(Instance);
+            byte[] UserSid = Token == null ? Array.Empty<byte>() : NtQueryInformationToken.UserSidOf(Token);
+            string Package = Token?.PackageFullName ?? string.Empty;
+
+            Ndr20Writer Writer = new Ndr20Writer(32 + (int)Count * sizeof(uint));
+            Writer.WriteUniqueReferent();
+            Writer.WriteUInt32(Count);
+            Writer.WriteUInt32(Count);
+            for (int i = 0; i < Count; i++)
+            {
+                ReadOnlySpan<byte> Entry = Entries.Slice(i * RegistrationEntrySize, RegistrationEntrySize);
+                if (++NextRegistrationKey == 0)
+                    NextRegistrationKey = 1;
+
+                ClassRegistration Registration = new ClassRegistration(NextRegistrationKey, new Guid(Entry.Slice(0, 16)), BinaryPrimitives.ReadUInt64LittleEndian(Entry.Slice(16)),
+                    new Guid(Entry.Slice(24, 16)), BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(40)), Instance.WinHelper.PID, UserSid, Package);
+                Registrations[Registration.Key] = Registration;
+
+                if ((Registration.Flags & RegclsUseMask) == 0)
+                    Utils.LogError($"[-] RPCSS: {Registration.Class} is registered for a single use; other processes do not see it.");
+                else
+                    RpcssSessionTable.PublishRegistration(Registration);
+
+                Writer.WriteUInt32(Registration.Key);
+            }
+
+            // Activations in any process may wait for this server.
+            SessionPump.RingAll();
+
+            Writer.WriteUInt32(OrOk);
+            Writer.WriteUInt32(Orpc.SOk);
+            return Writer.ToArray();
+        }
+
+        // Newer builds send the package graph before _RegInput. The old form is only _RegInput, whose conformance
+        // equals its count.
+        private static bool TryReadRegistrations(ReadOnlySpan<byte> Stub, out ReadOnlySpan<byte> Entries, out uint Count)
+        {
+            Entries = default;
+            Count = 0;
+            if (Stub.Length < RegistrationFormOffset + 8)
+                return false;
+
+            uint First = BinaryPrimitives.ReadUInt32LittleEndian(Stub.Slice(RegistrationFormOffset));
+            uint Second = BinaryPrimitives.ReadUInt32LittleEndian(Stub.Slice(RegistrationFormOffset + 4));
+            bool OldForm = First != 0 && First == Second && First <= MaxRegistrations && Stub.Length == OldFormEntriesOffset + RegistrationEntrySize * (int)First;
+
+            Ndr20Reader Reader = new Ndr20Reader(Stub);
+            if (!Reader.TryReadContextHandle(out _))
+                return false;
+
+            if (!OldForm)
+            {
+                if (!Reader.TryReadUInt32(out uint Packages) || !Reader.TryReadUInt32(out uint Graph) || (Packages == 0) != (Graph == 0) || Packages > MaxPackageGraph)
+                    return false;
+
+                if (Graph != 0)
+                {
+                    if (!Reader.TryReadUInt32(out uint Conformance) || Conformance != Packages || !Reader.TrySkip((int)Packages * sizeof(uint)))
+                        return false;
+
+                    for (int i = 0; i < Packages; i++)
+                    {
+                        if (!Orpc.TrySkipHstringBody(ref Reader))
+                            return false;
+                    }
+                }
+            }
+
+            if (!Reader.TryReadUInt32(out uint Size) || !Reader.TryReadUInt32(out Count) || Size != Count || Count == 0 || Count > MaxRegistrations)
+                return false;
+
+            Reader.Align(8);
+            return Reader.TryReadBytes((int)Count * RegistrationEntrySize, out Entries);
+        }
+
+        // NT: rpcss finds a registration by its key, and newer builds send its CLSID as zero.
+        private static byte[] NotifyStopped(ReadOnlySpan<byte> Stub)
+        {
+            const int RevokedClassSize = 16;
+            Ndr20Reader Reader = new Ndr20Reader(Stub);
+            if (!Reader.TryReadContextHandle(out _) || !Reader.TryReadUInt32(out uint Conformance) || !Reader.TryReadUInt32(out uint Count)
+                || Conformance != Count || Count > MaxRegistrations)
+                return null;
+
+            for (int i = 0; i < Count; i++)
+            {
+                if (!Reader.TrySkip(RevokedClassSize) || !Reader.TryReadUInt32(out uint Key))
+                    return null;
+
+                if (Registrations.Remove(Key))
+                    RpcssSessionTable.WithdrawRegistration(Key);
+            }
+
+            return BuildStatus(OrOk);
+        }
+
+        internal static bool Matches(in LaunchKey Key, Guid Class, string PackageFullName, ReadOnlySpan<byte> UserSid)
+            => Class == Key.Class && UserSid.SequenceEqual(Key.UserSid)
+                && (!Key.PerPackage || string.Equals(PackageFullName, Key.PackageFullName, StringComparison.OrdinalIgnoreCase));
+
+        internal static bool SameKey(in LaunchKey Key, in LaunchKey Other) => Key.PerPackage == Other.PerPackage && Matches(Key, Other.Class, Other.PackageFullName, Other.UserSid);
+
+        private static bool Serves(in ClassRegistration Registration, in LaunchKey Key)
+            => (Registration.Flags & RegclsUseMask) != 0 && Matches(Key, Registration.Class, Registration.PackageFullName, Registration.UserSid);
+
+        private static List<ClassRegistration> FindServers(in LaunchKey Key)
+        {
+            List<ClassRegistration> Servers = new List<ClassRegistration>();
+            foreach (ClassRegistration Own in Registrations.Values)
+            {
+                if (Serves(Own, Key))
+                    Servers.Add(Own);
+            }
+
+            AddSessionServers(Key, Servers);
+            return Servers;
+        }
+
+        // Reads only the session table, so a launch task may call it off KernelLock.
+        internal static bool IsServedInSession(in LaunchKey Key)
+        {
+            List<ClassRegistration> Found = new List<ClassRegistration>();
+            AddSessionServers(Key, Found);
+            return Found.Count != 0;
+        }
+
+        private static void AddSessionServers(in LaunchKey Key, List<ClassRegistration> Servers)
+        {
+            int First = Servers.Count;
+            RpcssSessionTable.FindRegistrations(Key.Class, Servers);
+            for (int i = Servers.Count - 1; i >= First; i--)
+            {
+                if (!Serves(Servers[i], Key))
+                    Servers.RemoveAt(i);
+            }
+        }
+
+        internal static void Advance()
+        {
+            RpcssLaunch.Advance();
+            for (int Index = Launching.Count - 1; Index >= 0; Index--)
+            {
+                if (Index < Launching.Count)
+                    Launching[Index].AdvanceLaunch();
+            }
+        }
+
+        private static PendingActivation StartForward(in LrpcMessage Message, Guid Class, BinaryEmulator Instance)
+        {
+            WinToken Client = NtQueryInformationToken.EffectiveToken(Instance);
+            byte[] Request = Message.StubData.ToArray();
+            if (Client == null || Request.Length < OrpcThisFlagsOffset + sizeof(uint))
+                return null;
+
+            LocalServer Launchable = RpcssLaunch.TryReadServer(Instance.WinHelper, Class);
+            bool PerPackage = Launchable?.PerPackage == true;
+            LaunchKey Key = new LaunchKey(Class, PerPackage, Client.PackageFullName, NtQueryInformationToken.UserSidOf(Client));
+            List<ClassRegistration> Servers = FindServers(Key);
+            if ((Servers.Count == 0 && Launchable == null) || !Orpc.TryRenewCallId(Request))
+                return null;
+
+            uint Flags = BinaryPrimitives.ReadUInt32LittleEndian(Request.AsSpan(OrpcThisFlagsOffset));
+            BinaryPrimitives.WriteUInt32LittleEndian(Request.AsSpan(OrpcThisFlagsOffset), Flags | ForwardedOrpcFlag);
+
+            PendingActivation Activation = new PendingActivation(Instance, Message, Key, Client, Request, Servers, Launchable);
+            Activation.TryNextServer();
+            return Activation;
+        }
+
+        private sealed class PendingActivation
+        {
+            // NT: rpcss passes no directory, so the server starts in the one of the service host.
+            private static readonly string LaunchDirectory = WindowsVersionInfo.SystemRoot + "\\system32\\";
+
+            private readonly BinaryEmulator Instance;
+            private readonly LrpcMessage Request;
+            private readonly LaunchKey Key;
+            private readonly WinToken Client;
+            private readonly byte[] Stub;
+            private readonly LocalServer Launchable;
+            private List<ClassRegistration> Servers;
+
+            // A server that was gone or stopping is not tried again when the registrations are read again.
+            private readonly HashSet<(uint ProcessId, uint Key)> Tried = new HashSet<(uint ProcessId, uint Key)>();
+            private int Next;
+            private ClassRegistration Server;
+            private LrpcClient Connection;
+            private DeferredAnswer Answer;
+            private RpcssLaunch Launch;
+            private Timer Deadline;
+            private bool DeadlinePassed;
+            private bool Ended;
+
+            internal byte[] Reply { get; private set; }
+
+            internal PendingActivation(BinaryEmulator Instance, in LrpcMessage Request, in LaunchKey Key, WinToken Client, byte[] Stub, List<ClassRegistration> Servers,
+                LocalServer Launchable)
+            {
+                this.Instance = Instance;
+                this.Request = Request;
+                this.Key = Key;
+                this.Client = Client;
+                this.Stub = Stub;
+                this.Servers = Servers;
+                this.Launchable = Launchable;
+            }
+
+            internal void AnswerThrough(DeferredAnswer Deferred)
+            {
+                Answer = Deferred;
+                Deferred.Abandoned = End;
+            }
+
+            // NT: a server that is gone or stopping passes the activation to the next one, and when none is left the
+            // class's server is launched once.
+            internal void TryNextServer()
+            {
+                while (!Ended && Next < Servers.Count)
+                {
+                    Server = Servers[Next++];
+                    Tried.Add((Server.ProcessId, Server.Key));
+                    if (!TryGetServerOxid(Instance, Server.Oxid, out ServerOxid Exporter))
+                        continue;
+
+                    if (LrpcClient.Connect(Instance, LrpcClient.GetPortName(Exporter.Endpoint), ScmProcessId, ScmThreadId, Client,
+                            SecurityImpersonationLevel.SecurityImpersonation, Connected, out Connection) == LrpcPacket.RpcOk)
+                        return;
+                }
+
+                if (Ended)
+                    return;
+
+                if (Launchable != null && Launch == null)
+                    StartLaunch();
+                else
+                    Finish(ClassNotRegisteredReply, 0);
+            }
+
+            private void StartLaunch()
+            {
+                WinToken Token = AlpcMessaging.Supported(Instance) && GuestSession.OwnSlot >= 0
+                    ? RpcssLaunch.ServerToken(Instance, Launchable, Client, Key.PackageFullName)
+                    : null;
+                if (Token == null)
+                {
+                    Utils.LogError($"[-] RPCSS: the server of {Key.Class} cannot be launched for this process.");
+                    Finish(ClassNotRegisteredReply, 0);
+                    return;
+                }
+
+                LaunchRequest Launched = new LaunchRequest(Launchable.ImagePath, Launchable.CommandLine, LaunchDirectory, false, Token,
+                    GuestProcessLauncher.EmulatorOptions(Instance), ScmProcessId, GuestProcessLauncher.MachineAmd64);
+                Launch = RpcssLaunch.Start(Key, Launched);
+                if (Launch == null)
+                {
+                    Finish(ClassNotRegisteredReply, 0);
+                    return;
+                }
+
+                int Slot = GuestSession.OwnSlot;
+                Deadline = new Timer(_ =>
+                {
+                    Volatile.Write(ref DeadlinePassed, true);
+                    SessionPump.Ring(Slot);
+                }, null, RpcssLaunch.ServerStartTimeoutMilliseconds, Timeout.Infinite);
+                Launching.Add(this);
+            }
+
+            internal void AdvanceLaunch()
+            {
+                if (Ended)
+                    return;
+
+                List<ClassRegistration> Found = FindServers(Key);
+                Found.RemoveAll(Each => Tried.Contains((Each.ProcessId, Each.Key)));
+                if (Found.Count != 0)
+                {
+                    StopWaiting();
+                    Servers = Found;
+                    Next = 0;
+                    TryNextServer();
+                    return;
+                }
+
+                uint Failure = Launch.FailureStatus();
+                if (Failure == 0 && !Volatile.Read(ref DeadlinePassed))
+                    return;
+
+                if (Failure == 0)
+                {
+                    Utils.LogError($"[-] RPCSS: no server of {Key.Class} registered before the activation's deadline.");
+                    Failure = RpcssLaunch.CoEServerExecFailure;
+                }
+
+                Finish(BuildActivationFailure(Failure, RpcssLaunch.DescribeFailure(Failure)), 0);
+            }
+
+            // A callback of a closed connection still runs, after Close cleared Connection.
+            private void Connected(uint Status)
+            {
+                if (Ended || Connection == null)
+                    return;
+
+                if (Status != LrpcPacket.RpcOk || Connection.Bind(LocalSystemActivator, Bound) != LrpcPacket.RpcOk)
+                    Retry();
+            }
+
+            private void Bound(uint Status, ushort Context)
+            {
+                if (Ended || Connection == null)
+                    return;
+
+                if (Status != LrpcPacket.RpcOk)
+                {
+                    Retry();
+                    return;
+                }
+
+                uint Sent = Connection.Call(Context, Request.ProcNumber, Server.Ipid, Stub, Called);
+                if (Sent == LrpcPacket.RpcSCannotSupport)
+                {
+                    Utils.LogError($"[-] RPCSS: the activation of {Key.Class} needs a view to reach its server, which is not supported.");
+                    Finish(null, LrpcPacket.RpcSCannotSupport);
+                }
+                else if (Sent != LrpcPacket.RpcOk)
+                {
+                    Retry();
+                }
+            }
+
+            // NT: rpcss passes on what the call into the server returned. Only a server that is stopping sends the
+            // activation on to another server or to a launch.
+            private void Called(uint Status, ReadOnlySpan<byte> Response)
+            {
+                if (Ended || Connection == null)
+                    return;
+
+                if (Status != LrpcPacket.RpcOk)
+                {
+                    Finish(null, Status);
+                    return;
+                }
+
+                byte[] Forwarded = BuildForwardedReply(Instance, Response);
+                if (Forwarded == null)
+                    Retry();
+                else
+                    Finish(Forwarded, 0);
+            }
+
+            private void Retry()
+            {
+                Close();
+                TryNextServer();
+            }
+
+            private void Finish(byte[] Answered, uint Fault)
+            {
+                End();
+                byte[] Message = Answered != null ? LrpcPacket.BuildResponse(Request, Answered) : LrpcPacket.BuildFault(Request, Fault);
+                if (Answer == null)
+                    Reply = Message;
+                else
+                    Answer.Send(Instance, Message);
+            }
+
+            internal void End()
+            {
+                Ended = true;
+                StopWaiting();
+                Close();
+            }
+
+            private void StopWaiting()
+            {
+                Launching.Remove(this);
+                Deadline?.Dispose();
+                Deadline = null;
+            }
+
+            private void Close()
+            {
+                LrpcClient Closing = Connection;
+                Connection = null;
+                Closing?.Close();
+            }
+        }
+
+        // Null for a server that is stopping, so the activation moves on to the next server.
+        private static byte[] BuildForwardedReply(BinaryEmulator Instance, ReadOnlySpan<byte> Response)
+        {
+            if (!Orpc.TryGetResponseParameters(Response, out int Offset))
+                return Response.ToArray();
+
+            Ndr20Reader Reader = new Ndr20Reader(Response.Slice(Offset));
+            if (!Orpc.TryReadUniqueInterfacePointer(ref Reader, out ReadOnlySpan<byte> ObjRef) || !Reader.TryReadUInt32(out uint Result))
+                return Response.ToArray();
+
+            if (Result == CoEServerStopping)
+                return null;
+
+            if (ObjRef.IsEmpty || !Orpc.TryGetCustomObjRefData(ObjRef, out ReadOnlySpan<byte> Blob) || Blob.Length < ActivationBlobPrefixSize + SerializationHeaderSize
+                || !TryFindProperty(Blob, ActivationPropertiesOut, out ReadOnlySpan<byte> PropsOut) || !TryFindReturnedOxid(PropsOut, out ulong Oxid)
+                || !TryGetServerOxid(Instance, Oxid, out ServerOxid Server))
+                return Response.ToArray();
+
+            byte[] Properties = BuildPropertiesContainer(PropsOut, Serialize(BuildScmReplyInfo(Oxid, Server).Written));
+            Ndr20Writer Writer = new Ndr20Writer(0xB0 + Properties.Length);
+            Orpc.WriteResponseHeader(ref Writer);
+            Writer.WriteUniqueReferent();
+            Orpc.WriteCustomInterfacePointer(ref Writer, ActivationPropertiesOutInterface, ActivationPropertiesOut, (uint)Properties.Length, Properties);
+            Writer.WriteUInt32(Result);
+            return Writer.ToArray();
+        }
+
+        private static bool TryFindReturnedOxid(ReadOnlySpan<byte> Property, out ulong Oxid)
+        {
+            Oxid = 0;
+            Ndr20Reader Reader = new Ndr20Reader(Property.Slice(SerializationHeaderSize));
+            if (!Reader.TryReadUInt32(out uint Count) || Count == 0 || Count > Orpc.MaxRequestedInterfaces || !Reader.TryReadUInt32(out uint Iids)
+                || !Reader.TryReadUInt32(out uint Results) || !Reader.TryReadUInt32(out uint Pointers) || Pointers == 0)
+                return false;
+
+            if ((Iids != 0 && !TrySkipConformantArray(ref Reader, Count, Orpc.InterfaceIdSize)) || (Results != 0 && !TrySkipConformantArray(ref Reader, Count, sizeof(uint))))
+                return false;
+
+            if (!Reader.TryReadUInt32(out uint Conformance) || Conformance != Count || !Reader.TryReadBytes((int)Count * sizeof(uint), out ReadOnlySpan<byte> Referents))
+                return false;
+
+            for (int i = 0; i < Count; i++)
+            {
+                if (BinaryPrimitives.ReadUInt32LittleEndian(Referents.Slice(i * sizeof(uint))) == 0)
+                    continue;
+
+                if (!Reader.TryReadUInt32(out uint Length) || !Reader.TryReadUInt32(out uint Size) || Length != Size
+                    || !Reader.TryReadBytes((int)Math.Min(Length, int.MaxValue), out ReadOnlySpan<byte> First) || !Orpc.TryReadStandardObjRef(First, out StdObjRef Std))
+                    return false;
+
+                Oxid = Std.Oxid;
+                return true;
+            }
+
+            return false;
+        }
+
+        private static bool TrySkipConformantArray(ref Ndr20Reader Reader, uint Count, int ElementSize)
+            => Reader.TryReadUInt32(out uint Conformance) && Conformance == Count && Reader.TrySkip((int)Count * ElementSize);
 
         // combase asks for the class object of a WinRT class with CLSID GUID_NULL.
         private static bool TryResolveHostClass(WinSysHelper Helper, uint ProcNumber, Guid Class, ReadOnlySpan<byte> Blob, out HostClass Host)
@@ -330,10 +888,14 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private static byte[] BuildActivationPropertiesOut(BinaryEmulator Instance, HostCall Call, HostObject Object, ReadOnlySpan<byte> Interfaces)
         {
-            const uint PropertyCount = 2;
             byte[] PropsOut = Serialize(BuildPropsOutInfo(Call, Object, Interfaces).Written);
-            byte[] ScmReply = Serialize(BuildScmReplyInfo(Instance, Call.Apartment).Written);
+            byte[] ScmReply = Serialize(BuildScmReplyInfo(Call.Apartment.Oxid, DescribeHostApartment(Instance, Call.Apartment)).Written);
+            return BuildPropertiesContainer(PropsOut, ScmReply);
+        }
 
+        private static byte[] BuildPropertiesContainer(ReadOnlySpan<byte> PropsOut, ReadOnlySpan<byte> ScmReply)
+        {
+            const uint PropertyCount = 2;
             Ndr20Writer Writer = new Ndr20Writer(0x60);
             Writer.WriteUInt32(0);
             Writer.WriteUInt32(0);
@@ -359,8 +921,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             byte[] Blob = new byte[ActivationBlobPrefixSize + TotalSize];
             BinaryPrimitives.WriteUInt32LittleEndian(Blob, TotalSize);
             Header.CopyTo(Blob, ActivationBlobPrefixSize);
-            PropsOut.CopyTo(Blob, ActivationBlobPrefixSize + Header.Length);
-            ScmReply.CopyTo(Blob, ActivationBlobPrefixSize + Header.Length + PropsOut.Length);
+            PropsOut.CopyTo(Blob.AsSpan(ActivationBlobPrefixSize + Header.Length));
+            ScmReply.CopyTo(Blob.AsSpan(ActivationBlobPrefixSize + Header.Length + PropsOut.Length));
             return Blob;
         }
 
@@ -404,54 +966,72 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         }
 
         // _PRIV_RESOLVER_INFO carries the server's OXID_INFO, so the client never asks the resolver.
-        private static Ndr20Writer BuildScmReplyInfo(BinaryEmulator Instance, HostApartment Apartment)
+        private static Ndr20Writer BuildScmReplyInfo(ulong Oxid, in ServerOxid Server)
         {
-            Guid RemUnknownIpid = Apartment.RemUnknownIpid;
-            ulong Oxid = Apartment.Oxid;
-
             Ndr20Writer Writer = new Ndr20Writer(0x180);
             Writer.WriteUniqueReferent();
             Writer.WriteUInt32(0);
             Writer.WriteUInt64(Oxid);
             Writer.WriteUInt32(0);
 
-            Writer.AlignTo(8);
-            Writer.WriteUInt32(MultithreadedApartmentTid);
-            Writer.WriteUInt32((uint)Apartment.ProcessId);
-            Writer.WriteUInt32(AuthnLevelConnect);
-            Writer.WriteUInt16(Orpc.ComVersionMajor);
-            Writer.WriteUInt16(Orpc.ComVersionMinor);
-            Writer.WriteUInt32(ContainerVersion);
-            Writer.WriteUInt64(0);
-            Writer.WriteUInt32(0);
-            Writer.WriteGuid(RemUnknownIpid);
-            Writer.WriteUInt32(OxidInfoFlags);
-            Writer.WriteUniqueReferent();
-            Writer.WriteGuid(Apartment.ProcessIdentifier);
-            Writer.WriteUInt64(0);
-            Writer.WriteUInt32(0);
-            for (int i = 0; i < OxidInfoHstringCount; i++)
-                Writer.WriteUInt32(Orpc.UserMarshalMarker);
-            Writer.WriteUInt64(Oxid);
-            Writer.WriteGuid(RemUnknownIpid);
+            WriteOxidInfoFlat(ref Writer, Server);
             Writer.WriteUInt64(LocalMachineId);
             Writer.WriteUInt32(0);
-
-            WriteResolverBindings(ref Writer, Apartment.Endpoint, HostApartment.GetPrincipal(Instance));
-
-            for (int i = 0; i < OxidInfoHstringCount; i++)
-                Orpc.WriteHstringBody(ref Writer, default);
-
+            WriteOxidInfoPointees(ref Writer, Server);
             return Writer;
         }
 
+        internal static void PublishHostApartment(BinaryEmulator Instance, HostApartment Apartment)
+        {
+            RpcssSessionTable.PublishOxid(Apartment.Oxid, DescribeHostApartment(Instance, Apartment));
+        }
+
+        private static ServerOxid DescribeHostApartment(BinaryEmulator Instance, HostApartment Apartment)
+        {
+            byte[] Info = new byte[OxidInfoSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(Info, MultithreadedApartmentTid);
+            BinaryPrimitives.WriteUInt32LittleEndian(Info.AsSpan(OxidInfoProcessId), (uint)Apartment.ProcessId);
+            BinaryPrimitives.WriteUInt32LittleEndian(Info.AsSpan(OxidInfoAuthnHint), AuthnLevelConnect);
+            BinaryPrimitives.WriteUInt16LittleEndian(Info.AsSpan(OxidInfoVersion), Orpc.ComVersionMajor);
+            BinaryPrimitives.WriteUInt16LittleEndian(Info.AsSpan(OxidInfoVersion + 2), Orpc.ComVersionMinor);
+            BinaryPrimitives.WriteUInt32LittleEndian(Info.AsSpan(OxidInfoContainerVersion), ContainerVersion);
+            Apartment.RemUnknownIpid.TryWriteBytes(Info.AsSpan(OxidInfoRemUnknownIpid));
+            BinaryPrimitives.WriteUInt32LittleEndian(Info.AsSpan(OxidInfoFlags), HostOxidFlags);
+            Apartment.ProcessIdentifier.TryWriteBytes(Info.AsSpan(OxidInfoProcessIdentifier));
+            BinaryPrimitives.WriteUInt64LittleEndian(Info.AsSpan(OxidInfoPrimaryOxid), Apartment.Oxid);
+            Apartment.RemUnknownIpid.TryWriteBytes(Info.AsSpan(OxidInfoPrimaryRemUnknownIpid));
+
+            string Security = string.Concat(stackalloc char[] { (char)AuthnWinNt, (char)AuthzNone }, HostApartment.GetPrincipal(Instance), "\0\0");
+            return new ServerOxid(Info, Apartment.Endpoint, Security, null, null, null);
+        }
+
+        // NDR puts the pointees after the whole structure that holds the OXID_INFO.
+        private static void WriteOxidInfoFlat(ref Ndr20Writer Writer, in ServerOxid Server)
+        {
+            ReadOnlySpan<byte> Info = Server.Info;
+            Writer.AlignTo(8);
+            Writer.WriteBytes(Info.Slice(0, OxidInfoBindings));
+            Writer.WriteUniqueReferent();
+            Writer.WriteBytes(Info.Slice(OxidInfoBindings + 4, OxidInfoHstrings - OxidInfoBindings - 4));
+            for (int i = 0; i < OxidInfoHstringCount; i++)
+                Writer.WriteUInt32(Orpc.UserMarshalMarker);
+            Writer.WriteBytes(Info.Slice(OxidInfoPrimaryOxid));
+        }
+
+        private static void WriteOxidInfoPointees(ref Ndr20Writer Writer, in ServerOxid Server)
+        {
+            WriteResolverBindings(ref Writer, Server.Endpoint, Server.SecurityBindings);
+            Orpc.WriteHstringBody(ref Writer, Server.PackageFullName);
+            Orpc.WriteHstringBody(ref Writer, Server.UserSid);
+            Orpc.WriteHstringBody(ref Writer, Server.AppContainerSid);
+        }
+
         // Local OXIDs use protseq:[endpoint] bindings without tower ids.
-        private static void WriteResolverBindings(ref Ndr20Writer Writer, string Endpoint, string Principal)
+        private static void WriteResolverBindings(ref Ndr20Writer Writer, string Endpoint, string SecurityBindings)
         {
             const int ListTerminators = 2;
-            const int SecurityServices = 2;
             int SecurityOffset = LocalBindingPrefix.Length + Endpoint.Length + "]".Length + ListTerminators;
-            int Entries = SecurityOffset + SecurityServices + Principal.Length + ListTerminators;
+            int Entries = SecurityOffset + SecurityBindings.Length;
             Writer.WriteUInt32((uint)Entries);
             Writer.WriteUInt16((ushort)Entries);
             Writer.WriteUInt16((ushort)SecurityOffset);
@@ -460,13 +1040,10 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.WriteUInt16(']');
             Writer.WriteUInt16(0);
             Writer.WriteUInt16(0);
-
-            Writer.WriteUInt16(AuthnWinNt);
-            Writer.WriteUInt16(AuthzNone);
-            Writer.WriteUtf16(Principal);
-            Writer.WriteUInt16(0);
-            Writer.WriteUInt16(0);
+            Writer.WriteUtf16(SecurityBindings);
         }
+
+        private static bool IsSecurityBindingList(ReadOnlySpan<char> Bindings) => Bindings.Length >= 2 && Bindings[^1] == '\0' && Bindings[^2] == '\0';
 
         // The NDR type serialization header is version 1, little endian, 8 bytes, then the padded data length.
         private static byte[] Serialize(ReadOnlySpan<byte> Data)
@@ -712,18 +1289,18 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             if (!TryReadIdCount(Stub, out uint Count))
                 return null;
 
-            if (!TryReadServerOxid(Stub, out ServerOxid Server, out ServerOxid Primary))
+            if (!TryReadServerOxid(Stub, out ServerOxid Server))
                 Utils.LogError("[-] RPCSS: the OXID_INFO of a server apartment could not be read; its endpoint is unknown.");
 
             if (PrimaryOxid == 0)
             {
                 PrimaryOxid = NextObjectId();
-                ServerOxids[PrimaryOxid] = Primary;
+                AddServerOxid(PrimaryOxid, AsPrimary(Server));
             }
 
             Ndr20Writer Writer = new Ndr20Writer(64 + (int)Count * 8);
             ulong Oxid = NextObjectId();
-            ServerOxids[Oxid] = Server;
+            AddServerOxid(Oxid, WithPrimaryOxid(Server, PrimaryOxid));
             Writer.WriteUInt64(Oxid);
             Writer.WriteUInt64(PrimaryOxid);
 
@@ -743,44 +1320,129 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return Writer.ToArray();
         }
 
-        private static bool TryReadServerOxid(ReadOnlySpan<byte> Stub, out ServerOxid Server, out ServerOxid Primary)
+        private static bool TryReadServerOxid(ReadOnlySpan<byte> Stub, out ServerOxid Server)
         {
-            const int OxidInfoFixedSize = 0x80;
             Server = default;
-            Primary = default;
 
             Ndr20Reader Reader = new Ndr20Reader(Stub);
             if (!Reader.TryReadContextHandle(out _) || !Reader.TryReadUInt32(out _))
                 return false;
 
             Reader.Align(8);
-            if (!Reader.TryReadBytes(OxidInfoFixedSize, out ReadOnlySpan<byte> Info))
+            if (!Reader.TryReadBytes(OxidInfoSize, out ReadOnlySpan<byte> Info))
                 return false;
 
-            if (BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(0x20)) != 0)
+            if (BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OxidInfoExtensions)) != 0)
                 return false;
 
-            if (BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(0x38)) != 0 && !TryReadDualStringArray(ref Reader, out _, out _))
+            if (BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OxidInfoBindings)) != 0 && !TryReadDualStringArray(ref Reader, out _, out _))
                 return false;
 
+            string[] Strings = new string[OxidInfoHstringCount];
             for (int i = 0; i < OxidInfoHstringCount; i++)
             {
-                if (BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(0x5C + i * 4)) != 0 && !Orpc.TrySkipHstringBody(ref Reader))
+                if (BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OxidInfoHstrings + i * 4)) == 0)
+                    continue;
+
+                if (!Orpc.TryReadHstringBody(ref Reader, out ReadOnlySpan<char> Value))
                     return false;
+                Strings[i] = new string(Value);
             }
 
-            if (!TryReadDualStringArray(ref Reader, out ReadOnlySpan<byte> Strings, out ushort SecurityOffset) || SecurityOffset * 2 > Strings.Length)
+            if (!TryReadDualStringArray(ref Reader, out ReadOnlySpan<byte> Bindings, out ushort SecurityOffset) || SecurityOffset * 2 > Bindings.Length)
                 return false;
 
-            string Endpoint = FindLocalEndpoint(MemoryMarshal.Cast<byte, char>(Strings.Slice(0, SecurityOffset * 2)));
+            string Endpoint = FindLocalEndpoint(MemoryMarshal.Cast<byte, char>(Bindings.Slice(0, SecurityOffset * 2)));
             if (Endpoint == null)
                 return false;
 
-            Server = new ServerOxid(Endpoint, new Guid(Info.Slice(0x24, 16)));
+            if (!TryReadDualStringArray(ref Reader, out ReadOnlySpan<byte> Security, out SecurityOffset) || SecurityOffset * 2 > Security.Length)
+                return false;
 
-            // The RemUnknown IPID that rpcss gives the primary OXID.
-            Primary = new ServerOxid(Endpoint, new Guid(Info.Slice(0x70, 16)));
+            ReadOnlySpan<char> SecurityBindings = MemoryMarshal.Cast<byte, char>(Security.Slice(SecurityOffset * 2));
+            if (!IsSecurityBindingList(SecurityBindings))
+                return false;
+
+            Server = new ServerOxid(Info.ToArray(), Endpoint, new string(SecurityBindings), Strings[0], Strings[1], Strings[2]);
             return true;
+        }
+
+        // rpcss names the process's primary OXID in every OXID_INFO it answers.
+        private static ServerOxid WithPrimaryOxid(in ServerOxid Server, ulong Primary)
+        {
+            if (Server.Info == null)
+                return Server;
+
+            byte[] Info = (byte[])Server.Info.Clone();
+            BinaryPrimitives.WriteUInt64LittleEndian(Info.AsSpan(OxidInfoPrimaryOxid), Primary);
+            return Server with { Info = Info };
+        }
+
+        // The primary OXID's RemUnknown is the IPID the apartment gives for it.
+        private static ServerOxid AsPrimary(in ServerOxid Server)
+        {
+            if (Server.Info == null)
+                return Server;
+
+            ServerOxid Primary = WithPrimaryOxid(Server, PrimaryOxid);
+            Primary.Info.AsSpan(OxidInfoPrimaryRemUnknownIpid, 16).CopyTo(Primary.Info.AsSpan(OxidInfoRemUnknownIpid));
+            return Primary;
+        }
+
+        private static void AddServerOxid(ulong Oxid, in ServerOxid Server)
+        {
+            ServerOxids[Oxid] = Server;
+            if (Server.Endpoint != null)
+                RpcssSessionTable.PublishOxid(Oxid, Server);
+        }
+
+        internal static bool TryGetServerOxid(BinaryEmulator Instance, ulong Oxid, out ServerOxid Server)
+        {
+            if (ServerOxids.TryGetValue(Oxid, out Server))
+                return Server.Endpoint != null;
+
+            if (!AlpcMessaging.Supported(Instance))
+            {
+                Utils.LogError($"[-] RPCSS: OXID 0x{Oxid:X} is not this process's own, and an x86 process resolves no other.");
+                return false;
+            }
+
+            return RpcssSessionTable.TryFindOxid(Oxid, out Server) && Server.Endpoint.Length != 0 && IsSecurityBindingList(Server.SecurityBindings);
+        }
+
+        // Every server of the session is on this machine, so the client's resolver bindings are not read.
+        private static byte[] ClientResolveOXID(ReadOnlySpan<byte> Stub, BinaryEmulator Instance)
+        {
+            Ndr20Reader Reader = new Ndr20Reader(Stub);
+            if (!Reader.TryReadContextHandle(out _) || !Reader.TryReadUInt64(out ulong Oxid))
+                return null;
+
+            bool Found = TryGetServerOxid(Instance, Oxid, out ServerOxid Server);
+            Ndr20Writer Writer = new Ndr20Writer(0x200);
+            if (Found)
+            {
+                WriteOxidInfoFlat(ref Writer, Server);
+                WriteOxidInfoPointees(ref Writer, Server);
+            }
+            else
+            {
+                Writer.WriteZeros(OxidInfoHstrings);
+                for (int i = 0; i < OxidInfoHstringCount; i++)
+                    Writer.WriteUInt32(Orpc.UserMarshalMarker);
+                Writer.WriteZeros(OxidInfoSize - OxidInfoHstrings - OxidInfoHstringCount * 4);
+                for (int i = 0; i < OxidInfoHstringCount; i++)
+                    Orpc.WriteHstringBody(ref Writer, default);
+            }
+
+            Writer.WriteUInt64(Found ? LocalMachineId : 0);
+
+            // No marshaled target info and no authentication service.
+            Writer.WriteUInt32(0);
+            Writer.WriteUInt32(0);
+            Writer.WriteUInt16(0);
+            Writer.AlignTo(4);
+            Writer.WriteUInt32(Found ? OrOk : OrBadOxid);
+            return Writer.ToArray();
         }
 
         private static bool TryReadDualStringArray(ref Ndr20Reader Reader, out ReadOnlySpan<byte> Strings, out ushort SecurityOffset)
@@ -807,11 +1469,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             }
 
             return null;
-        }
-
-        public static bool TryGetServerOxid(ulong Oxid, out ServerOxid Server)
-        {
-            return ServerOxids.TryGetValue(Oxid, out Server) && Server.Endpoint != null;
         }
 
         // The STDOBJREF and OXID_INFO go back as marshalled. They are eight byte aligned both ways.
@@ -859,8 +1516,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return null;
 
             ulong Oxid = BinaryPrimitives.ReadUInt64LittleEndian(Stub.Slice(FreeOxidOffset, sizeof(ulong)));
-            if (!ServerOxids.Remove(Oxid))
+            if (!ServerOxids.Remove(Oxid, out ServerOxid Server))
                 return BuildStatus(OrBadOxid);
+
+            if (Server.Endpoint != null)
+                RpcssSessionTable.WithdrawOxid(Oxid);
 
             if (Oxid == PrimaryOxid)
                 PrimaryOxid = 0;
@@ -871,8 +1531,18 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         // rpcss runs down the process context, which frees every OXID it registered, and returns a NULL handle.
         private static byte[] Disconnect()
         {
+            foreach (KeyValuePair<ulong, ServerOxid> Entry in ServerOxids)
+            {
+                if (Entry.Value.Endpoint != null)
+                    RpcssSessionTable.WithdrawOxid(Entry.Key);
+            }
+
             ServerOxids.Clear();
             PrimaryOxid = 0;
+
+            foreach (uint Key in Registrations.Keys)
+                RpcssSessionTable.WithdrawRegistration(Key);
+            Registrations.Clear();
 
             Ndr20Writer Writer = new Ndr20Writer(Ndr20Writer.ContextHandleSize + 4);
             Writer.WriteContextHandle(ReadOnlySpan<byte>.Empty);

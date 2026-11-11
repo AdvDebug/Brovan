@@ -40,6 +40,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
         // NT: the service holds its users for the whole session.
         internal override bool Permanent => true;
 
+        internal override bool AnswersOtherProcesses => true;
+
         internal override bool Supports(Guid Interface) => Array.IndexOf(Interfaces, Interface) >= 0;
 
         internal override bool TryCall(HostCall Call, Guid Interface, uint ProcNumber, ReadOnlySpan<byte> Parameters, out byte[] Stub)

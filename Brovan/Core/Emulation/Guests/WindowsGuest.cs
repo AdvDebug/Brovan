@@ -317,11 +317,13 @@ namespace Brovan.Core.Emulation.Guests
                 return;
 
             OS.Windows.Win32k.Win32kDxgk.EndDisplayProbe();
+            OS.Windows.RPC.Ports.RpcssLaunch.Shutdown();
 
             lock (Instance.KernelLock)
             {
                 OS.Windows.RPC.Ports.AudioSrvPortHandler.StopStreams(Instance);
-                AlpcMessaging.ReleaseRemote();
+                AlpcMessaging.ReleaseRemote(Instance);
+                RpcssSessionTable.Close();
                 WinHelper.UnloadAppHives();
                 WinHelper.KernelFiles?.Dispose();
                 WinHelper.Composition.ReleaseAll(Instance);
@@ -398,7 +400,7 @@ namespace Brovan.Core.Emulation.Guests
         }
 
         public bool AwaitsHostWork(BinaryEmulator Instance)
-            => WinHelper != null && (Instance.HasActiveGetMessageWait() || Instance.HasPendingHostIo() || AlpcMessaging.HasRemoteWork);
+            => WinHelper != null && (Instance.HasActiveGetMessageWait() || Instance.HasPendingHostIo() || AlpcMessaging.HasRemoteWork || AlpcMessaging.HasDeferredAnswers);
 
         public bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle)
         {
@@ -2019,20 +2021,8 @@ namespace Brovan.Core.Emulation.Guests
                 { "LOCALAPPDATA", @$"{UserProfile}\AppData\Local" },
                 { "HOMEPATH", @$"\Users\{Username}" },
                 { "HOMEDRIVE", "C:" },
-                { "SYSTEMDRIVE", "C:" },
                 { "OneDrive", @$"{UserProfile}\OneDrive" },
                 { "SESSIONNAME", "Console" },
-                { "ALLUSERSPROFILE", @"C:\ProgramData" },
-                { "PUBLIC", @"C:\Users\Public" },
-                { "ProgramData", @"C:\ProgramData" },
-                { "SYSTEMROOT", WindowsVersionInfo.SystemRoot },
-                { "CommonProgramFiles", @"C:\Program Files\Common Files" },
-                { "CommonProgramFiles(x86)", @"C:\Program Files (x86)\Common Files" },
-                { "CommonProgramW6432", @"C:\Program Files\Common Files" },
-                { "ProgramFiles", @"C:\Program Files" },
-                { "ProgramFiles(x86)", @"C:\Program Files (x86)" },
-                { "ProgramW6432", @"C:\Program Files" },
-                { "WINDIR", WindowsVersionInfo.SystemRoot },
                 { "USERNAME", Username },
                 { "USERPROFILE", UserProfile },
                 { "USERDOMAIN", PcName },
@@ -2044,6 +2034,7 @@ namespace Brovan.Core.Emulation.Guests
                 { "PATHEXT", ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC" },
                 { "PATH", @$"{WindowsVersionInfo.SystemRoot}\system32;{WindowsVersionInfo.SystemRoot};{WindowsVersionInfo.SystemRoot}\System32\Wbem;{WindowsVersionInfo.SystemRoot}\System32\WindowsPowerShell\v1.0\;{WindowsVersionInfo.SystemRoot}\System32\OpenSSH\" }
             };
+            AddMachineEnvironment(Env);
 
             if (Instance.WinHelper != null && Instance.WinHelper.Steam != null && Instance.WinHelper.Steam.Enabled)
             {
@@ -2090,6 +2081,22 @@ namespace Brovan.Core.Emulation.Guests
             return EnvBytes;
         }
 
+        internal static void AddMachineEnvironment(Dictionary<string, string> Env)
+        {
+            Env["SYSTEMDRIVE"] = "C:";
+            Env["ALLUSERSPROFILE"] = @"C:\ProgramData";
+            Env["PUBLIC"] = @"C:\Users\Public";
+            Env["ProgramData"] = @"C:\ProgramData";
+            Env["SYSTEMROOT"] = WindowsVersionInfo.SystemRoot;
+            Env["CommonProgramFiles"] = @"C:\Program Files\Common Files";
+            Env["CommonProgramFiles(x86)"] = @"C:\Program Files (x86)\Common Files";
+            Env["CommonProgramW6432"] = @"C:\Program Files\Common Files";
+            Env["ProgramFiles"] = @"C:\Program Files";
+            Env["ProgramFiles(x86)"] = @"C:\Program Files (x86)";
+            Env["ProgramW6432"] = @"C:\Program Files";
+            Env["WINDIR"] = WindowsVersionInfo.SystemRoot;
+        }
+
         /// <summary>
         /// Ensures direct Windows blob startup has usable console standard handles before synthetic process parameters are written.
         /// </summary>
@@ -2105,6 +2112,9 @@ namespace Brovan.Core.Emulation.Guests
             if (string.IsNullOrEmpty(ImageName))
                 ImageName = GeneralHelper.IO.GetWindowsFileName(Instance.GuestImagePath ?? string.Empty);
 
+            if (!AlpcMessaging.Supported(Instance))
+                RpcssSessionTable.KeepLocal();
+
             GuestSession.Join(
                 Instance.WinHelper.PID,
                 (uint)Instance._binary.Architecture,
@@ -2112,10 +2122,17 @@ namespace Brovan.Core.Emulation.Guests
                 ExitCode =>
                 {
                     Instance.TriggerEventMessage($"[!] Another process in the session asked this one to stop with exit code 0x{ExitCode:X}.", LogFlags.Important);
-                    GuestSession.PublishExit(ExitCode);
+                    PublishExit(ExitCode);
                     Utils.SetGuestExitCode(ExitCode);
                     Instance.RequestTermination();
                 });
+        }
+
+        internal static void PublishExit(uint ExitCode)
+        {
+            // The slot can pass to a new member once the exit is published, while this host process still runs.
+            RpcssSessionTable.End();
+            GuestSession.PublishExit(ExitCode);
         }
 
         // The host starts the root process without package claims, so only the root builds a package token.

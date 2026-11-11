@@ -62,6 +62,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             RemoteProcessRequests.Drain(Instance);
             AlpcMessaging.DrainRemote(Instance);
+            RPC.Ports.RpcssPortHandler.Advance();
+        }
+
+        internal static void RingAll()
+        {
+            for (int Slot = 0; Slot < GuestSession.SlotCount; Slot++)
+                Ring(Slot);
         }
 
         // Only for a consumer that runs on the scheduler pass. Any other thread rings the slot of this process instead.

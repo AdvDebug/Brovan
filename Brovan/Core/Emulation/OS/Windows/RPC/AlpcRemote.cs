@@ -634,6 +634,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Connection.ConnectWait = Wait;
                 Track(Connection);
                 SessionPump.Ring(Peer.PeerSlot);
+                if (Wait == null)
+                    return NTSTATUS.STATUS_SUCCESS;
+
                 Instance.WinHelper.ParkForIoRequest(Wait, Instance.WinHelper.ParseRelativeDeadlineMs(Timeout));
                 return NTSTATUS.STATUS_PENDING;
             }
@@ -688,8 +691,22 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
 
             Connection.AwaitingReply.Add(Message);
+            if (Message.ReplyWait == null)
+                return NTSTATUS.STATUS_SUCCESS;
+
             Instance.WinHelper.ParkForIoRequest(Message.ReplyWait, Instance.WinHelper.ParseRelativeDeadlineMs(Timeout));
             return NTSTATUS.STATUS_PENDING;
+        }
+
+        private static NTSTATUS SendRemoteDatagram(AlpcConnection Connection, ReadOnlySpan<byte> Data, ulong ProcessId, ulong ThreadId)
+        {
+            if (!Connection.ClientReachable)
+                return NTSTATUS.STATUS_PORT_DISCONNECTED;
+
+            if (!Connection.Remote.ClientAcceptsRequests)
+                return NTSTATUS.STATUS_LPC_REQUESTS_NOT_ALLOWED;
+
+            return SendFrameStatus(Connection, new Frame(FrameDatagram, 0, 0, 0, 0, 0, 0, ProcessId, ThreadId, 0, default, Data));
         }
 
         private static bool SendFrame(AlpcConnection Connection, in Frame Outgoing)
@@ -870,6 +887,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             Connection.Remote = Peer;
             Track(Connection);
 
+            if (Port.HostServer != null)
+            {
+                AcceptHostServerConnect(Instance, Port.HostServer, Connection, Connect.Data);
+                return;
+            }
+
             Enqueue(Instance, Port, new AlpcMessage
             {
                 Type = LpcConnectionRequest,
@@ -882,6 +905,35 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Connection = Connection,
                 SenderToken = Dynamic ? Token : null,
             });
+        }
+
+        private static void AcceptHostServerConnect(BinaryEmulator Instance, AlpcHostServer Server, AlpcConnection Connection, ReadOnlySpan<byte> Data)
+        {
+            if (!TryAcceptHostServer(Instance, Server, Connection, Data, out byte[] Reply))
+            {
+                RefuseRemoteConnect(Connection, NTSTATUS.STATUS_PORT_CONNECTION_REFUSED);
+                ReleasePeer(Connection);
+                return;
+            }
+
+            SendFrame(Connection, new Frame(FrameConnectReply, 0, 0, Connection.Remote.ConnectRequestId, Connection.Remote.ConnectCallbackId, 0, 0,
+                Server.ProcessId, Server.ThreadId, 0, default, Reply));
+        }
+
+        private static void ServeHostServerRequest(BinaryEmulator Instance, AlpcHostServer Server, AlpcConnection Connection, in Frame Incoming, bool Waits)
+        {
+            NTSTATUS Status = ReceiveHostServer(Instance, Server, Connection, Incoming.Data, Waits, out byte[] Reply);
+            if (Waits)
+            {
+                SendFrame(Connection, Status == NTSTATUS.STATUS_SUCCESS
+                    ? new Frame(FrameReply, 0, 0, Incoming.RequestId, 0, 0, 0, Server.ProcessId, Server.ThreadId, 0, default, Reply)
+                    : Frame.Signal(FrameFailed, Incoming.RequestId, Status: Status));
+                return;
+            }
+
+            if (Status == NTSTATUS.STATUS_SUCCESS && Reply != null)
+                SendFrame(Connection, new Frame(FrameAnswer, 0, Incoming.TypeFlags, Incoming.RequestId, Incoming.CallbackId, 0, Incoming.MessageContext,
+                    Server.ProcessId, Server.ThreadId, 0, default, Reply));
         }
 
         private static void HandleFrame(BinaryEmulator Instance, AlpcConnection Connection, in Frame Incoming)
@@ -899,6 +951,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 case FrameConnectReply:
                 {
+                    if (Connection.Host != null && Connection.State == AlpcConnectionState.Connecting)
+                    {
+                        Connection.State = AlpcConnectionState.Connected;
+                        Connection.ClientReachable = true;
+                        RunConnected(Connection.Host, NTSTATUS.STATUS_SUCCESS);
+                        return;
+                    }
+
                     AlpcWait Wait = Connection.ConnectWait;
                     if (Connection.State != AlpcConnectionState.Connecting || Wait == null || !Wait.IsLive)
                     {
@@ -925,6 +985,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 case FrameFailed:
                 {
                     AlpcMessage Request = TakeAwaiting(Connection, Incoming.RequestId);
+                    if (Request?.HostReply != null)
+                    {
+                        bool Replied = Incoming.Kind == FrameReply;
+                        RunHost(Request.HostReply, Replied ? NTSTATUS.STATUS_SUCCESS : (NTSTATUS)Incoming.Status, Replied ? Incoming.Data : default);
+                        return;
+                    }
+
                     AlpcWait Wait = Request?.ReplyWait;
                     if (Wait == null || !Wait.IsLive)
                         return;
@@ -1001,6 +1068,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                     {
                         if (Waits)
                             SendFrame(Connection, Frame.Signal(FrameFailed, Incoming.RequestId, Status: Failure));
+                        return;
+                    }
+
+                    if (Connection.ConnectionPort.HostServer is AlpcHostServer Server)
+                    {
+                        ServeHostServerRequest(Instance, Server, Connection, Incoming, Waits);
                         return;
                     }
 
@@ -1090,7 +1163,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             bool NotifyServer = Connection.State == AlpcConnectionState.Connected || Connection.ClientDisconnected;
             EndConnection(Instance, Connection, NTSTATUS.STATUS_PORT_DISCONNECTED);
             if (NotifyServer)
-                Enqueue(Instance, Connection.ConnectionPort, ClosedMessage(Connection, ++Connection.NextSequence));
+            {
+                if (Connection.ConnectionPort.HostServer is AlpcHostServer Server)
+                    EndHostServerClient(Instance, Server, Connection);
+                else
+                    Enqueue(Instance, Connection.ConnectionPort, ClosedMessage(Connection, ++Connection.NextSequence));
+            }
+
             ReleasePeer(Connection);
         }
 
@@ -1156,8 +1235,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 SessionPump.Ring(GuestSession.OwnSlot);
         }
 
-        internal static void ReleaseRemote()
+        internal static void ReleaseRemote(BinaryEmulator Instance)
         {
+            while (DeferredAnswers.Count != 0)
+                AbandonDeferredAnswer(Instance, DeferredAnswers[DeferredAnswers.Count - 1], WakeSender: false);
+
             foreach (WinPort Port in PublishedPorts.ToArray())
                 Withdraw(Port);
 
