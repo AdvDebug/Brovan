@@ -434,6 +434,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public uint SharedDataFlags { get; private set; }
 
+        internal const uint DbgMultiSessionSku = 0x100;
+        internal const uint DbgMultiUsersInSessionSku = 0x200;
+
+        internal bool IsMultiSessionSku => (SharedDataFlags & DbgMultiSessionSku) != 0;
+
         private bool UsesSharedPage => Emulator._emulator.TimestampCounterIsEmulated || Emulator._emulator.TimestampCounterFrequency != 0;
 
         private static readonly ulong SharedPageMultiplier = (ulong)(((((UInt128)1) << 64)

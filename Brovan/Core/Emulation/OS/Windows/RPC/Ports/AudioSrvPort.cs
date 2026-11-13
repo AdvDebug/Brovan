@@ -79,7 +79,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             public uint StreamFlags;
             public WaveFormat Format;
             public ulong ControlBlock;
-            public ulong SectionHandle;
             public ulong ServerSectionHandle;
             public uint RingBytes;
             public uint PeriodFrames;
@@ -183,9 +182,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint RpcSProcnumOutOfRange = LrpcPacket.RpcSProcnumOutOfRange;
         private const uint RpcXBadStubData = LrpcPacket.RpcXBadStubData;
         private const uint ErrorNotFound = 1168;
-        private const int EAccessDenied = unchecked((int)0x80070005);
-        private const int EInvalidArg = unchecked((int)0x80070057);
-        private const int SFalse = 1;
+        private const int EAccessDenied = unchecked((int)Orpc.EAccessDenied);
+        private const int EInvalidArg = unchecked((int)Orpc.EInvalidArg);
+        private const int SFalse = (int)Orpc.SFalse;
         private const int AudioClientNotInitialized = unchecked((int)0x88890001);
         private const int AudioClientAlreadyInitialized = unchecked((int)0x88890002);
         private const int AudioClientUnsupportedFormat = unchecked((int)0x88890008);
@@ -482,7 +481,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return LrpcPacket.BuildFault(Message, ErrorNotFound);
             }
 
-            if (Stream.SectionHandle != 0)
+            if (Stream.ServerSectionHandle != 0)
             {
                 Log(Instance, $"stream {Stream.Id} setup refused, the stream already has its buffer.");
                 return BuildSetupReply(Message, null, -1, AudioClientAlreadyInitialized);
@@ -518,15 +517,15 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Stream.ChannelVolumes = new float[Stream.Format.Channels];
             Array.Fill(Stream.ChannelVolumes, 1f);
 
-            if (!TryCreateSharedBuffer(Instance, Stream))
+            if (!TryCreateSharedBuffer(Instance, Stream, out ulong SectionHandle))
                 return LrpcPacket.BuildFault(Message, ErrorNotEnoughMemory);
 
             PublishGains(Stream);
 
             int SectionIndex = Reply.Handles?.Count ?? 0;
-            Reply.AttachHandle(Stream.SectionHandle);
+            Reply.AttachHandle(SectionHandle);
 
-            Log(Instance, $"stream {Stream.Id} setup: {Stream.RingBytes} byte ring, {Stream.PeriodFrames} frames per period, section handle 0x{Stream.SectionHandle:X}.");
+            Log(Instance, $"stream {Stream.Id} setup: {Stream.RingBytes} byte ring, {Stream.PeriodFrames} frames per period, section handle 0x{SectionHandle:X}.");
 
             return BuildSetupReply(Message, Stream, SectionIndex, 0);
         }
@@ -1272,8 +1271,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 : RingBufferOffset + Stream.RingBytes;
         }
 
-        private static bool TryCreateSharedBuffer(BinaryEmulator Instance, AudioStream Stream)
+        private static bool TryCreateSharedBuffer(BinaryEmulator Instance, AudioStream Stream, out ulong SectionHandle)
         {
+            SectionHandle = 0;
             ulong SectionSize = SectionBytes(Stream);
 
             ulong Backing = Instance.MapUniqueAddress(SectionSize, MemoryProtection.ReadWrite);
@@ -1284,11 +1284,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             WriteStreamControlBlock(Instance, Stream);
             PublishHandlePort(Instance, Stream);
 
-            Stream.SectionHandle = Instance.WinHelper.CreateSectionHandle(
+            SectionHandle = Instance.WinHelper.CreateSectionHandle(
                 null, SectionSize, PageReadWrite, 0, null, Backing,
                 AccessMask.StandardRightsAll | AccessMask.SectionMapRead | AccessMask.SectionMapWrite).Handle;
 
-            HoldServerSectionReference(Instance, Stream);
+            HoldServerSectionReference(Instance, Stream, SectionHandle);
 
             // The engine walks the ring from a host thread, so it needs a host pointer into the section
             // rather than the emulator's memory accessors, which are only safe from the guest thread.
@@ -1319,9 +1319,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return true;
         }
 
-        private static void HoldServerSectionReference(BinaryEmulator Instance, AudioStream Stream)
+        private static void HoldServerSectionReference(BinaryEmulator Instance, AudioStream Stream, ulong SectionHandle)
         {
-            WinSection Section = Instance.WinHelper.GetSectionByHandle(Stream.SectionHandle, AccessMask.StandardRightsAll);
+            WinSection Section = Instance.WinHelper.GetSectionByHandle(SectionHandle, AccessMask.StandardRightsAll);
             if (Section == null)
                 return;
 
@@ -1359,7 +1359,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private static NTSTATUS HandleEventPortMessage(WinPort Port, byte[] SendData, PortReply Reply, BinaryEmulator Instance)
         {
-            ulong EventHandle = Port.ReceivedHandles is { Count: > 0 } ? Port.ReceivedHandles[0] : 0;
+            ulong EventHandle = Reply.SentHandles is { Count: > 0 } ? Reply.SentHandles[0] : 0;
 
             if (EventHandle != 0 && TryGetStreamByHandlePort(Port.Name, out AudioStream Stream))
             {

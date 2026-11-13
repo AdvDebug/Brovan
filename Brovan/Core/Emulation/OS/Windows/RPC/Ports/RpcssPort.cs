@@ -54,8 +54,18 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint ScmThreadId = 0x400;
         private const uint AuthnLevelConnect = 2;
         private const uint ImpLevelIdentify = 2;
-        private const int SecurityDescriptorCount = 5;
         private const uint MaximumIds = 0x100000;
+
+        internal const uint ComRightsExecute = 0x1;
+        private const uint ComRightsExecuteLocal = 0x2;
+        private const uint ComRightsExecuteRemote = 0x4;
+        private const uint ComRightsActivateLocal = 0x8;
+        private const uint ComRightsActivateRemote = 0x10;
+
+        private const string OleKey = "\\Registry\\Machine\\Software\\Microsoft\\Ole";
+        private const string DcomPolicyKey = "\\Registry\\Machine\\Software\\Policies\\Microsoft\\Windows NT\\DCOM";
+        private const string MachineAccessRestriction = "MachineAccessRestriction";
+        private const int MinimumRegistryDescriptorBytes = 0x28;
 
         // NDR carries __int3264 in four bytes.
         private const int HwndOffset = Ndr20Writer.ContextHandleSize;
@@ -118,7 +128,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         // rpcss sends the system message text as the error description.
         private const string ClassNotRegisteredText = "Class not registered\r\n";
         private static readonly byte[] ClassNotRegisteredReply = BuildActivationFailure(RegdbEClassNotReg, ClassNotRegisteredText);
-        private static readonly byte[] EveryoneDescriptor = BuildEveryoneDescriptor();
+        private static readonly byte[][] BuiltInDescriptors = BuildBuiltInDescriptors();
 
         private static readonly Dictionary<uint, byte[]> WindowProps = new Dictionary<uint, byte[]>();
         private static readonly Guid ResolverHandle = Guid.NewGuid();
@@ -220,7 +230,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             switch (ProcNumber)
             {
                 case ProcConnect:
-                    return Connect(Stub, Instance.WinHelper.PID);
+                    return Connect(Stub, Instance.WinHelper);
 
                 case ProcSetAppId:
                     return SetAppId(Stub);
@@ -1108,7 +1118,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             return Writer.ToArray();
         }
 
-        private static byte[] Connect(ReadOnlySpan<byte> Stub, uint ProcessId)
+        private static byte[] Connect(ReadOnlySpan<byte> Stub, WinSysHelper Helper)
         {
             if (!TryReadConnectIdCount(Stub, out uint IdCount))
                 return null;
@@ -1145,7 +1155,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.WriteUInt32(0);
             Writer.WriteUInt32(0);
 
-            Writer.WriteUInt32(ProcessId);
+            Writer.WriteUInt32(Helper.PID);
             Writer.WriteUInt32(ScmProcessId);
             Writer.WriteUInt64(ProcessSignature);
 
@@ -1154,15 +1164,21 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.AlignTo(4);
             Writer.WriteBytes(Identifier);
 
-            uint DescriptorsSize = (uint)(EveryoneDescriptor.Length * SecurityDescriptorCount);
-            for (int i = 0; i < SecurityDescriptorCount; i++)
-                Writer.WriteUInt32((uint)EveryoneDescriptor.Length);
+            ReadOnlySpan<byte> Restrictions = ReadMachineAccessRestriction(Helper);
+            uint DescriptorsSize = (uint)Restrictions.Length;
+            foreach (byte[] Descriptor in BuiltInDescriptors)
+            {
+                Writer.WriteUInt32((uint)Descriptor.Length);
+                DescriptorsSize += (uint)Descriptor.Length;
+            }
 
+            Writer.WriteUInt32((uint)Restrictions.Length);
             Writer.WriteUInt32(DescriptorsSize);
             Writer.WriteUniqueReferent();
             Writer.WriteUInt32(DescriptorsSize);
-            for (int i = 0; i < SecurityDescriptorCount; i++)
-                Writer.WriteBytes(EveryoneDescriptor);
+            foreach (byte[] Descriptor in BuiltInDescriptors)
+                Writer.WriteBytes(Descriptor);
+            Writer.WriteBytes(Restrictions);
 
             Writer.AlignTo(4);
             Writer.WriteUInt32(OrOk);
@@ -1580,12 +1596,53 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             Writer.AlignTo(4);
         }
 
-        // combase refuses a descriptor without an owner and a group.
-        private static byte[] BuildEveryoneDescriptor()
+        // Launch permission, access permission, launch restriction and access restriction, in the order of the Connect
+        // reply, as rpcss InitializeSystemSecurityDescriptors builds them for a workstation.
+        private static byte[][] BuildBuiltInDescriptors()
         {
-            const uint ComRightsExecuteAll = 0x1F;
+            const uint Local = ComRightsExecute | ComRightsExecuteLocal;
+            const uint Access = Local | ComRightsExecuteRemote;
+            const uint LocalLaunch = Local | ComRightsActivateLocal;
+            const uint All = Access | ComRightsActivateLocal | ComRightsActivateRemote;
+
             byte[] Administrators = NtQueryInformationToken.AdministratorsSid;
-            return NtAccessCheck.BuildSingleAllowDescriptor(Administrators, Administrators, NtQueryInformationToken.EveryoneSid, ComRightsExecuteAll);
+            byte[] Everyone = NtQueryInformationToken.EveryoneSid;
+            byte[] LocalSystem = NtQueryInformationToken.LocalSystemSid;
+            byte[] Packages = NtQueryInformationToken.AllApplicationPackagesSid;
+            byte[] DcomUsers = NtQueryInformationToken.BuildSid(5, 32, 562);
+            byte[] PerformanceLogUsers = NtQueryInformationToken.BuildSid(5, 32, 559);
+            byte[] LpacCom = NtQueryInformationToken.BuildSid(15, 3, 1024, 2405443489, 874036122, 4286035555, 1823921565, 1746547431, 2453885448,
+                3625952902, 991631256);
+
+            return
+            [
+                AdministratorsOwned(Allow(Administrators, All), Allow(NtQueryInformationToken.InteractiveSid, LocalLaunch), Allow(LocalSystem, LocalLaunch)),
+                AdministratorsOwned(Allow(NtQueryInformationToken.PrincipalSelfSid, Access), Allow(LocalSystem, Local), Allow(Administrators, Access)),
+                AdministratorsOwned(Allow(Administrators, All), Allow(Everyone, LocalLaunch), Allow(DcomUsers, All), Allow(PerformanceLogUsers, All),
+                    Allow(Packages, LocalLaunch), Allow(LpacCom, LocalLaunch)),
+                AdministratorsOwned(Allow(Everyone, Access), Allow(NtQueryInformationToken.AnonymousLogonSid, Local), Allow(DcomUsers, Access),
+                    Allow(PerformanceLogUsers, Access), Allow(Packages, Local), Allow(LpacCom, Local)),
+            ];
+
+            static NtAccessCheck.AceEntry Allow(byte[] Sid, uint Mask) => NtAccessCheck.AceEntry.Allow(Sid, Mask);
+
+            static byte[] AdministratorsOwned(params ReadOnlySpan<NtAccessCheck.AceEntry> Entries)
+                => NtAccessCheck.BuildSelfRelative(NtQueryInformationToken.AdministratorsSid, NtQueryInformationToken.AdministratorsSid,
+                    NtAccessCheck.BuildAcl(Entries), ReadOnlySpan<byte>.Empty);
+        }
+
+        // rpcss sends MachineAccessRestriction only when the registry holds a valid COM descriptor, and the client then
+        // uses the built-in one.
+        private static ReadOnlySpan<byte> ReadMachineAccessRestriction(WinSysHelper Helper)
+        {
+            if (Helper.TryGetRegistryValue(Helper.ResolveNativeRegistryKey(DcomPolicyKey), MachineAccessRestriction, out _))
+                Utils.LogError("[-] RPCSS: the DCOM policy value MachineAccessRestriction is not read; the value under the Ole key applies.");
+
+            if (!Helper.TryGetRegistryValue(Helper.ResolveNativeRegistryKey(OleKey), MachineAccessRestriction, out ValueNode Value)
+                || Value.Type != WinSysHelper.RegBinary || Value.Data is not { Length: >= MinimumRegistryDescriptorBytes })
+                return default;
+
+            return Value.Data.AsSpan(0, NtAccessCheck.ComDescriptorLength(Value.Data));
         }
     }
 }

@@ -3008,6 +3008,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public byte[] Data;
         public List<ulong> Handles;
+        public List<ulong> SentHandles;
         public long NotBeforeTick;
 
         public Task HostWork;
@@ -3032,6 +3033,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Deferred;
         }
 
+        // The handler gives the handle up: the ALPC layer keeps it with the reply for the client, or closes it.
         public void AttachHandle(ulong Handle)
         {
             Handles ??= new List<ulong>();
@@ -3084,17 +3086,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         public PortAlpcHandler Handler;
 
-        /// <summary>
-        /// Handles delivered with the reply the client last received, waiting to be claimed through
-        /// NtAlpcQueryInformationMessage(AlpcMessageHandleInformation).
-        /// </summary>
-        public List<ulong> DeliveredHandles;
-
-        /// <summary>
-        /// Handles the client attached to the message being dispatched, in the order the handle
-        /// attribute listed them.
-        /// </summary>
-        public List<ulong> ReceivedHandles;
+        // Replies with handles, by message id, until their clients release them.
+        internal Dictionary<uint, AlpcHandleBlob> HandleBlobs;
+        internal bool HandleBlobLimitLogged;
 
         public string ObjectId => !string.IsNullOrEmpty(Name) ? Name : UnnamedId ??= $"\\ALPC Port {System.Threading.Interlocked.Increment(ref NextUnnamedId):X}";
         public HandleType ObjectType => HandleType.PortHandle;

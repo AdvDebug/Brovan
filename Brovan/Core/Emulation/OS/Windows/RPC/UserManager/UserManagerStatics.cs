@@ -23,6 +23,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
             new Guid("661110c7-5083-4b93-8d41-1d37a51e4425"),
         };
 
+        private const uint ProcHandleForUser = 17;
         private const uint ProcUserFromContext = 20;
         private const uint ErrorUnknownUserContext = 0x80A2030B;
 
@@ -37,13 +38,41 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
         internal override bool TryCall(HostCall Call, Guid Interface, uint ProcNumber, ReadOnlySpan<byte> Parameters, out byte[] Stub)
         {
             Stub = null;
-            if (Interface != SignInStateManager || ProcNumber != ProcUserFromContext)
+            if (Interface != SignInStateManager)
                 return false;
 
             Ndr20Reader Reader = new Ndr20Reader(Parameters);
-            if (Reader.TryReadUInt64(out ulong Context))
-                Stub = UserFromContext(Call, Context);
-            return true;
+            switch (ProcNumber)
+            {
+                case ProcUserFromContext:
+                    if (Reader.TryReadUInt64(out ulong Context))
+                        Stub = UserFromContext(Call, Context);
+                    return true;
+
+                case ProcHandleForUser:
+                {
+                    if (!Orpc.TryReadUniqueInterfacePointer(ref Reader, out ReadOnlySpan<byte> ObjRef))
+                        return true;
+
+                    if (!ObjRef.IsEmpty && !SessionUserObject.IsMarshaledSessionUser(ObjRef))
+                        return false;
+
+                    Stub = HandleForUser(!ObjRef.IsEmpty);
+                    return true;
+                }
+
+                default:
+                    return false;
+            }
+        }
+
+        private static byte[] HandleForUser(bool HasUser)
+        {
+            Ndr20Writer Writer = new Ndr20Writer(0x40);
+            Orpc.WriteResponseHeader(ref Writer);
+            Writer.WriteUInt64(HasUser ? WinToken.InteractiveUserContext : 0);
+            Writer.WriteUInt32(HasUser ? Orpc.SOk : Orpc.EInvalidArg);
+            return Writer.ToArray();
         }
 
         private byte[] UserFromContext(HostCall Call, ulong Context)

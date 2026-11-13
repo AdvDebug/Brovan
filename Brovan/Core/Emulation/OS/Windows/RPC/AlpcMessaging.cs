@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Brovan.Core.Emulation.OS.Windows.RPC;
 using Brovan.Core.Helpers;
+using Brovan.Core.Settings;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -81,6 +82,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal AlpcReceiveQueue? Queue;
         internal uint Sequence = 1;
         internal bool Disconnected;
+    }
+
+    internal readonly record struct AlpcHeldHandle(ulong Handle, IHandleObject Object, AccessMask Access);
+
+    internal sealed class AlpcHandleBlob
+    {
+        internal uint CallbackId;
+        internal ServedClient Owner;
+
+        // Handles in the receiving process that the blob owns. They hold the objects until the receiver releases the message.
+        internal AlpcHeldHandle[] Handles;
     }
 
     // What a reply takes over from its request. An LRPC bind's type flags 0x4000 give reply type 0x4002.
@@ -218,6 +230,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint CarriedAttributes = ViewAttribute | HandleAttribute;
         internal const int AttributeHeaderSize = 8;
         internal const int HandleAttributeSize = 0x18;
+        internal const uint IndirectHandleFlag = 0x40000;
         private const int SecurityAttributeSize = 0x18;
         private const int SecurityAttributeSize32 = 0x0C;
         private static readonly (uint Flag, int Size)[] AttributeSizes =
@@ -642,6 +655,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Client.Queue != null && EndReceivers(Client.Queue))
                 Instance.WakeSignal.Bump();
 
+            if (Port.HandleBlobs != null)
+            {
+                foreach (KeyValuePair<uint, AlpcHandleBlob> Entry in Port.HandleBlobs)
+                {
+                    if (Entry.Value.Owner != Client)
+                        continue;
+
+                    Port.HandleBlobs.Remove(Entry.Key);
+                    CloseOwnedHandles(Instance, Entry.Value);
+                }
+            }
+
             if (Port.SecurityContexts == null)
                 return;
 
@@ -651,6 +676,156 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Port.SecurityContexts.Remove(Entry.Key);
             }
         }
+
+        // NT keeps a reply's handles only for a receiver that asks for the handle attribute (AlpcpReceiveSynchronousReply).
+        internal static void DeliverReplyHandles(BinaryEmulator Instance, PortReply Reply, ReadOnlySpan<byte> Delivered, bool Written, ulong AttributesPtr,
+            uint AllocatedAttributes)
+        {
+            List<ulong> Handles = Reply.Handles;
+            if (Handles is not { Count: > 0 })
+                return;
+
+            bool X64 = Supported(Instance);
+            if (!X64)
+                ReportDroppedThirtyTwoBitHandles();
+
+            uint MessageId = 0;
+            uint CallbackId = 0;
+            if (Delivered.Length >= HeaderSize)
+                ReadMessageIds(Delivered, out MessageId, out CallbackId);
+
+            if (!Written || !X64 || Reply.Client == null || MessageId == 0 || AttributesPtr == 0 || (AllocatedAttributes & HandleAttribute) == 0
+                || !CanKeepHandleBlob(Reply.Port, MessageId, Reply.Client) || !TryPublishHandleAttribute(Instance, AttributesPtr, AllocatedAttributes, Handles.Count))
+            {
+                CloseAttachedHandles(Instance, Reply);
+                return;
+            }
+
+            AlpcHeldHandle[] Held = new AlpcHeldHandle[Handles.Count];
+            for (int Index = 0; Index < Held.Length; Index++)
+            {
+                ulong Handle = Handles[Index];
+                Held[Index] = new AlpcHeldHandle(Handle, Instance.WinHelper.HandleManager.GetObjectByHandle(Handle),
+                    Instance.WinHelper.HandleManager.GetPermissionsByHandle(Handle));
+            }
+
+            Reply.Handles = null;
+            Reply.Port.HandleBlobs ??= new Dictionary<uint, AlpcHandleBlob>();
+            if (Reply.Port.HandleBlobs.Remove(MessageId, out AlpcHandleBlob Replaced))
+                CloseOwnedHandles(Instance, Replaced);
+            Reply.Port.HandleBlobs[MessageId] = new AlpcHandleBlob { CallbackId = CallbackId, Owner = Reply.Client, Handles = Held };
+        }
+
+        // A reply takes the id of its request when that is not 0, so an id can name another client's kept reply.
+        private static bool CanKeepHandleBlob(WinPort Port, uint MessageId, ServedClient Client)
+        {
+            if (Port.HandleBlobs == null)
+                return true;
+
+            bool Replaces = Port.HandleBlobs.TryGetValue(MessageId, out AlpcHandleBlob Kept);
+            if (Replaces && Kept.Owner != Client)
+                return false;
+
+            if (Port.HandleBlobs.Count - (Replaces ? 1 : 0) < MemoryBudget.AlpcHandleBlobs)
+                return true;
+
+            if (!Port.HandleBlobLimitLogged)
+                Utils.LogError($"[-] ALPC: the clients of \"{Port.Name}\" keep {Port.HandleBlobs.Count} replies with handles they have not released; later replies go without their handles.");
+            Port.HandleBlobLimitLogged = true;
+            return false;
+        }
+
+        // An ALPC_HANDLE_ATTR with no handle of its own, only the number of handles to query.
+        private static bool TryPublishHandleAttribute(BinaryEmulator Instance, ulong AttributesPtr, uint AllocatedAttributes, int HandleCount)
+        {
+            Span<byte> Attribute = stackalloc byte[HandleAttributeSize];
+            Attribute.Clear();
+            BinaryPrimitives.WriteUInt32LittleEndian(Attribute.Slice(0x10), (uint)HandleCount);
+            return Instance.WriteMemory(AttributesPtr + AttributeOffset(AllocatedAttributes, HandleAttribute), Attribute)
+                && Instance.WinHelper.WriteUInt32(AttributesPtr + 4, HandleAttribute);
+        }
+
+        // The checks and their order follow AlpcpLookupMessage.
+        internal static NTSTATUS LookupMessage(WinPort Port, ulong HandleKey, uint MessageId, uint CallbackId, out AlpcMessage Message, out AlpcHandleBlob Blob)
+        {
+            Message = null;
+            Blob = null;
+            if (Port.Handler != null)
+            {
+                if (Port.HandleBlobs == null || !Port.HandleBlobs.TryGetValue(MessageId, out AlpcHandleBlob Kept) || (CallbackId != 0 && Kept.CallbackId != CallbackId))
+                    return NTSTATUS.STATUS_INVALID_MESSAGE;
+
+                if (Kept.Owner != Port.ServedClients?.GetValueOrDefault(HandleKey))
+                    return NTSTATUS.STATUS_ACCESS_DENIED;
+
+                Blob = Kept;
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            AlpcServerQueue Queue = Port.ServerQueue ?? Port.Connection?.ConnectionPort.ServerQueue;
+            if (Queue == null || !Queue.Delivered.TryGetValue(MessageId, out AlpcMessage Received) || (CallbackId != 0 && Received.CallbackId != CallbackId))
+                return NTSTATUS.STATUS_INVALID_MESSAGE;
+
+            if (Received.Connection != (Port.IsClientEnd ? null : Port.Connection))
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            Message = Received;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT opens a new handle at each query.
+        internal static bool TryOpenHandle(BinaryEmulator Instance, in AlpcHeldHandle Held, out ulong Handle)
+        {
+            Handle = 0;
+            if (!StillHolds(Instance, Held))
+                return false;
+
+            Handle = Instance.WinHelper.OpenObjectHandle(Held.Object, Held.Access).Handle;
+            return true;
+        }
+
+        // NT releases a kept message when a send names its message id (AlpcpSendMessage).
+        internal static bool TryReleaseHandleBlob(BinaryEmulator Instance, WinPort Port, ulong HandleKey, uint MessageId)
+        {
+            if (LookupMessage(Port, HandleKey, MessageId, 0, out _, out AlpcHandleBlob Blob) != NTSTATUS.STATUS_SUCCESS || Blob == null)
+                return false;
+
+            Port.HandleBlobs.Remove(MessageId);
+            CloseOwnedHandles(Instance, Blob);
+            return true;
+        }
+
+        private static bool ThirtyTwoBitHandlesLogged;
+
+        internal static void ReportDroppedThirtyTwoBitHandles()
+        {
+            if (!ThirtyTwoBitHandlesLogged)
+                Utils.LogError("[-] ALPC: an x86 guest sends or receives handles through a handler port; Brovan reads the x64 handle attribute only, so they are dropped.");
+            ThirtyTwoBitHandlesLogged = true;
+        }
+
+        internal static void CloseAttachedHandles(BinaryEmulator Instance, PortReply Reply)
+        {
+            if (Reply?.Handles == null)
+                return;
+
+            foreach (ulong Handle in Reply.Handles)
+                Instance.WinHelper.CloseHandle(Handle);
+            Reply.Handles = null;
+        }
+
+        private static void CloseOwnedHandles(BinaryEmulator Instance, AlpcHandleBlob Blob)
+        {
+            foreach (AlpcHeldHandle Held in Blob.Handles)
+            {
+                if (StillHolds(Instance, Held))
+                    Instance.WinHelper.CloseHandle(Held.Handle);
+            }
+        }
+
+        // A handle value the guest closed can name another object by now.
+        private static bool StillHolds(BinaryEmulator Instance, in AlpcHeldHandle Held)
+            => Held.Object != null && ReferenceEquals(Instance.WinHelper.HandleManager.GetObjectByHandle(Held.Handle), Held.Object);
 
         internal static AlpcReceiveQueue? ServedQueueOf(WinPort Port, ulong HandleKey) => Port.ServedClients?.GetValueOrDefault(HandleKey)?.Queue;
 
@@ -680,7 +855,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return DeleteContext(Context) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_DELETE_PENDING;
         }
 
-        private static NTSTATUS TryReadMessageIds(BinaryEmulator Instance, ulong MessagePtr, out uint MessageId, out uint CallbackId)
+        internal static NTSTATUS TryReadMessageIds(BinaryEmulator Instance, ulong MessagePtr, out uint MessageId, out uint CallbackId)
         {
             MessageId = 0;
             CallbackId = 0;
@@ -691,10 +866,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.ReadMemory(MessagePtr, Header))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+            ReadMessageIds(Header, out MessageId, out CallbackId);
+            return MessageId == 0 ? NTSTATUS.STATUS_INVALID_PARAMETER : NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal static void ReadMessageIds(ReadOnlySpan<byte> Header, out uint MessageId, out uint CallbackId)
+        {
             bool ThirtyTwoBit = (BinaryPrimitives.ReadUInt16LittleEndian(Header.Slice(OffType)) & ThirtyTwoBitMessage) != 0;
             MessageId = BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(ThirtyTwoBit ? OffMessageId32 : OffMessageId));
             CallbackId = BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(ThirtyTwoBit ? OffCallbackId32 : OffCallbackId));
-            return MessageId == 0 ? NTSTATUS.STATUS_INVALID_PARAMETER : NTSTATUS.STATUS_SUCCESS;
         }
 
         internal static NTSTATUS ImpersonateClient(BinaryEmulator Instance, ulong PortHandle, ulong MessagePtr, ulong Flags)
@@ -713,7 +893,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             bool LevelGiven = RequestedLevel != 0 || (Flags & ImpersonateLevelGiven) != 0;
 
-            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(PortHandle, AccessMask.None, out WinPort Port);
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(PortHandle, AccessMask.None, out WinPort Port, out ulong PortKey, out _);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -729,12 +909,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                AlpcServerQueue Queue = Port.ServerQueue ?? Port.Connection?.ConnectionPort.ServerQueue;
-                if (Queue == null || !Queue.Delivered.TryGetValue(MessageId, out AlpcMessage Message) || (CallbackId != 0 && Message.CallbackId != CallbackId))
-                    return NTSTATUS.STATUS_INVALID_MESSAGE;
+                Status = LookupMessage(Port, PortKey, MessageId, CallbackId, out AlpcMessage Message, out _);
+                if (Status != NTSTATUS.STATUS_SUCCESS)
+                    return Status;
 
-                if (Connection != Message.Connection)
-                    return NTSTATUS.STATUS_ACCESS_DENIED;
+                // A reply that a handler port keeps for its client is not a request to impersonate.
+                if (Message == null)
+                    return NTSTATUS.STATUS_INVALID_MESSAGE;
 
                 if (Message.SecurityContext == null && !Connection.AllowImpersonation)
                     return NTSTATUS.STATUS_ACCESS_DENIED;
@@ -1167,6 +1348,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         internal static uint NewCallbackId() => TakeId(ref NextCallbackId);
+
+        internal static uint NewMessageId() => TakeId(ref NextMessageId);
 
         internal static ushort TypeFlagsOf(ReadOnlySpan<byte> Header) => (ushort)(BinaryPrimitives.ReadUInt32LittleEndian(Header.Slice(OffType)) & ReplyTypeFlagsMask);
 

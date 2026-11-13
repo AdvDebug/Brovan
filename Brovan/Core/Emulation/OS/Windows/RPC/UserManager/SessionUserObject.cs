@@ -52,6 +52,14 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.UserManager
 
         internal override Guid UnmarshalClass => UserMarshalClass;
 
+        // The server process id in the packet is not compared, because every guest process serves the session's user manager.
+        internal static bool IsMarshaledSessionUser(ReadOnlySpan<byte> ObjRef)
+        {
+            return Orpc.TryGetCustomObjRefData(ObjRef, out Guid Clsid, out ReadOnlySpan<byte> Packet) && Clsid == UserMarshalClass && Packet.Length >= PacketSize
+                && BinaryPrimitives.ReadUInt16LittleEndian(Packet) == PacketSize && BinaryPrimitives.ReadUInt32LittleEndian(Packet.Slice(4)) == PacketSize
+                && BinaryPrimitives.ReadUInt32LittleEndian(Packet.Slice(OffMarshalId)) == MarshalId;
+        }
+
         // NT: the packet, then the free-threaded marshaler's standard OBJREF.
         internal override byte[] GetMarshalData(Guid Interface, in StdObjRef Std)
         {

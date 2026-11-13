@@ -53,6 +53,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public const uint SFalse = 1;
         public const uint ENoInterface = 0x80004002;
         public const uint ENotImpl = 0x80004001;
+        public const uint EUnexpected = 0x8000FFFF;
+        public const uint EAccessDenied = 0x80070005;
         public const uint EOutOfMemory = 0x8007000E;
         public const uint EInvalidArg = 0x80070057;
         public const uint EElementNotFound = 0x80070490;
@@ -316,12 +318,16 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             Writer.AlignTo(4);
         }
 
-        public static bool TryGetCustomObjRefData(ReadOnlySpan<byte> ObjRef, out ReadOnlySpan<byte> Data)
+        public static bool TryGetCustomObjRefData(ReadOnlySpan<byte> ObjRef, out ReadOnlySpan<byte> Data) => TryGetCustomObjRefData(ObjRef, out _, out Data);
+
+        public static bool TryGetCustomObjRefData(ReadOnlySpan<byte> ObjRef, out Guid Clsid, out ReadOnlySpan<byte> Data)
         {
+            Clsid = default;
             Data = default;
             if (!IsObjRef(ObjRef, ObjRefCustom, CustomObjRefHeaderSize) || BinaryPrimitives.ReadUInt32LittleEndian(ObjRef.Slice(OffCustomExtension)) != 0)
                 return false;
 
+            Clsid = new Guid(ObjRef.Slice(OffCustomClsid, 16));
             Data = ObjRef.Slice(CustomObjRefHeaderSize);
             return true;
         }
@@ -358,7 +364,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             if (Referent == 0)
                 return true;
 
-            if (!Reader.TryReadUInt32(out uint Length) || !Reader.TryReadUInt32(out uint Conformance) || Length != Conformance)
+            if (!Reader.TryReadUInt32(out uint Length) || !Reader.TryReadUInt32(out uint Conformance) || Length != Conformance || Length < ObjRefHeaderSize)
                 return false;
 
             return Reader.TryReadBytes((int)Math.Min(Length, int.MaxValue), out ObjRef);

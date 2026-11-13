@@ -317,6 +317,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
                 && NtQueryInformationToken.IsValidSid(Sid);
         }
 
+        public bool TryReadSystemHandle(out uint HandleIndexPlusOne) => TryReadUInt32(out HandleIndexPlusOne) && TrySkip(4);
+
         public bool TryReadGuid(out Guid Value)
         {
             Value = Guid.Empty;

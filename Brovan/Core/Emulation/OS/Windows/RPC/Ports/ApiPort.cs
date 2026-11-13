@@ -1149,9 +1149,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         // REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET.
         private const uint ChangeFilter = 0x5;
 
-        private const uint DbgMultiSessionSku = 0x100;
-        private const uint DbgMultiUsersInSessionSku = 0x200;
-
         private const int MultipleQueryCount = 30;
         private const uint MultipleQueryBufferLength = 0x3AC;
         private const int PartialQueryDataLimit = 0xB6 - 12;
@@ -1206,10 +1203,10 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             uint SkuFlags = Instance.WinHelper.KuserSharedData?.SharedDataFlags ?? 0;
 
             // basesrv GetGlobalizationUserModelType.
-            bool MultiSession = (SkuFlags & DbgMultiSessionSku) != 0;
+            bool MultiSession = (SkuFlags & KuserSharedDataManager.DbgMultiSessionSku) != 0;
 
             // This model keeps its settings in the state store, which is not emulated. Clients read the registry.
-            if (!MultiSession && (SkuFlags & DbgMultiUsersInSessionSku) != 0)
+            if (!MultiSession && (SkuFlags & KuserSharedDataManager.DbgMultiUsersInSessionSku) != 0)
             {
                 BaseSrvNlsUserInfo Unattached = new BaseSrvNlsUserInfo(Address, null);
                 Unattached.Publish(Instance);

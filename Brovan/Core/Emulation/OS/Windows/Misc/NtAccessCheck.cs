@@ -534,6 +534,62 @@ namespace Brovan.Core.Emulation.OS.Windows
             return BuildSelfRelative(Owner, Group, BuildAcl(AceEntry.Allow(Allowed.ToArray(), Mask)), ReadOnlySpan<byte>.Empty);
         }
 
+        // The checks follow IsValidCOMSecurityDescriptor in rpcss, and 0 means rpcss refuses the descriptor.
+        internal static int ComDescriptorLength(ReadOnlySpan<byte> SelfRelative)
+        {
+            const byte OtherComRights = 0x7E;
+
+            if (!TryParseSelfRelative(SelfRelative, out Descriptor Captured) || Captured.Owner.IsEmpty || Captured.Group.IsEmpty
+                || !HasOnlyValidKnownAces(Captured.Dacl) || !HasOnlyValidKnownAces(Captured.Sacl))
+                return 0;
+
+            ReadOnlySpan<byte> Dacl = Captured.Dacl;
+            int Count = Dacl.IsEmpty ? 0 : BinaryPrimitives.ReadUInt16LittleEndian(Dacl.Slice(4));
+            int Offset = AclHeaderSize;
+            int WithOther = 0;
+            for (int Index = 0; Index < Count; Index++)
+            {
+                byte Rights = Dacl[Offset + AceHeaderSize];
+                if ((Rights & RPC.Ports.RpcssPortHandler.ComRightsExecute) == 0)
+                    return 0;
+
+                WithOther += (Rights & OtherComRights) != 0 ? 1 : 0;
+                Offset += BinaryPrimitives.ReadUInt16LittleEndian(Dacl.Slice(Offset + 2));
+            }
+
+            if (WithOther != 0 && WithOther != Count)
+                return 0;
+
+            // NT RtlLengthSecurityDescriptor rounds each ACL size up to a multiple of four.
+            int Length = SelfRelativeHeaderSize + Captured.Owner.Length + Captured.Group.Length + ((Dacl.Length + 3) & ~3)
+                + ((Captured.Sacl.Length + 3) & ~3);
+            return Length <= SelfRelative.Length ? Length : 0;
+        }
+
+        // RtlValidAcl checks ACE types 0-3, 9, 10, 13, 14, 17, 19, 20 and 23 as a header, a mask and one SID.
+        // Other types have their own layouts and are refused here.
+        private static bool HasOnlyValidKnownAces(ReadOnlySpan<byte> Acl)
+        {
+            const uint KnownAceTypes = 0x009A660F;
+            const int MinimumKnownAceSize = 0x10;
+
+            int Count = Acl.IsEmpty ? 0 : BinaryPrimitives.ReadUInt16LittleEndian(Acl.Slice(4));
+            int Offset = AclHeaderSize;
+            for (int Index = 0; Index < Count; Index++)
+            {
+                byte Type = Acl[Offset];
+                int AceSize = BinaryPrimitives.ReadUInt16LittleEndian(Acl.Slice(Offset + 2));
+                if (Type > 31 || (KnownAceTypes & (1u << Type)) == 0 || AceSize < MinimumKnownAceSize
+                    || !IsValidSidHeader(Acl[Offset + AceSidOffset], Acl[Offset + AceSidOffset + 1])
+                    || AceSize < AceSidOffset + SidLength(Acl[Offset + AceSidOffset + 1]))
+                    return false;
+
+                Offset += AceSize;
+            }
+
+            return true;
+        }
+
         // NT maps generic rights and drops rights the type does not define (RtlpApplyAclToObject).
         internal static bool MapGenericRights(Span<byte> SelfRelative, in GENERIC_MAPPING Mapping)
         {

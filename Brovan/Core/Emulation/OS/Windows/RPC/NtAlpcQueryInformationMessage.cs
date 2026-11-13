@@ -1,63 +1,101 @@
-using System.Collections.Generic;
-using static Brovan.Core.Helpers.BinaryHelpers;
+using System;
+using System.Buffers.Binary;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtAlpcQueryInformationMessage : IWinSyscall
     {
         private const uint AlpcMessageHandleInformation = 3;
-        private const int HandleInformationSize = 20;
+        private const uint HandleInformationSize = 20;
 
+        // The checks and their order follow NtAlpcQueryInformationMessage and AlpcpQueryHandleInformationMessage.
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong PortHandle = Instance.WinHelper.GetArg(0);
+            ulong MessagePtr = Instance.WinHelper.GetArg(1);
             uint InformationClass = (uint)Instance.WinHelper.GetArg(2);
             ulong InformationPtr = Instance.WinHelper.GetArg(3);
             uint Length = (uint)Instance.WinHelper.GetArg(4);
             ulong ReturnLengthPtr = Instance.WinHelper.GetArg(5);
 
-            WinPort Port = Instance.WinHelper.HandleManager.GetObjectByHandle<WinPort>(PortHandle);
-            if (Port == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
-            if (InformationClass != AlpcMessageHandleInformation)
+            // Brovan does not serve the SID, ModifiedId and completion classes.
+            if (InformationClass < AlpcMessageHandleInformation)
                 return NTSTATUS.STATUS_INVALID_INFO_CLASS;
 
-            if (ReturnLengthPtr != 0 && Instance.IsRegionMapped(ReturnLengthPtr, 4))
-                Instance._emulator.WriteMemory(ReturnLengthPtr, (uint)HandleInformationSize);
+            NTSTATUS Status = AlpcMessaging.TryReadMessageIds(Instance, MessagePtr, out uint MessageId, out uint CallbackId);
+            if (Status != NTSTATUS.STATUS_SUCCESS && Status != NTSTATUS.STATUS_INVALID_PARAMETER)
+                return Status;
 
-            if (Length < HandleInformationSize)
-                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+            if (Length != 0)
+            {
+                if ((InformationPtr & 3) != 0)
+                    return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
 
-            if (InformationPtr == 0 || !Instance.IsRegionMapped(InformationPtr, HandleInformationSize))
+                Status = Instance.WinHelper.ProbeForWrite(InformationPtr, Length);
+                if (Status != NTSTATUS.STATUS_SUCCESS)
+                    return Status;
+            }
+
+            if (ReturnLengthPtr != 0)
+            {
+                Status = Instance.WinHelper.ProbeForWrite(ReturnLengthPtr, sizeof(uint));
+                if (Status != NTSTATUS.STATUS_SUCCESS)
+                    return Status;
+            }
+
+            if (MessageId == 0)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            Status = Instance.WinHelper.ReferenceObjectByHandle(PortHandle, AccessMask.ReadControl, out WinPort Port, out ulong PortKey, out _);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            Status = AlpcMessaging.LookupMessage(Port, PortKey, MessageId, CallbackId, out _, out AlpcHandleBlob Blob);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            if (InformationClass != AlpcMessageHandleInformation)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            if (Length != HandleInformationSize)
+                return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+            Span<byte> Information = stackalloc byte[(int)HandleInformationSize];
+            if (!Instance.ReadMemory(InformationPtr, Information.Slice(0, sizeof(uint))))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            List<ulong> Delivered = Port.DeliveredHandles;
-            if (Delivered == null || Delivered.Count == 0)
-                return NTSTATUS.STATUS_NO_MORE_ENTRIES;
+            uint Index = BinaryPrimitives.ReadUInt32LittleEndian(Information);
+            if (Blob == null || Index >= (uint)Blob.Handles.Length)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            uint Index = Instance._emulator.ReadMemoryUInt(InformationPtr);
-            if (Index >= (uint)Delivered.Count)
-                return NTSTATUS.STATUS_NO_MORE_ENTRIES;
-
-            ulong Delivering = Delivered[(int)Index];
+            AlpcHeldHandle Held = Blob.Handles[Index];
+            if (!AlpcMessaging.TryOpenHandle(Instance, Held, out ulong Delivering))
+                return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if ((Instance.Settings.Flags & LogFlags.General) != 0)
-                Instance.TriggerEventMessage($"[+] ALPC handle 0x{Delivering:X} claimed from \"{Port.Name}\" (index {Index}).", LogFlags.General);
+                Instance.TriggerEventMessage($"[+] ALPC handle 0x{Delivering:X} given from \"{Port.Name}\" (message {MessageId}, index {Index}).", LogFlags.General);
 
-            Instance._emulator.WriteMemory(InformationPtr + 0x00, Index);
-            Instance._emulator.WriteMemory(InformationPtr + 0x04, 0u);
-            Instance._emulator.WriteMemory(InformationPtr + 0x08, (uint)Delivering);
-            Instance._emulator.WriteMemory(InformationPtr + 0x0C, AlpcObjectType(Instance, Delivering));
-            Instance._emulator.WriteMemory(InformationPtr + 0x10, (uint)AccessMask.StandardRightsAll);
+            BinaryPrimitives.WriteUInt32LittleEndian(Information.Slice(0x04), 0);
+            BinaryPrimitives.WriteUInt32LittleEndian(Information.Slice(0x08), (uint)Delivering);
+            BinaryPrimitives.WriteUInt32LittleEndian(Information.Slice(0x0C), AlpcObjectType(Held.Object));
+            BinaryPrimitives.WriteUInt32LittleEndian(Information.Slice(0x10), (uint)Held.Access);
+            if (!Instance.WriteMemory(InformationPtr, Information))
+            {
+                Instance.WinHelper.CloseHandle(Delivering);
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
+
+            if (ReturnLengthPtr != 0 && !Instance.WinHelper.WriteUInt32(ReturnLengthPtr, HandleInformationSize))
+            {
+                Instance.WinHelper.CloseHandle(Delivering);
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
 
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static uint AlpcObjectType(BinaryEmulator Instance, ulong Handle)
+        private static uint AlpcObjectType(IHandleObject Object)
         {
-            IHandleObject Object = Instance.WinHelper.HandleManager.GetObjectByHandle(Handle);
-
             switch (Object?.ObjectType)
             {
                 case HandleType.FileHandle: return 0x0001;

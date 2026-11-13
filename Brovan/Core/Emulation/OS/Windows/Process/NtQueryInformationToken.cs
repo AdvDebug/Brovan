@@ -558,7 +558,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool IsServiceUser(User User) => User is User.System or User.LocalService or User.WindowManager;
 
-        private static bool HoldsImpersonatePrivilege(WinToken Token) => IsServiceUser(Token.User) || Token.IsElevated;
+        internal static bool HoldsImpersonatePrivilege(WinToken Token) => IsServiceUser(Token.User) || Token.IsElevated;
+
+        internal static bool HoldsTcbPrivilege(WinToken Token) => Token.User == User.System;
 
         internal static byte[] UserSidOf(WinToken Token)
         {

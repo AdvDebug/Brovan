@@ -10471,13 +10471,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        public WinRegKey ResolveRegistryKey(string NtPath)
+        public WinRegKey ResolveRegistryKey(string NtPath) => ResolveRegistryKey(NtPath, Emulator.IsX86Guest);
+
+        // The 64-bit view, which a 64-bit Windows service reads for a guest of either width.
+        internal WinRegKey ResolveNativeRegistryKey(string NtPath) => ResolveRegistryKey(NtPath, false);
+
+        private WinRegKey ResolveRegistryKey(string NtPath, bool Wow64View)
         {
             NtPath = NormalizeNtRegistryPath(NtPath);
             if (string.IsNullOrEmpty(NtPath))
                 return null;
 
-            if (Emulator.IsX86Guest
+            if (Wow64View
                 && TryApplyWow64RegistryRedirect(NtPath, out string Redirected)
                 && RegistryKeyExistsExact(Redirected, out Hive RedirectedHive, out RegistryHiveReader.HiveKey RedirectedKey, out bool RedirectedTempOnly))
             {
