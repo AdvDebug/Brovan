@@ -686,6 +686,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int Requirements2Requirements = BrovVulkLayout.MemberOffset["VkMemoryRequirements2.memoryRequirements"];
         private static readonly int BindPlaneAspect = BrovVulkLayout.MemberOffset["VkBindImagePlaneMemoryInfo.planeAspect"];
         private static readonly int QueryPoolType = BrovVulkLayout.MemberOffset["VkQueryPoolCreateInfo.queryType"];
+        private static readonly int QueryPoolCount = BrovVulkLayout.MemberOffset["VkQueryPoolCreateInfo.queryCount"];
+        private static readonly int SemaphoreTypeType = BrovVulkLayout.MemberOffset["VkSemaphoreTypeCreateInfo.semaphoreType"];
+        private static readonly int SubresourceAspect = BrovVulkLayout.MemberOffset["VkImageSubresource.aspectMask"];
+        private static readonly int SubresourceLevel = BrovVulkLayout.MemberOffset["VkImageSubresource.mipLevel"];
+        private static readonly int SubresourceLayer = BrovVulkLayout.MemberOffset["VkImageSubresource.arrayLayer"];
+        private static readonly int DeviceSubresourceImage = BrovVulkLayout.MemberOffset["VkDeviceImageSubresourceInfo.pCreateInfo"];
+        private static readonly int DeviceSubresourceSubresource = BrovVulkLayout.MemberOffset["VkDeviceImageSubresourceInfo.pSubresource"];
+        private static readonly int Subresource2Subresource = BrovVulkLayout.MemberOffset["VkImageSubresource2.imageSubresource"];
         private static readonly int QueryPoolStatistics = BrovVulkLayout.MemberOffset["VkQueryPoolCreateInfo.pipelineStatistics"];
         private static readonly int FeedbackFlags = BrovVulkLayout.MemberOffset["VkQueryPoolVideoEncodeFeedbackCreateInfoKHR.encodeFeedbackFlags"];
         private static readonly int FramebufferImageInfoCount = BrovVulkLayout.MemberOffset["VkFramebufferAttachmentsCreateInfo.attachmentImageInfoCount"];
@@ -713,6 +721,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<IntPtr, uint> _shaderGroupCounts = new Dictionary<IntPtr, uint>();
         private readonly Dictionary<IntPtr, uint> _shaderGroupHandleSizes = new Dictionary<IntPtr, uint>();
         private readonly Dictionary<IntPtr, (uint Count, uint Values)> _queryPools = new Dictionary<IntPtr, (uint, uint)>();
+        private const uint MaxQueries = 1u << 20;
+        private readonly HashSet<IntPtr> _timelines = new HashSet<IntPtr>();
         private readonly Dictionary<IntPtr, RenderPassShape> _renderPasses = new Dictionary<IntPtr, RenderPassShape>();
         private readonly Dictionary<IntPtr, FramebufferExtent> _framebuffers = new Dictionary<IntPtr, FramebufferExtent>();
         private readonly Dictionary<IntPtr, (uint Width, uint Height, uint Layers)> _views = new Dictionary<IntPtr, (uint, uint, uint)>();
@@ -1004,6 +1014,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                             break;
                         case "VkQueryPool":
                             _queryPools.Remove(e.Ptr);
+                            break;
+                        case "VkSemaphore":
+                            _timelines.Remove(e.Ptr);
                             break;
                         case "VkImage":
                             _images.Remove(e.Ptr);
@@ -1576,6 +1589,40 @@ namespace Brovan.Core.Emulation.OS.Windows
             _views[view] = (Math.Max(1u, extent.Width >> shift), Math.Max(1u, extent.Height >> shift), layers);
         }
 
+        public void CheckImageSubresource(IntPtr image, IntPtr subresource) => CheckSubresource(ImageOf(image), subresource);
+
+        public void CheckImageSubresource2(IntPtr image, IntPtr subresource2) => CheckImageSubresource(image, subresource2 + Subresource2Subresource);
+
+        public static unsafe void CheckDeviceImageSubresource(IntPtr info) =>
+            CheckSubresource(ReadImage(*(IntPtr*)(info + DeviceSubresourceImage)), *(IntPtr*)(info + DeviceSubresourceSubresource) + Subresource2Subresource);
+
+        private static unsafe void CheckSubresource(in ImageExtent extent, IntPtr subresource)
+        {
+            uint aspect = *(uint*)(subresource + SubresourceAspect);
+            uint level = *(uint*)(subresource + SubresourceLevel);
+            uint layer = *(uint*)(subresource + SubresourceLayer);
+            if (level >= extent.Levels || layer >= extent.Layers || !FormatHasAspect(extent.Format, aspect))
+                throw new InvalidOperationException($"BrovVulk generic: aspect {aspect}, level {level} and layer {layer} do not name a subresource of the image.");
+        }
+
+        private static bool FormatHasAspect(int format, uint aspect)
+        {
+            if (!BrovVulkFormats.TryGet(format, out BrovVulkFormat f))
+                return aspect == BrovVulkConstants.VK_IMAGE_ASPECT_COLOR_BIT;
+            int plane = PlaneOf(aspect);
+            if (plane >= 0)
+                return f.Planes != null && plane * 3 < f.Planes.Length;
+            if (f.Planes != null)
+                return false;
+            return aspect switch
+            {
+                (uint)BrovVulkConstants.VK_IMAGE_ASPECT_COLOR_BIT => f.DepthBytes == 0 && f.StencilBytes == 0,
+                (uint)BrovVulkConstants.VK_IMAGE_ASPECT_DEPTH_BIT => f.DepthBytes != 0,
+                (uint)BrovVulkConstants.VK_IMAGE_ASPECT_STENCIL_BIT => f.StencilBytes != 0,
+                _ => false,
+            };
+        }
+
         private static void CheckRange(in ImageExtent extent, uint baseLevel, uint levels, uint baseLayer, uint layers, uint layerLimit)
         {
             if (!Within(baseLevel, levels, extent.Levels) || !Within(baseLayer, layers, layerLimit))
@@ -1754,6 +1801,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static unsafe uint QueryResultValues(IntPtr info)
         {
+            // lavapipe sizes the pool with a 32-bit multiply of the count.
+            uint count = *(uint*)(info + QueryPoolCount);
+            if (count > MaxQueries)
+                throw new InvalidOperationException($"BrovVulk generic: query pool count {count} exceeds cap.");
+
             int type = *(int*)(info + QueryPoolType);
             switch (type)
             {
@@ -1792,6 +1844,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public void CheckQueryRange(IntPtr pool, uint first, uint count) => QueryValues(pool, first, count);
+
+        public unsafe void NoteSemaphore(IntPtr semaphore, IntPtr info)
+        {
+            byte* type = FindNode(info, BrovVulkConstants.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO);
+            if (semaphore != IntPtr.Zero && type != null && *(int*)(type + SemaphoreTypeType) == BrovVulkConstants.VK_SEMAPHORE_TYPE_TIMELINE)
+                _timelines.Add(semaphore);
+        }
+
+        public void CheckTimeline(IntPtr semaphore)
+        {
+            if (!_timelines.Contains(semaphore))
+                throw new InvalidOperationException("BrovVulk generic: the semaphore is not a timeline semaphore.");
+        }
 
         public void CheckQueryResults(IntPtr pool, uint first, uint count, ulong stride, uint flags, ulong available)
         {
@@ -2042,6 +2107,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Array.Clear(BoundSets);
                 PushedLayouts?.Clear();
             }
+        }
+
+        public static unsafe void CheckCommandBufferLevel(IntPtr info)
+        {
+            if (info != IntPtr.Zero && (uint)*(int*)(info + AllocateLevel) > BrovVulkConstants.VK_COMMAND_BUFFER_LEVEL_SECONDARY)
+                throw new InvalidOperationException("BrovVulk generic: a command buffer level must be primary or secondary.");
         }
 
         public unsafe void AddRecordings(IntPtr device, IntPtr info, IntPtr buffers, uint count)
@@ -3922,6 +3993,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void CheckVertexBindingRange(uint first, uint count) => CheckSlots(first, count, DeviceGapsOf(CallDevice)?.MaxVertexInputBindings ?? 0, "vertex bindings");
 
         public void CheckFeedbackBufferRange(uint first, uint count) => CheckSlots(first, count, DeviceGapsOf(CallDevice)?.MaxTransformFeedbackBuffers ?? 0, "transform feedback buffers");
+
+        // A NULL layout needs dynamicPipelineLayout from VK_EXT_device_generated_commands, which is not advertised.
+        public static unsafe void RequireLayout(IntPtr info, int layoutOffset)
+        {
+            if (info != IntPtr.Zero && *(IntPtr*)(info + layoutOffset) == IntPtr.Zero)
+                throw new InvalidOperationException("BrovVulk generic: a pipeline layout is required.");
+        }
 
         public void CheckPushConstants(uint offset, uint size) => CheckSlots(offset, size, DeviceGapsOf(CallDevice)?.MaxPushConstantsSize ?? 0, "push constant bytes");
 

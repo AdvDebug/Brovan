@@ -133,6 +133,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
+            internal static void CheckTimelines(GenState st, IntPtr info)
+            {
+                uint count = *(uint*)(info + CountOffset);
+                IntPtr semaphores = *(IntPtr*)(info + SemaphoresOffset);
+                for (uint i = 0; semaphores != IntPtr.Zero && i < count; i++)
+                    st.CheckTimeline(*(IntPtr*)(semaphores + (int)(i * 8)));
+            }
+
             internal static bool CanCopy(IntPtr info, out uint count)
             {
                 count = 0;
@@ -268,6 +276,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (pWaitInfo == IntPtr.Zero)
                 return BrovVulkConstants.VK_ERROR_INITIALIZATION_FAILED;
+            SemaphoreCall.CheckTimelines(st, pWaitInfo);
 
             BrovVulkWaits waits = st.Waits;
             if (waits.TakeRerun() is SemaphoreCall resumed && resumed.Matches(st, device, pWaitInfo, timeout))

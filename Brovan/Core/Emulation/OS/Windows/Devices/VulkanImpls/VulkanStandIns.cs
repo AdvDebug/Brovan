@@ -1204,8 +1204,23 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void PreparePipelines(GenState st, IntPtr device, IntPtr createInfos, uint count, int stride)
         {
+            if (createInfos == IntPtr.Zero || stride <= 0)
+                return;
+
+            for (uint i = 0; i < count; i++)
+            {
+                IntPtr info = createInfos + (int)(i * (uint)stride);
+                // pStages is optional, but drivers walk stageCount entries even when it is NULL.
+                if (*(IntPtr*)(info + VkOffsets.PipelineStages) == IntPtr.Zero)
+                    *(uint*)(info + VkOffsets.PipelineStageCount) = 0;
+
+                bool complete = !CreatesLibrary(info) && !LinksLibraries(info);
+                if (complete && (*(uint*)(info + VkOffsets.PipelineStageCount) == 0 || *(IntPtr*)(info + VkOffsets.PipelineLayout) == IntPtr.Zero))
+                    throw new InvalidOperationException("BrovVulk generic: a complete graphics pipeline needs shader stages and a layout.");
+            }
+
             int bits = st.DeviceStandIns(device);
-            if ((bits & (PipelineBits | HostCpuDeviceBit)) == 0 || createInfos == IntPtr.Zero || stride <= 0)
+            if ((bits & (PipelineBits | HostCpuDeviceBit)) == 0)
                 return;
             if ((bits & HostCpuDeviceBit) != 0)
                 st.BeginPipelines(count);
@@ -1229,14 +1244,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             for (uint i = 0; i < count; i++)
             {
                 IntPtr info = createInfos + (int)(i * (uint)stride);
-                // pStages is optional, so stageCount can be non-zero with no array behind it.
-                bool noStages = *(IntPtr*)(info + VkOffsets.PipelineStages) == IntPtr.Zero && *(uint*)(info + VkOffsets.PipelineStageCount) != 0;
 
                 if ((bits & Maintenance5Bit) != 0)
                 {
                     Maintenance5.FoldCreateFlags(info, VkOffsets.PipelineFlags);
-                    if (!noStages)
-                        Maintenance5.MaterializeModules(st, device, *(IntPtr*)(info + VkOffsets.PipelineStages), *(uint*)(info + VkOffsets.PipelineStageCount));
+                    Maintenance5.MaterializeModules(st, device, *(IntPtr*)(info + VkOffsets.PipelineStages), *(uint*)(info + VkOffsets.PipelineStageCount));
                 }
 
                 if ((bits & HostCpuDeviceBit) != 0)
@@ -1244,13 +1256,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     IntPtr layout = *(IntPtr*)(info + VkOffsets.PipelineLayout);
                     HashSet<uint> used = st.PipelineUse((int)i, layout, CreatesLibrary(info) ? GenState.PipelineLibrary : GenState.PipelineGraphics);
                     UseLibraries(st, info, (int)i);
-                    if (!noStages)
-                        BoundStages(st, device, *(IntPtr*)(info + VkOffsets.PipelineStages), *(uint*)(info + VkOffsets.PipelineStageCount), layout, used);
+                    BoundStages(st, device, *(IntPtr*)(info + VkOffsets.PipelineStages), *(uint*)(info + VkOffsets.PipelineStageCount), layout, used);
                     st.ResolvePipelineUse((int)i);
                 }
-
-                if (noStages)
-                    continue;
 
                 if ((bits & RelocationBits) != 0)
                     ShaderPatches.PreparePipeline(st, device, bits, info);
@@ -1377,6 +1385,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (inline != IntPtr.Zero)
                     ShaderPatches.UnlinkInlineModules(stage);
             }
+        }
+
+        private static bool LinksLibraries(IntPtr info)
+        {
+            for (IntPtr node = *(IntPtr*)(info + VkOffsets.NodePNext); node != IntPtr.Zero; node = *(IntPtr*)(node + VkOffsets.NodePNext))
+            {
+                if (*(int*)node == BrovVulkConstants.VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR && *(uint*)(node + VkOffsets.LibraryCount) != 0)
+                    return true;
+            }
+            return false;
         }
 
         private static void UseLibraries(GenState st, IntPtr info, int index)

@@ -160,19 +160,26 @@ jobs:
           set +e
           shopt -s nullglob
           OUT=Brovan.Fuzz/bin/Release/net10.0
-          mkdir -p artifacts crashes-layer
+          mkdir -p artifacts crashes-layer crashes-flaky
           LIMIT=40
-          # The validation layer can crash on input the driver rejects.
-          if [ "${{ matrix.vulkan }}" = "true" ]; then
-            all=(crashes/*)
-            for f in "${all[@]:0:$LIMIT}"; do
-              timeout 60 dotnet "$OUT/Brovan.Fuzz.dll" replay ${{ matrix.target }} "$f" > /dev/null 2>&1
-              [ $? -ge 128 ] || continue
+          # Report only inputs that crash or hang on their own. The validation layer can crash on input the driver rejects.
+          all=(crashes/*)
+          for f in "${all[@]}"; do
+            timeout 60 dotnet "$OUT/Brovan.Fuzz.dll" replay ${{ matrix.target }} "$f" > /dev/null 2>&1
+            rc=$?
+            if [ $rc -lt 128 ] && [ $rc -ne 124 ]; then
+              mv "$f" crashes-flaky/
+            elif [ "${{ matrix.vulkan }}" = "true" ]; then
               VK_LAYER_PATH=/nonexistent timeout 60 dotnet "$OUT/Brovan.Fuzz.dll" replay ${{ matrix.target }} "$f" > /dev/null 2>&1
               [ $? -eq 0 ] && mv "$f" crashes-layer/
-            done
-            echo "crashes only the validation layer has: $(ls crashes-layer | wc -l)"
-          fi
+            fi
+          done
+          {
+            echo "### ${{ matrix.target }}"
+            echo "- reproducing crashes: $(ls crashes | wc -l)"
+            echo "- crashes only the validation layer has: $(ls crashes-layer | wc -l)"
+            echo "- crashes that do not reproduce alone: $(ls crashes-flaky | wc -l)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
           # Set FOUND outside the pipeline subshell.
           found=(crashes/*)
           if [ "${#found[@]}" -gt 0 ]; then FOUND=1; else FOUND=0; fi
@@ -205,6 +212,7 @@ jobs:
             artifacts/
             crashes/
             crashes-layer/
+            crashes-flaky/
           if-no-files-found: ignore
           retention-days: 30
 

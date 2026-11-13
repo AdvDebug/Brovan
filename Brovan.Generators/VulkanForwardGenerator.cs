@@ -1715,11 +1715,9 @@ namespace Brovan.Generators
                 return "                return BrovVulkGenMemory.InvalidateMappedMemoryRanges(r, st, inst);\n";
             if (c.Name == "vkCreateInstance")
                 return "            {\n" +
-                    "                uint hasCi = r.ReadU32();\n" +
-                    "                System.IntPtr ci = System.IntPtr.Zero;\n" +
-                    "                if (hasCi != 0) ci = BrovVulkGenStruct.Rebuild(" + StructId["VkInstanceCreateInfo"] + ", r, st);\n" +
+                    "                System.IntPtr ci = BrovVulkGenStruct.RebuildRequired(" + StructId["VkInstanceCreateInfo"] + ", r, st, \"VkInstanceCreateInfo\");\n" +
                     "                BrovVulkGenMemory.RestrictInstanceCreateInfo(st, ci);\n" +
-                    "                if ((Brovan.GeneralHelper.IsLinux || Brovan.Android.AndroidHost.IsActive) && ci != System.IntPtr.Zero)\n" +
+                    "                if (Brovan.GeneralHelper.IsLinux || Brovan.Android.AndroidHost.IsActive)\n" +
                     "                {\n" +
                     "                    System.IntPtr extPtr = *(System.IntPtr*)(ci + 56);\n" +
                     "                    uint extCount = *(uint*)(ci + 48);\n" +
@@ -1749,18 +1747,12 @@ namespace Brovan.Generators
                     "                        }\n" +
                     "                    }\n" +
                     "                }\n" +
-                    "                if (ci != System.IntPtr.Zero)\n" +
-                    "                {\n" +
-                    "                    // The host loader only exports the promoted names of commands like\n" +
-                    "                    // vkCmdBindIndexBuffer2, and its device dispatch slot for them stays NULL unless the\n" +
-                    "                    // instance asks for the core version they were promoted in. Guests target older\n" +
-                    "                    // versions and reach those commands through the KHR alias, which the loader does not\n" +
-                    "                    // export, so raise the host instance to the loader's own version.\n" +
-                    "                    System.IntPtr ai = *(System.IntPtr*)(ci + 24);\n" +
-                    "                    uint loaderVersion = 0;\n" +
-                    "                    if (ai != System.IntPtr.Zero && BrovVulkApi.vkEnumerateInstanceVersion((System.IntPtr)(&loaderVersion)) >= 0 && loaderVersion > *(uint*)(ai + 44))\n" +
-                    "                        *(uint*)(ai + 44) = loaderVersion;\n" +
-                    "                }\n" +
+                    "                // The loader fills promoted commands such as vkCmdBindIndexBuffer2 only for an instance at\n" +
+                    "                // their core version, and guests reach them through the KHR alias.\n" +
+                    "                System.IntPtr ai = *(System.IntPtr*)(ci + 24);\n" +
+                    "                uint loaderVersion = 0;\n" +
+                    "                if (ai != System.IntPtr.Zero && BrovVulkApi.vkEnumerateInstanceVersion((System.IntPtr)(&loaderVersion)) >= 0 && loaderVersion > *(uint*)(ai + 44))\n" +
+                    "                    *(uint*)(ai + 44) = loaderVersion;\n" +
                     "                System.IntPtr vki = System.IntPtr.Zero;\n" +
                     "                int rr = (int)BrovVulkApi.vkCreateInstance(ci, System.IntPtr.Zero, (System.IntPtr)(&vki));\n" +
                     "                if (rr >= 0 && vki == System.IntPtr.Zero) rr = -3;\n" +
@@ -2222,6 +2214,21 @@ namespace Brovan.Generators
                 post.Add("                if (rr >= 0) st.SetQueryPool(p" + outIdx + ", *(uint*)(p" + infoIdx + " + BrovVulkLayout.MemberOffset[\"VkQueryPoolCreateInfo.queryCount\"]), p" + infoIdx + "q);");
             }
 
+            if (c.Name == "vkCreateSemaphore")
+            {
+                int outIdx = c.Params.FindIndex(x => ParamKind(m, x) == "HandleOut");
+                int infoIdx = c.Params.FindIndex(x => ParamKind(m, x) == "StructIn" && StructId.ContainsKey(x.Type));
+                if (outIdx < 0 || infoIdx < 0)
+                    return null;
+                post.Add("                if (rr >= 0) st.NoteSemaphore(p" + outIdx + ", p" + infoIdx + ");");
+            }
+
+            if (c.Name == "vkGetSemaphoreCounterValue")
+                b.Append("                st.CheckTimeline(p1);\n");
+
+            if (c.Name == "vkSignalSemaphore")
+                b.Append("                st.CheckTimeline(*(System.IntPtr*)(p1 + BrovVulkLayout.MemberOffset[\"VkSemaphoreSignalInfo.semaphore\"]));\n");
+
             int resetIdx = ResetChildrenIndex(m, c);
             if (resetIdx >= 0)
                 post.Add("                if (rr >= 0) st.ForgetChildren(p" + resetIdx + "Id);");
@@ -2427,6 +2434,7 @@ namespace Brovan.Generators
             int Off(string type, string member) => ComputeLayout(m, type, cache).Offsets[member];
             int Find(string name) => c.Params.FindIndex(x => x.Name == name);
             string Field(string type, string member) => "*(System.IntPtr*)(p1 + " + Off(type, member) + ")";
+            string RequireLayout(string type) => "GenState.RequireLayout(p1, " + Off(type, "layout") + "); ";
             string Subresource(string type, string member) => (Off(type, member) + Off("VkImageSubresourceLayers", "aspectMask")).ToString();
             string ImageCopyLayout(string region) => Size(region) + ", " + Subresource(region, "srcSubresource") + ", " + Off(region, "srcOffset") + ", "
                 + Subresource(region, "dstSubresource") + ", " + Off(region, "dstOffset") + ", " + Off(region, "extent");
@@ -2465,9 +2473,12 @@ namespace Brovan.Generators
                 case "vkCmdSetVertexInputEXT": line = "st.CheckVertexInput(p1, p2, p3, p4);"; break;
                 case "vkCmdPushConstants": line = "st.CheckPushConstants(p3, p4);"; break;
                 case "vkCmdPushConstants2":
-                    line = "if (p1 != System.IntPtr.Zero) st.CheckPushConstants(*(uint*)(p1 + " + Off("VkPushConstantsInfo", "offset") + "), *(uint*)(p1 + "
+                    line = RequireLayout("VkPushConstantsInfo") + "if (p1 != System.IntPtr.Zero) st.CheckPushConstants(*(uint*)(p1 + " + Off("VkPushConstantsInfo", "offset") + "), *(uint*)(p1 + "
                         + Off("VkPushConstantsInfo", "size") + "));";
                     break;
+                case "vkGetImageSubresourceLayout": line = "st.CheckImageSubresource(p1, p2);"; break;
+                case "vkGetImageSubresourceLayout2": line = "st.CheckImageSubresource2(p1, p2);"; break;
+                case "vkGetDeviceImageSubresourceLayout": line = "GenState.CheckDeviceImageSubresource(p1);"; break;
                 case "vkCmdBeginTransformFeedbackEXT":
                 case "vkCmdEndTransformFeedbackEXT": line = "st.CheckBufferWords(p3, p4, p2);"; break;
                 case "vkCmdDrawIndirectByteCountEXT": line = "st.CheckBufferSpan(p3, p4, 4);"; break;
@@ -2554,7 +2565,7 @@ namespace Brovan.Generators
                 case "vkCmdBindDescriptorSets2":
                 {
                     string info = "VkBindDescriptorSetsInfo";
-                    line = "if (p1 != System.IntPtr.Zero) st.CheckBindDescriptorSets(p0, GenState.StageMask(*(uint*)(p1 + " + Off(info, "stageFlags") + ")), " + Field(info, "layout") + ", *(uint*)(p1 + " + Off(info, "firstSet") + "), *(uint*)(p1 + "
+                    line = RequireLayout(info) + "if (p1 != System.IntPtr.Zero) st.CheckBindDescriptorSets(p0, GenState.StageMask(*(uint*)(p1 + " + Off(info, "stageFlags") + ")), " + Field(info, "layout") + ", *(uint*)(p1 + " + Off(info, "firstSet") + "), *(uint*)(p1 + "
                         + Off(info, "descriptorSetCount") + "), " + Field(info, "pDescriptorSets") + ", *(uint*)(p1 + " + Off(info, "dynamicOffsetCount") + "), " + Field(info, "pDynamicOffsets") + ");";
                     break;
                 }
@@ -2562,7 +2573,7 @@ namespace Brovan.Generators
                 case "vkCmdPushDescriptorSet2":
                 {
                     string info = "VkPushDescriptorSetInfo";
-                    line = "if (p1 != System.IntPtr.Zero) st.CheckPushDescriptors(GenState.StageMask(*(uint*)(p1 + " + Off(info, "stageFlags") + ")), " + Field(info, "layout") + ", *(uint*)(p1 + " + Off(info, "set") + "), *(uint*)(p1 + "
+                    line = RequireLayout(info) + "if (p1 != System.IntPtr.Zero) st.CheckPushDescriptors(GenState.StageMask(*(uint*)(p1 + " + Off(info, "stageFlags") + ")), " + Field(info, "layout") + ", *(uint*)(p1 + " + Off(info, "set") + "), *(uint*)(p1 + "
                         + Off(info, "descriptorWriteCount") + "), " + Field(info, "pDescriptorWrites") + ");";
                     break;
                 }
@@ -2619,6 +2630,7 @@ namespace Brovan.Generators
                     post.Add("                if (rr >= 0) st.SetView(p3, p1);");
                     return true;
                 case "vkAllocateCommandBuffers":
+                    b.Append("                GenState.CheckCommandBufferLevel(p1);\n");
                     post.Add("                if (rr >= 0) st.AddRecordings(p0, p1, p2, p2n);");
                     return true;
                 case "vkCmdBeginRenderPass":
