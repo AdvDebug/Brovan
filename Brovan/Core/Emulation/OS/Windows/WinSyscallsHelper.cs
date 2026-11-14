@@ -412,6 +412,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.StopEmulation();
         }
 
+        internal NTSTATUS ParkUntil(EmulatedThread Thread, long Deadline, bool Alertable)
+        {
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            Thread.WaitActive = true;
+            Thread.WaitHandles = null;
+            Thread.WaitAll = false;
+            Thread.WaitDeadline = Deadline;
+            State.WaitCompleted = false;
+            State.WaitStatus = NTSTATUS.STATUS_PENDING;
+            State.WaitResumeRIP = GetSyscallRip();
+            State.WaitReturnRIP = State.WaitResumeRIP + 2;
+            State.WaitAlertable = Alertable;
+            State.ApcAlertable = Alertable;
+            return ContinueParked(Thread);
+        }
+
+        internal NTSTATUS ContinueParked(EmulatedThread Thread)
+        {
+            Thread.State = EmulatedThreadState.Waiting;
+            Emulator._emulator.WriteRegister(Emulator.IPRegister, WinEmulatedThread.GetState(Thread).WaitResumeRIP);
+            Emulator._emulator.StopEmulation();
+            return NTSTATUS.STATUS_PENDING;
+        }
+
         public void ClearWaitState(EmulatedThread Thread, bool ClearAlertByThreadId = false)
         {
             if (Thread == null)
@@ -7000,13 +7024,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public long GetDisplayRefreshPeriod() => KuserSharedDataManager.QpcFrequency / Math.Max(GetPrimaryDisplayFrequency(), 1u);
 
+        public void GetVerticalBlankClock(out long Now, out long Period, out long LastVerticalBlank)
+        {
+            Period = GetDisplayRefreshPeriod();
+            Now = (long)Emulator.GetEmulatedPerformanceCounter();
+            LastVerticalBlank = GetLastVerticalBlank(Now, Period);
+        }
+
         public long GetNextVerticalBlankTick()
         {
             const long CountsPerTick = KuserSharedDataManager.QpcFrequency / 1000;
-            long Period = GetDisplayRefreshPeriod();
-            long Now = (long)Emulator.GetEmulatedPerformanceCounter();
-            long Next = GetLastVerticalBlank(Now, Period) + Period;
-            return (Next + CountsPerTick - 1) / CountsPerTick;
+            GetVerticalBlankClock(out _, out long Period, out long LastVerticalBlank);
+            return (LastVerticalBlank + Period + CountsPerTick - 1) / CountsPerTick;
         }
 
         internal static long GetLastVerticalBlank(long Now, long Period) => Now - Now % Period;
@@ -8923,9 +8952,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ForegroundWindow = 0;
 
             Window.Destroyed = true;
+            Win32k.ReferencedNtObject.Hold(Emulator, ref Window.SwapChainSurface, null);
+            Window.SwapChainReplaceable = false;
             ClearUserWindowHandleEntry(Window);
             ForgetThreadWindowContext(Hwnd);
             Win32kQueuePort.ForgetWindow(Emulator, Window);
+            Composition.Compositor.WindowDestroyed(Emulator, Hwnd);
             (DesktopDisplay as GuiThreadManager)?.ReleaseFrameSlot(Hwnd);
             WinWindows.Remove(Hwnd);
 
@@ -11303,8 +11335,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     SharedGpuMemory.Host.Dispose();
                     break;
 
-                case DxgkNtObject DxgkObject:
-                    DxgkProcess.ReleaseNtObject(Emulator, DxgkObject);
+                case ReferencedNtObject Referenced:
+                    Referenced.CloseLastHandle(Emulator);
                     break;
             }
         }

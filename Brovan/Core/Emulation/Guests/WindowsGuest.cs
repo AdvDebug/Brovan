@@ -317,6 +317,7 @@ namespace Brovan.Core.Emulation.Guests
                 return;
 
             OS.Windows.Win32k.Win32kDxgk.EndDisplayProbe();
+            WinHelper.Composition.Compositor.End();
             OS.Windows.RPC.Ports.RpcssLaunch.Shutdown();
 
             lock (Instance.KernelLock)
@@ -400,7 +401,8 @@ namespace Brovan.Core.Emulation.Guests
         }
 
         public bool AwaitsHostWork(BinaryEmulator Instance)
-            => WinHelper != null && (Instance.HasActiveGetMessageWait() || Instance.HasPendingHostIo() || AlpcMessaging.HasRemoteWork || AlpcMessaging.HasDeferredAnswers);
+            => WinHelper != null && (Instance.HasActiveGetMessageWait() || Instance.HasPendingHostIo() || AlpcMessaging.HasRemoteWork || AlpcMessaging.HasDeferredAnswers
+                || WinHelper.Composition.Compositor.AwaitsHostWork);
 
         public bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle)
         {
@@ -1590,6 +1592,18 @@ namespace Brovan.Core.Emulation.Guests
                 Instance._emulator.WriteMemory(Teb + 0x68, LastError);
             else
                 Instance._emulator.WriteMemory(Teb + 0x34, LastError);
+        }
+
+        public void SetLastStatusValue(BinaryEmulator Instance, NTSTATUS Status)
+        {
+            ulong Teb = GetCurrentTeb(Instance);
+            if (Teb == 0)
+                return;
+
+            if (Instance._binary.Architecture == BinaryArchitecture.x64)
+                Instance._emulator.WriteMemory(Teb + 0x1250, (uint)Status);
+            else
+                Instance._emulator.WriteMemory(Teb + 0xBF4, (uint)Status);
         }
 
         public void SetLastWinErrorRegister(BinaryEmulator Instance, NTSTATUS Status)

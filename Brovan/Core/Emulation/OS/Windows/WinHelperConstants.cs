@@ -1224,7 +1224,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         ReserveHandle = 19,
         DxgkSharedResourceHandle = 20,
         DxgkSharedSyncObjectHandle = 21,
-        DxgkCompositionObjectHandle = 22
+        DxgkCompositionObjectHandle = 22,
+        CompositionObjectHandle = 23
     }
 
     public sealed class WinToken : IHandleObject
@@ -2272,6 +2273,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool Visible;
         public bool Destroyed;
+
+        // Holds an object reference, so it changes only through ReferencedNtObject.Hold.
+        internal Win32k.DxgkCompositionSurface SwapChainSurface;
+        internal bool SwapChainReplaceable;
         public bool Minimized;
         public bool Maximized;
 

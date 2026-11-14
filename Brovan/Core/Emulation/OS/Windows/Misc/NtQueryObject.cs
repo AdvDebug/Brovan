@@ -242,8 +242,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return "Semaphore";
             if (HandleObject is WinSection || HandleObject is WinSharedGpuMemory)
                 return "Section";
-            if (HandleObject is DxgkNtObject DxgkObject)
-                return DxgkObject.TypeName;
+            if (HandleObject is ReferencedNtObject Referenced)
+                return Referenced.TypeName;
             if (HandleObject is EmulatedThread)
                 return "Thread";
             if (HandleObject is WinIRTimer)

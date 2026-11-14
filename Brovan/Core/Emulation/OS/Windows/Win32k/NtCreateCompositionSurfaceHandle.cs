@@ -18,7 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (HandlePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            return Instance.WinHelper.DxgkProcess.InsertNtObject(Instance, new DxgkCompositionSurface(), DesiredAccess, HandlePtr);
+            return new DxgkCompositionSurface().Insert(Instance, DesiredAccess, HandlePtr);
         }
     }
 }

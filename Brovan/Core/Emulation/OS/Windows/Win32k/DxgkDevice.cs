@@ -19,7 +19,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             Faulted = true;
             foreach (DxgkContext Context in Contexts)
-                Process.Gpu.Discard(Context);
+                Process.Gpu.Discard(Instance, Context);
 
             foreach (DxgkFence Fence in Fences)
                 Fence.SetValue(Instance, ulong.MaxValue);

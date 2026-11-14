@@ -8,6 +8,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // OXIDs and OIDs that RPCSS gives.
         ObjectExporter,
+
+        // DirectComposition synchronization IDs, which NT counts for the whole session from 1 (CSynchronizationManager).
+        CompositionSynchronization,
     }
 
     internal static unsafe class SessionIds
@@ -28,6 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             new Kind(1, 0x1000000000000000),
             new Kind(1, 0),
             new Kind(0x1000, 0),
+            new Kind(1, 0),
         };
 
         private static readonly object Sync = new();

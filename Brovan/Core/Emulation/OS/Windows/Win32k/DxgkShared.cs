@@ -62,7 +62,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal override string TypeName => "DxgkSharedResource";
 
-        internal override void Release(BinaryEmulator Instance, DxgkProcess Process) => DxgkStorage.Release(Instance, Process, Storage);
+        protected override void OnRelease(BinaryEmulator Instance) => DxgkStorage.Release(Instance, Instance.WinHelper.DxgkProcess, Storage);
     }
 
     // A fence destroyed by its D3DKMT handle ignores later signals, so nothing needs to be released here.
@@ -74,7 +74,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal override string TypeName => "DxgkSharedSyncObject";
 
-        internal override void Release(BinaryEmulator Instance, DxgkProcess Process)
+        protected override void OnRelease(BinaryEmulator Instance)
         {
         }
     }

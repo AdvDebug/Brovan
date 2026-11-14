@@ -12,6 +12,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint FlagRefusedWithRedirectedFlip = 0x400000;
 
         private const int OffsetFlipToken = 16;
+
+        // D3DKMT_COMPOSITION_PRESENTHISTORYTOKEN: a 64-bit handle slot on both architectures.
+        private const int OffsetCompositionToken = 16;
         private const int OffsetFenceValue = 0;
         private const int OffsetSurface = 8;
         private const int OffsetPresentLimitId = 32;
@@ -29,6 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int OffsetToken = Wide ? 360 : 344;
             int OffsetSwapchainIndex = Wide ? 28 : 24;
             int OffsetRegions = Wide ? 0x5A0 : 0x590;
+            int OffsetPresentLimitSemaphore = Wide ? 0x160 : 0x150;
             int OffsetOptimizeForComposition = Wide ? 0x5D0 : 0x5AC;
 
             Span<byte> Arguments = stackalloc byte[0x5A8];
@@ -49,7 +53,16 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             Span<byte> Token = Arguments.Slice(OffsetToken);
-            if (BinaryPrimitives.ReadUInt32LittleEndian(Token) != DxgkComposition.TokenModelRedirectedFlip)
+            uint Model = BinaryPrimitives.ReadUInt32LittleEndian(Token);
+            if (Model == DxgkComposition.TokenModelComposition)
+            {
+                if (WinSysHelper.ReadPointerField(Arguments.Slice(OffsetPresentLimitSemaphore), 0, (uint)PointerSize) != 0)
+                    return Instance.WinUnimplemented;
+
+                return PresentToken(Instance, Process, Context, BinaryPrimitives.ReadUInt64LittleEndian(Token.Slice(OffsetCompositionToken)));
+            }
+
+            if (Model != DxgkComposition.TokenModelRedirectedFlip)
                 return Instance.WinUnimplemented;
 
             Span<byte> Flip = Token.Slice(OffsetFlipToken);
@@ -97,6 +110,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Instance.WinHelper.WriteByte(ArgumentsPtr + (ulong)OffsetOptimizeForComposition, 1);
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS PresentToken(BinaryEmulator Instance, DxgkProcess Process, DxgkContext Context, ulong Handle)
+        {
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(Handle, AccessMask.None, out DxgkCompositionToken Token);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            Token.Reference();
+            if (Process.Gpu.TryEnqueue(Instance, Context, new DxgkTokenPacket { Token = Token }))
+                return NTSTATUS.STATUS_SUCCESS;
+
+            Token.Unreference(Instance);
+            return NTSTATUS.STATUS_NO_MEMORY;
         }
     }
 }

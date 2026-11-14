@@ -102,8 +102,18 @@ namespace Brovan.Core.Settings
 
         public static ulong CompositionBatchTotalBytes { get; private set; }
 
-        // DirectComposition resources of one process: live resources, and the slots of all resource tables.
+        // DirectComposition resources of one process: live resources, resource table slots and committed tree resources.
         public static int CompositionResources { get; private set; }
+
+        // DirectComposition changes of one process that the next commits apply.
+        public static int CompositionPendingChanges { get; private set; }
+
+        // Composition tokens of one process, the surface updates they hold together, and the bytes of the surface copies.
+        public static int CompositionTokens { get; private set; }
+
+        public static int CompositionTokenUpdates { get; private set; }
+
+        public static ulong CompositorSurfaceBytes { get; private set; }
 
         // Application hives one process holds loaded.
         public static int AppHives { get; private set; }
@@ -170,6 +180,10 @@ namespace Brovan.Core.Settings
             CompositionBatchBytes = (uint)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 128));
             CompositionBatchTotalBytes = Megabytes(Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8));
             CompositionResources = (int)Pick(Off: 1048576, Minimal: 786432, Medium: 524288, High: 262144, Aggressive: 131072);
+            CompositionPendingChanges = (int)Pick(Off: 262144, Minimal: 196608, Medium: 131072, High: 65536, Aggressive: 32768);
+            CompositionTokens = (int)Pick(Off: 4096, Minimal: 3072, Medium: 2048, High: 1024, Aggressive: 512);
+            CompositionTokenUpdates = (int)Pick(Off: 65536, Minimal: 49152, Medium: 32768, High: 16384, Aggressive: 8192);
+            CompositorSurfaceBytes = Megabytes(Pick(Off: 512, Minimal: 384, Medium: 256, High: 128, Aggressive: 64));
             AppHives = (int)Pick(Off: 256, Minimal: 192, Medium: 128, High: 96, Aggressive: 64);
             SideBySideManifestBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 256));
             ActivationContextAssemblies = (int)Pick(Off: 64, Minimal: 64, Medium: 48, High: 32, Aggressive: 16);

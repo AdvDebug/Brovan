@@ -5,17 +5,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtDelayExecution : IWinSyscall
     {
-        private static NTSTATUS ContinueDelay(BinaryEmulator Instance, EmulatedThread Thread)
-        {
-            if (Thread == null)
-                return NTSTATUS.STATUS_UNSUCCESSFUL;
-
-            Thread.State = EmulatedThreadState.Waiting;
-            Instance._emulator.WriteRegister(Instance.IPRegister, WinEmulatedThread.GetState(Thread).WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_PENDING;
-        }
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             bool Alertable = (byte)Instance.WinHelper.GetArg(0) != 0;
@@ -34,7 +23,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             if (Thread.WaitActive)
-                return ContinueDelay(Instance, Thread);
+                return Instance.WinHelper.ContinueParked(Thread);
 
             // NT only requires 4-byte alignment for the interval.
             if ((DelayIntervalPtr & 3) != 0)
@@ -62,22 +51,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance.WinHelper.PendingConnectReplies.Count != 0)
                 AlpcMessaging.DeliverConnectReplies(Instance, Thread.ThreadId);
 
-            ulong SyscallRip = Instance.WinHelper.GetSyscallRip();
-            Thread.WaitActive = true;
-            Thread.WaitHandles = null;
-            Thread.WaitAll = false;
-            Thread.WaitDeadline = Instance.CreateEmulatedDeadlineMilliseconds(DelayMs);
-            WinEmulatedThread.GetState(Thread).WaitCompleted = false;
-            WinEmulatedThread.GetState(Thread).WaitStatus = NTSTATUS.STATUS_PENDING;
-            WinEmulatedThread.GetState(Thread).WaitResumeRIP = SyscallRip;
-            WinEmulatedThread.GetState(Thread).WaitReturnRIP = SyscallRip + 2;
-            WinEmulatedThread.GetState(Thread).WaitAlertable = Alertable;
-            WinEmulatedThread.GetState(Thread).ApcAlertable = Alertable;
-
-            Thread.State = EmulatedThreadState.Waiting;
-            Instance._emulator.WriteRegister(Instance.IPRegister, SyscallRip);
-            Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ParkUntil(Thread, Instance.CreateEmulatedDeadlineMilliseconds(DelayMs), Alertable);
         }
     }
 }

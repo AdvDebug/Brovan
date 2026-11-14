@@ -23,9 +23,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             const long Frequency = KuserSharedDataManager.QpcFrequency;
-            long Period = Instance.WinHelper.GetDisplayRefreshPeriod();
-            long Now = (long)Instance.GetEmulatedPerformanceCounter();
-            long LastFrameTime = WinSysHelper.GetLastVerticalBlank(Now, Period);
+            Instance.WinHelper.GetVerticalBlankClock(out long Now, out long Period, out long LastFrameTime);
 
             // NT reports the rate as frequency over period and the next frame two periods after the last one.
             Span<byte> Statistics = stackalloc byte[FrameStatisticsSize];

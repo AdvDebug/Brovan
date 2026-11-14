@@ -135,7 +135,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint ERROR_SUCCESS = 0;
         internal const uint ERROR_INVALID_HANDLE = 6;
         internal const uint ERROR_ACCESS_DENIED = 5;
+        internal const uint ERROR_GEN_FAILURE = 31;
         internal const uint ERROR_INVALID_PARAMETER = 87;
+        internal const uint ERROR_MR_MID_NOT_FOUND = 317;
+        internal const uint ERROR_NOT_FOUND = 1168;
         internal const uint ERROR_INVALID_FLAGS = 1004;
         internal const uint ERROR_INVALID_CURSOR_HANDLE = 1402;
         internal const uint ERROR_CALL_NOT_IMPLEMENTED = 120;
@@ -185,6 +188,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const uint WindowExStyleClientEdge = 0x00000200;
         internal const uint WindowExStyleStaticEdge = 0x00020000;
         internal const uint WindowExStyleLayered = 0x00080000;
+        internal const uint WindowExStyleNoRedirectionBitmap = 0x00200000;
         internal const uint WindowExStyleComposited = 0x02000000;
         internal const uint WindowExStyleNoActivate = 0x08000000;
 
@@ -1723,6 +1727,23 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return 0;
 
             return DibSection ? (int)(((Bits + 31) / 32) * 4) : (int)(((Bits + 15) / 16) * 2);
+        }
+
+        // The error is RtlNtStatusToDosError of the status (UserSetLastStatus), for the statuses that callers pass.
+        internal static void SetLastStatus(BinaryEmulator Instance, NTSTATUS Status, bool SetError)
+        {
+            Instance.SetLastStatusValue(Status);
+            if (!SetError)
+                return;
+
+            Instance.SetLastWinError(Status switch
+            {
+                NTSTATUS.STATUS_UNSUCCESSFUL => ERROR_GEN_FAILURE,
+                NTSTATUS.STATUS_ACCESS_DENIED => ERROR_ACCESS_DENIED,
+                NTSTATUS.STATUS_INVALID_PARAMETER => ERROR_INVALID_PARAMETER,
+                NTSTATUS.STATUS_NOT_FOUND => ERROR_NOT_FOUND,
+                _ => ERROR_MR_MID_NOT_FOUND,
+            });
         }
 
         // A blit block is built in host memory, so a guest extent gets the budget a bitmap gets.
@@ -4617,12 +4638,17 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 Present = true;
             }
 
+            // The erase took the compositor's frames too.
+            if (Present)
+                Instance.WinHelper.Composition.Compositor.RedrawAll(Instance);
+
             while (HostEventQueue.TryTakeRepaint(out ulong RepaintWindow))
             {
                 WinWindow Repainted = Instance.WinHelper.GetWindow(RepaintWindow);
                 if (Repainted != null)
                 {
                     InvalidateWholeWindow(Instance, Repainted);
+                    Instance.WinHelper.Composition.Compositor.Redraw(Instance, RepaintWindow);
                     Present = true;
                 }
             }

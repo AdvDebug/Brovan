@@ -21,7 +21,7 @@ namespace Brovan.WinFacts.Rules
 
     internal abstract class FactGroup
     {
-        internal static readonly FactGroup[] All = { new CompositionGroup() };
+        internal static readonly FactGroup[] All = { new CompositionGroup(), new CompositionNamesGroup() };
 
         internal abstract string Name { get; }
 

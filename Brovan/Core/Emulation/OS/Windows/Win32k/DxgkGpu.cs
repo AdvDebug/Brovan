@@ -16,7 +16,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
         }
 
-        internal virtual void Discard()
+        internal virtual void Discard(BinaryEmulator Instance)
         {
         }
     }
@@ -88,9 +88,29 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal override void Retire(BinaryEmulator Instance) => Drop();
 
-        internal override void Discard() => Drop();
+        internal override void Discard(BinaryEmulator Instance) => Drop();
 
         internal void Drop() => Buffer.ReleasePresentLimit(PresentLimitReleases);
+    }
+
+    internal sealed class DxgkTokenPacket : DxgkPacket
+    {
+        internal DxgkCompositionToken Token;
+
+        internal override bool TryRun(BinaryEmulator Instance)
+        {
+            Token.Complete(Instance);
+            Token.Unreference(Instance);
+            return true;
+        }
+
+        internal override void Retire(BinaryEmulator Instance) => TryRun(Instance);
+
+        internal override void Discard(BinaryEmulator Instance)
+        {
+            Token.DropPresent(Instance);
+            Token.Unreference(Instance);
+        }
     }
 
     // The wake scan runs blocked contexts, because any guest path can set a finish event.
@@ -115,7 +135,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             if (Context.Device.Faulted)
             {
-                Packet.Discard();
+                Packet.Discard(Instance);
                 return true;
             }
 
@@ -149,10 +169,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Unblock(Context);
         }
 
-        internal void Discard(DxgkContext Context)
+        internal void Discard(BinaryEmulator Instance, DxgkContext Context)
         {
             while (Context.Packets.Count != 0)
-                Remove(Context).Discard();
+                Remove(Context).Discard(Instance);
 
             Unblock(Context);
         }

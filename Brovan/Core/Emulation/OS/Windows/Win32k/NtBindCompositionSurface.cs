@@ -21,8 +21,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint AlphaModeStraight = 2;
         private const uint MaxAlphaMode = 3;
 
-        // NT accepts this one only behind a feature flag.
-        private const uint FeatureSizePreference = 3;
+        // NT accepts this scaling only behind a feature flag.
+        private const uint FeatureScaling = 3;
         private const uint AttributeFlagRealizationKind = 0x10;
         private const uint MaxRealizationKind = 4;
         private const uint AttributeFlags32Mask = 0x3FFFF;
@@ -75,7 +75,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return Wide || Kind == 3 ? NTSTATUS.STATUS_INVALID_PARAMETER : NTSTATUS.STATUS_NOT_IMPLEMENTED;
 
             // A 32-bit caller's layout is the one whNtBindCompositionSurface converts.
-            int OffsetSizePreference = Wide ? 0x20 : 0x1C;
+            int OffsetScaling = Wide ? 0x20 : 0x1C;
             int OffsetRealizationKind = Wide ? 0x54 : 0x50;
             int OffsetAttributeFlags = Wide ? 0x98 : 0x94;
             int OffsetSwapchain = Wide ? 0xA0 : 0x98;
@@ -83,9 +83,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             int HandleSize = Wide ? 8 : 4;
 
             uint AlphaMode = BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OffsetAlphaMode));
-            uint SizePreference = BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OffsetSizePreference));
+            uint Scaling = BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OffsetScaling));
             uint AttributeFlags = BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OffsetAttributeFlags)) & (Wide ? uint.MaxValue : AttributeFlags32Mask);
-            if (AlphaMode > MaxAlphaMode || AlphaMode == AlphaModeStraight || SizePreference > FeatureSizePreference
+            if (AlphaMode > MaxAlphaMode || AlphaMode == AlphaModeStraight || Scaling > FeatureScaling
                 || ((AttributeFlags & AttributeFlagRealizationKind) != 0 && BinaryPrimitives.ReadUInt32LittleEndian(Info.Slice(OffsetRealizationKind)) - 1 >= MaxRealizationKind))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -94,7 +94,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (SwapchainKind - SwapchainKindMin > SwapchainKindMax - SwapchainKindMin || Count - 1 >= MaxRealizations)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (SizePreference == FeatureSizePreference || SwapchainKind != SwapchainKindMin)
+            if (Scaling == FeatureScaling || SwapchainKind != SwapchainKindMin)
                 return Instance.WinUnimplemented;
 
             Status = Instance.WinHelper.ReferenceOptionalObjectByHandle(ReadHandle(Info, OffsetWindow + HandleSize, Wide), AccessMask.SemaphoreModifyState,
@@ -128,21 +128,27 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!KeepBuffers)
                 Surface.ReleaseBuffers(Instance, Process);
 
-            DxgkCompositionBuffer Buffer = new() { Realizations = Realizations, PresentLimit = Semaphore, FlipExFence = SharedFence?.Fence };
+            DxgkCompositionBuffer Buffer = new()
+            {
+                Realizations = Realizations, PresentLimit = Semaphore, FlipExFence = SharedFence?.Fence, Scaling = Scaling,
+            };
             BindingId = Surface.Bind(Buffer);
 
             ulong Window = ReadHandle(Info, OffsetWindow, Wide);
             if (Window == 0)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            // NT: a refused window makes the surface lose every buffer.
+            // NT: a refused window makes the surface lose every buffer (UserSetWindowedSwapChain).
             WinWindow Target = Instance.WinHelper.GetWindow(Window);
-            if (Target == null)
+            if (Target == null || Win32kHelper.MaskFunctionId(Target.Fnid) is Win32kHelper.FnidDesktop or Win32kHelper.FnidMessageWnd
+                || Target.SwapChainSurface != null && Target.SwapChainSurface != Surface && !Target.SwapChainReplaceable)
             {
                 Surface.ReleaseBuffers(Instance, Process);
                 return NTSTATUS.STATUS_ACCESS_DENIED;
             }
 
+            ReferencedNtObject.Hold(Instance, ref Target.SwapChainSurface, Surface);
+            Target.SwapChainReplaceable = false;
             Buffer.Window = Target.Hwnd;
             return NTSTATUS.STATUS_SUCCESS;
         }

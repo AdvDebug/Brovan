@@ -160,6 +160,11 @@ namespace Brovan.Core.Emulation
             SetRawSyscallReturn(success ? 1UL : 0UL);
         }
 
+        public void SetLastStatusValue(NTSTATUS Status)
+        {
+            WindowsGuest?.SetLastStatusValue(this, Status);
+        }
+
         public void SetLastWinErrorRegister(NTSTATUS Status)
         {
             WindowsGuest?.SetLastWinErrorRegister(this, Status);
@@ -467,6 +472,9 @@ namespace Brovan.Core.Emulation
 
             if (WinHelper.DxgkProcess.NeedsService)
                 WinHelper.DxgkProcess.Service(this);
+
+            if (WinHelper.Composition.NeedsService)
+                WinHelper.Composition.Service(this);
 
             long Now = EmulatedTickCount64;
 

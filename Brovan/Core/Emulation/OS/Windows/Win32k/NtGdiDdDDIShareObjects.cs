@@ -61,7 +61,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
             }
 
-            return Process.InsertNtObject(Instance, Shared, DesiredAccess, SharedHandlePtr);
+            return Shared.Insert(Instance, DesiredAccess, SharedHandlePtr);
         }
     }
 }

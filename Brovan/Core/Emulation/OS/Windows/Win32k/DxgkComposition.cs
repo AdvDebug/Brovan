@@ -10,6 +10,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     {
         internal const int StatisticsSize = 0x50;
 
+        // NT DxgkCompositionObjectType is 1 for a surface and 2 for a token.
+        internal const uint ObjectKind = 1;
+
         internal readonly List<DxgkCompositionBuffer> Buffers = new();
         private ulong LastBindingId;
 
@@ -30,6 +33,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             Buffer.BindingId = ++LastBindingId;
             Buffer.Active = true;
+            Buffer.Surface = this;
             Buffers.Insert(0, Buffer);
             return Buffer.BindingId;
         }
@@ -42,7 +46,92 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Buffers.Clear();
         }
 
-        internal override void Release(BinaryEmulator Instance, DxgkProcess Process) => ReleaseBuffers(Instance, Process);
+        protected override void OnRelease(BinaryEmulator Instance)
+        {
+            ReleaseBuffers(Instance, Instance.WinHelper.DxgkProcess);
+            Instance.WinHelper.Composition.Compositor.ForgetSurface(this);
+        }
+    }
+
+    internal readonly record struct DxgkDirtyRect(int Left, int Top, int Right, int Bottom);
+
+    internal sealed class DxgkCompositionUpdate
+    {
+        internal readonly DxgkCompositionSurface Surface;
+        internal readonly List<DxgkDirtyRect> Rects = new();
+
+        internal DxgkCompositionUpdate(DxgkCompositionSurface Surface)
+        {
+            this.Surface = Surface;
+        }
+    }
+
+    internal sealed class DxgkCompositionToken : DxgkNtObject
+    {
+        private enum TokenState
+        {
+            Pending,
+            Completed,
+            InFrame,
+            Discarded,
+        }
+
+        internal readonly List<DxgkCompositionUpdate> Updates = new();
+        internal ulong SynchronizationId;
+        private TokenState State;
+
+        internal int Rects;
+
+        internal bool Notified;
+
+        public override HandleType ObjectType => HandleType.DxgkCompositionObjectHandle;
+
+        internal override string TypeName => "DxgkCompositionObject";
+
+        internal void Complete(BinaryEmulator Instance)
+        {
+            if (State != TokenState.Pending)
+                return;
+
+            State = TokenState.Completed;
+            CompositionProcess Composition = Instance.WinHelper.Composition;
+            Composition.NotifyCompletedPresent(Instance, SynchronizationId);
+            Composition.TokenCompleted(Instance, this);
+        }
+
+        internal void DropPresent(BinaryEmulator Instance)
+        {
+            if (State == TokenState.Pending)
+                Discard(Instance);
+        }
+
+        internal void EnterFrame(BinaryEmulator Instance)
+        {
+            State = TokenState.InFrame;
+            Discard(Instance);
+        }
+
+        // NT: a token discarded before it completed tells the batch side its present completed (CCompositionToken::Discard).
+        internal void Discard(BinaryEmulator Instance)
+        {
+            if (State == TokenState.Discarded)
+                return;
+
+            if (State == TokenState.Pending && Notified)
+                Instance.WinHelper.Composition.NotifyCompletedPresent(Instance, SynchronizationId);
+
+            State = TokenState.Discarded;
+            foreach (DxgkCompositionUpdate Update in Updates)
+                Update.Surface.Unreference(Instance);
+
+            Updates.Clear();
+        }
+
+        protected override void OnRelease(BinaryEmulator Instance)
+        {
+            Discard(Instance);
+            Instance.WinHelper.Composition.RemoveToken(Rects);
+        }
     }
 
     // A swapchain bound to a surface, CFlipExBuffer in dxgkrnl.
@@ -58,7 +147,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal ulong BindingId;
         internal bool Active;
+        internal DxgkCompositionSurface Surface;
         internal DxgkStorage[][] Realizations;
+
+        internal uint Scaling;
+        internal DxgkPresentPacket NewestPresent;
         internal ulong Window;
         internal WinSemaphore PresentLimit;
         internal DxgkFence FlipExFence;
@@ -75,7 +168,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             DxgkPresentPacket Newest = null;
             int Released = 0;
-            while (Pending.TryPeek(out DxgkPresentPacket Present) && Present.Serial <= Present.Slot.Consumed)
+            while (Pending.TryPeek(out DxgkPresentPacket Present) && Present.Slot != null && Present.Serial <= Present.Slot.Consumed)
             {
                 Pending.Dequeue();
                 Released += Present.PresentLimitReleases;
@@ -91,8 +184,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             ReleaseOlderBuffers(Instance, Present.FenceValue);
             ShownFenceValue = Math.Max(ShownFenceValue, Present.FenceValue);
 
-            long Period = Instance.WinHelper.GetDisplayRefreshPeriod();
-            long VerticalBlank = WinSysHelper.GetLastVerticalBlank((long)Instance.GetEmulatedPerformanceCounter(), Period);
+            Instance.WinHelper.GetVerticalBlankClock(out _, out long Period, out long VerticalBlank);
             uint RefreshCount = (uint)(VerticalBlank / Period);
             Span<byte> Data = Statistics;
             BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(OffsetPresentCount), Present.PresentCount);
@@ -140,6 +232,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
     internal static class DxgkComposition
     {
         internal const uint TokenModelRedirectedFlip = 2;
+        internal const uint ScalingNone = 1;
+        internal const uint TokenModelComposition = 7;
         internal const int OffsetTokenBindingId = 8;
 
         private const uint FormatR8G8B8A8 = 28;
@@ -164,51 +258,120 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Buffer.Pending.Count >= MemoryBudget.DxgkPendingPresents)
                 return false;
 
-            if (TryHandToWindow(Instance, Buffer.Realizations[Present.Index], Present))
-            {
-                Buffer.Pending.Enqueue(Present);
-                Instance.WinHelper.DxgkProcess.AddPendingBuffer(Buffer);
-                return true;
-            }
+            // A present that is not drawn shows after the presents before it, which keeps the statistics in order.
+            bool Undrawn = !Instance.WinHelper.Composition.Compositor.TryTakeBase(Instance, Present) &&
+                           !TryHandToWindow(Instance, Buffer.Realizations[Present.Index], Present);
+            if (Undrawn)
+                MarkUndrawn(Present);
 
-            // NT: a present that passed the window check shows, even when its window went before it ran.
-            Buffer.Show(Instance, Present, Present.PresentLimitReleases);
+            Buffer.Pending.Enqueue(Present);
+            Buffer.NewestPresent = Present;
+            Instance.WinHelper.DxgkProcess.AddPendingBuffer(Buffer);
+            if (Undrawn)
+                Buffer.RetireConsumed(Instance);
+
             return true;
         }
+
+        internal static void HandBack(BinaryEmulator Instance, DxgkPresentPacket Present)
+        {
+            if (Present.Buffer.Ended || !TryHandToWindow(Instance, Present.Buffer.Realizations[Present.Index], Present))
+                MarkUndrawn(Present);
+        }
+
+        // NT: a present that passed the window check shows, even when its window went before it ran.
+        internal static void MarkUndrawn(DxgkPresentPacket Present)
+        {
+            Present.Slot = UndrawnSlot;
+            Present.Serial = 0;
+        }
+
+        private static readonly GuiThreadManager.FrameSlot UndrawnSlot = new();
 
         private static bool TryHandToWindow(BinaryEmulator Instance, DxgkStorage[] Realization, DxgkPresentPacket Present)
         {
             ulong Window = Present.Buffer.Window;
             return Realization.Length == 1 && Instance.WinHelper.GuiManager is GuiThreadManager Gui
-                && TryCreateFrame(Instance, Window, Realization[0], out GdiPrimitive Frame)
+                && TryCreateFrame(Instance, Window, Realization[0], Present.Buffer.Scaling, out GdiPrimitive Frame)
                 && Gui.TrySubmitFrame(Window, Frame, out Present.Slot, out Present.Serial);
         }
 
-        // The buffer is stretched over the client area, as with DXGI_SCALING_STRETCH.
-        private static unsafe bool TryCreateFrame(BinaryEmulator Instance, ulong Hwnd, DxgkStorage Block, out GdiPrimitive Frame)
+        internal static bool IsReadable(DxgkStorage Block) => IsPresentableFormat(Block.Format) && HasRows(Block);
+
+        private static bool HasRows(DxgkStorage Block)
+        {
+            int Width = (int)Block.Width;
+            int Height = (int)Block.Height;
+            return Win32kHelper.IsBlitExtentValid(Width, Height) && Block.Pitch >= (ulong)Width * 4
+                   && (ulong)Block.Pitch * (ulong)(Height - 1) + (ulong)Width * 4 <= Block.Size;
+        }
+
+        internal static DxgkDirtyRect ClampRect(DxgkStorage Block, in DxgkDirtyRect Rect)
+            => new(Math.Clamp(Rect.Left, 0, (int)Block.Width), Math.Clamp(Rect.Top, 0, (int)Block.Height), Math.Clamp(Rect.Right, 0, (int)Block.Width),
+                Math.Clamp(Rect.Bottom, 0, (int)Block.Height));
+
+        internal static void CopyRect(DxgkStorage Block, uint[] Target, in DxgkDirtyRect Rect)
+        {
+            DxgkDirtyRect Clamped = ClampRect(Block, Rect);
+            if (Clamped.Left < Clamped.Right && Clamped.Top < Clamped.Bottom)
+                CopyRows(Block, Target, (int)Block.Width, Clamped, Opaque: Block.Format is FormatB8G8R8X8 or FormatB8G8R8X8Srgb);
+        }
+
+        private static unsafe void CopyRows(DxgkStorage Block, uint[] Target, int TargetWidth, in DxgkDirtyRect Rect, bool Opaque)
+        {
+            int Columns = Rect.Right - Rect.Left;
+            bool SwapRedBlue = Block.Format is FormatR8G8B8A8 or FormatR8G8B8A8Srgb;
+            byte* Source = (byte*)Block.Memory;
+            for (int Row = Rect.Top; Row < Rect.Bottom; Row++)
+            {
+                ReadOnlySpan<uint> Line = new(Source + (long)Row * Block.Pitch + Rect.Left * 4L, Columns);
+                Span<uint> Into = Target.AsSpan(Row * TargetWidth + Rect.Left, Columns);
+                if (SwapRedBlue)
+                    CopySwappingRedBlue(Line, Into);
+                else
+                    Line.CopyTo(Into);
+
+                if (Opaque)
+                    SetOpaque(Into);
+            }
+        }
+
+        private static void SetOpaque(Span<uint> Pixels)
+        {
+            int Index = 0;
+            if (Vector128.IsHardwareAccelerated)
+            {
+                Vector128<uint> Alpha = Vector128.Create(0xFF000000u);
+                for (; Index <= Pixels.Length - Vector128<uint>.Count; Index += Vector128<uint>.Count)
+                    (Vector128.Create(Pixels.Slice(Index)) | Alpha).CopyTo(Pixels.Slice(Index));
+            }
+
+            for (; Index < Pixels.Length; Index++)
+                Pixels[Index] |= 0xFF000000u;
+        }
+
+        private static bool TryCreateFrame(BinaryEmulator Instance, ulong Hwnd, DxgkStorage Block, uint Scaling, out GdiPrimitive Frame)
         {
             Frame = default;
             WinWindow Window = Instance.WinHelper.GetWindow(Hwnd);
             int Width = (int)Block.Width;
             int Height = (int)Block.Height;
-            if (Window == null || !Win32kHelper.IsBlitExtentValid(Width, Height) || Block.Pitch < (ulong)Width * 4
-                || (ulong)Block.Pitch * (ulong)(Height - 1) + (ulong)Width * 4 > Block.Size)
+            if (Window == null || !HasRows(Block))
                 return false;
 
-            uint[] Pixels = Win32kHelper.RentGuiPixels(Width * Height, out bool Pooled);
-            bool SwapRedBlue = Block.Format is FormatR8G8B8A8 or FormatR8G8B8A8Srgb;
-            byte* Source = (byte*)Block.Memory;
-            for (int Row = 0; Row < Height; Row++)
+            Win32kHelper.GetClientSize(Instance, Window, out int ClientWidth, out int ClientHeight);
+            if (Scaling == ScalingNone && Win32kHelper.IsBlitExtentValid(ClientWidth, ClientHeight))
             {
-                ReadOnlySpan<uint> Line = new(Source + (long)Row * Block.Pitch, Width);
-                Span<uint> Target = Pixels.AsSpan(Row * Width, Width);
-                if (SwapRedBlue)
-                    CopySwappingRedBlue(Line, Target);
-                else
-                    Line.CopyTo(Target);
+                uint[] Client = Win32kHelper.RentGuiPixels(ClientWidth * ClientHeight, out bool ClientPooled);
+                Client.AsSpan(0, ClientWidth * ClientHeight).Clear();
+                CopyRows(Block, Client, ClientWidth, new DxgkDirtyRect(0, 0, Math.Min(Width, ClientWidth), Math.Min(Height, ClientHeight)), Opaque: false);
+                Frame = Instance.WinHelper.CreateGdiBlit(Hwnd, Hdc: 0, Left: 0, Top: 0, ClientWidth, ClientHeight, Client, ClientPooled, ClientWidth,
+                    ClientHeight, Win32kHelper.SrcCopyRop);
+                return true;
             }
 
-            Win32kHelper.GetClientSize(Instance, Window, out int ClientWidth, out int ClientHeight);
+            uint[] Pixels = Win32kHelper.RentGuiPixels(Width * Height, out bool Pooled);
+            CopyRows(Block, Pixels, Width, new DxgkDirtyRect(0, 0, Width, Height), Opaque: false);
             Frame = Instance.WinHelper.CreateGdiBlit(Hwnd, Hdc: 0, Left: 0, Top: 0, ClientWidth, ClientHeight, Pixels, Pooled, Width, Height,
                 Win32kHelper.SrcCopyRop);
             return true;
