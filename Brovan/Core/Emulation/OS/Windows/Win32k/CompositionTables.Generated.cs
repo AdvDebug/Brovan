@@ -81,6 +81,7 @@
 //   22621.2209: CreateResource (opcode 1): no type range check
 //   22621.2340: CreateResource (opcode 1): no type range check
 //   22621.2428: CreateResource (opcode 1): no type range check
+//   26100.9974: not on the symbol server
 // </auto-generated>
 
 using System;
