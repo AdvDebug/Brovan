@@ -48,6 +48,7 @@ extern void brovan_select_window(unsigned long long hwnd);
 extern int brovan_debug_query(const char *request, char *buffer, int capacity);
 extern void brovan_debug_pause(void);
 extern void brovan_set_player_sink(void *sink);
+extern void brovan_set_message_sink(void *sink);
 extern void brovan_set_layer_sinks(void *create, void *apply, void *release);
 extern void brovan_terminal_key(int down, int virtualKey, int character, int controlKeyState);
 extern void brovan_terminal_resize(int columns, int rows);
@@ -62,6 +63,7 @@ static jmethodID g_onTextMetrics;
 static jmethodID g_onTextBitmap;
 static jmethodID g_onSpawn;
 static jmethodID g_onPlayer;
+static jmethodID g_onMessageBox;
 static jclass g_layers;
 static jmethodID g_layerCreate;
 static jmethodID g_layerApply;
@@ -234,6 +236,55 @@ static void on_player(int event) {
     }
 
     detach(attachment);
+}
+
+static int on_message_box(const jchar *caption, int captionLength, const jchar *text, int textLength,
+                          const jchar *buttons, int buttonsLength, const int *ids, int count, int defaultIndex,
+                          int escapeId, int icon) {
+    if (g_callbacks == NULL || g_onMessageBox == NULL || count <= 0 || caption == NULL || text == NULL ||
+        buttons == NULL || ids == NULL) {
+        return 0;
+    }
+
+    Attachment attachment = attach();
+    JNIEnv *env = attachment.env;
+    if (env == NULL) {
+        return 0;
+    }
+
+    jint answer = 0;
+    jstring captionText = (*env)->NewString(env, caption, captionLength);
+    jstring bodyText = (*env)->NewString(env, text, textLength);
+    jstring buttonText = (*env)->NewString(env, buttons, buttonsLength);
+    jintArray idArray = (*env)->NewIntArray(env, count);
+
+    if (captionText != NULL && bodyText != NULL && buttonText != NULL && idArray != NULL) {
+        (*env)->SetIntArrayRegion(env, idArray, 0, count, (const jint *)ids);
+        answer = (*env)->CallStaticIntMethod(env, g_callbacks, g_onMessageBox, captionText, bodyText, buttonText,
+                                             idArray, (jint)defaultIndex, (jint)escapeId, (jint)icon);
+    }
+
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->ExceptionDescribe(env);
+        (*env)->ExceptionClear(env);
+        answer = 0;
+    }
+
+    if (captionText != NULL) {
+        (*env)->DeleteLocalRef(env, captionText);
+    }
+    if (bodyText != NULL) {
+        (*env)->DeleteLocalRef(env, bodyText);
+    }
+    if (buttonText != NULL) {
+        (*env)->DeleteLocalRef(env, buttonText);
+    }
+    if (idArray != NULL) {
+        (*env)->DeleteLocalRef(env, idArray);
+    }
+
+    detach(attachment);
+    return (int)answer;
 }
 
 static int clear_exception(JNIEnv *env) {
@@ -574,6 +625,8 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
         g_onSpawn = (*env)->GetStaticMethodID(env, clazz, "onNativeSpawn",
                                               "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;II)Z");
         g_onPlayer = (*env)->GetStaticMethodID(env, clazz, "onNativePlayer", "(I)V");
+        g_onMessageBox = (*env)->GetStaticMethodID(env, clazz, "onNativeMessageBox",
+                                                   "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[IIII)I");
         (*env)->ExceptionClear(env);
     }
 
@@ -594,6 +647,7 @@ JNIEXPORT jint JNICALL METHOD(Init)(JNIEnv *env, jclass clazz, jstring baseDirec
         brovan_set_text_sink((void *)&on_text);
         brovan_set_spawn_sink((void *)&on_spawn);
         brovan_set_player_sink((void *)&on_player);
+        brovan_set_message_sink((void *)&on_message_box);
         register_layers(env);
         trap_sigill();
     } else {

@@ -322,6 +322,9 @@ namespace Brovan.Android
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_player_sink")]
         public static void SetPlayerSink(IntPtr sink) => AndroidHost.SetPlayerSink(sink);
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_set_message_sink")]
+        public static void SetMessageSink(IntPtr sink) => AndroidHost.SetMessageSink(sink);
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_set_layer_sinks")]
         public static void SetLayerSinks(IntPtr create, IntPtr apply, IntPtr release) => AndroidHost.SetLayerSinks(create, apply, release);
 

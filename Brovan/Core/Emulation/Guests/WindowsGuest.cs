@@ -529,7 +529,8 @@ namespace Brovan.Core.Emulation.Guests
                 State.PipeWaitDeadline = -1;
             }
 
-            if (Cancelled || State.SyncIo == null)
+            // A rerun after host work or sync I/O continues the same request.
+            if (Cancelled || (State.SyncIo == null && !State.HostWorkWaitActive))
             {
                 State.ResetSyncIo();
             }

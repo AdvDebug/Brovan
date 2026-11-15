@@ -910,7 +910,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        private bool TryReadUnicodeBuffer(ulong Buffer, ushort Length, out string Value)
+        internal bool TryReadUnicodeBuffer(ulong Buffer, ushort Length, out string Value)
         {
             Value = string.Empty;
             if (Length == 0)
@@ -1774,6 +1774,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
+        private const string VolumeRootPrefix = WindowsStorageDeviceSupport.VolumeDeviceName + "\\";
+
+        // The guest has one volume, and it is drive C.
+        internal static string ToDosDevicePath(string Path)
+        {
+            return Path.StartsWith(VolumeRootPrefix, StringComparison.OrdinalIgnoreCase)
+                ? "C:" + Path.Substring(WindowsStorageDeviceSupport.VolumeDeviceName.Length)
+                : Path;
+        }
+
         internal static string ToNtDevicePath(string Path)
         {
             if (string.IsNullOrWhiteSpace(Path))
@@ -2450,7 +2460,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             return new WinFile() { Device = true, Path = "\\Device\\NamedPipe\\Brovan", HostStream = Stream, Mode = WinFile.FILE_SYNCHRONOUS_IO_NONALERT };
         }
         public uint CurrentPriority = 0x8; // Default priority (Normal), changes only if the program changed it explicitly.
-        public uint DefaultHardErrorMode = 1; // Hard error reporting is on until the program turns it off.
+        internal const uint InitialHardErrorMode = 1;
+        public uint DefaultHardErrorMode = InitialHardErrorMode;
         public uint ProcessDebugFlags = 1;
 
         // One processor group, so no more processors than the guest pointer has bits.
@@ -2592,8 +2603,36 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Build = 0;
             Revision = 0;
-            string HostPath = GeneralHelper.IO.ResolveHostPath(WindowsVersionInfo.SystemRoot + @"\System32\" + Name, BinaryFormat.PE, NativeSystemView: true);
+            string HostPath = ResolveSystemFile(Name);
             return HostPath != null && ImageResources.TryReadFileVersion(HostPath, out Build, out Revision);
+        }
+
+        internal static string ResolveSystemFile(string Name)
+        {
+            return GeneralHelper.IO.ResolveHostPath(WindowsVersionInfo.SystemRoot + @"\System32\" + Name, BinaryFormat.PE, NativeSystemView: true);
+        }
+
+        private const string FallbackMuiCulture = "en-US";
+
+        internal string ResolveSystemMuiFile(string Name)
+        {
+            string Installed = FallbackMuiCulture;
+            try
+            {
+                Installed = System.Globalization.CultureInfo.GetCultureInfo(NtQueryInstallUILanguage.QueryInstallLanguage(Emulator)).Name;
+            }
+            catch (System.Globalization.CultureNotFoundException)
+            {
+            }
+
+            return ResolveExistingMuiFile(Installed, Name)
+                ?? (Installed == FallbackMuiCulture ? null : ResolveExistingMuiFile(FallbackMuiCulture, Name));
+        }
+
+        private static string ResolveExistingMuiFile(string Culture, string Name)
+        {
+            string HostPath = ResolveSystemFile(Culture + @"\" + Name + ".mui");
+            return HostPath != null && File.Exists(HostPath) ? HostPath : null;
         }
 
         private struct SyscallArgCache
@@ -6444,6 +6483,28 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
+        // NT: RtlUnicodeToMultiByteN writes the code page's default character for any character it cannot map.
+        internal byte[] ToAnsiBytes(string Text)
+        {
+            ReadSystemCodePages(out uint AnsiCodePage, out _);
+            if (AnsiCodePage == Utf8CodePage)
+                return Encoding.UTF8.GetBytes(Text);
+
+            byte[] Bytes = new byte[Text.Length];
+            if (TryGetSingleByteCodePage(AnsiCodePage, out SingleByteCodePage Table))
+            {
+                for (int i = 0; i < Text.Length; i++)
+                    Bytes[i] = Table.ToMultiByte(Text[i]);
+
+                return Bytes;
+            }
+
+            for (int i = 0; i < Text.Length; i++)
+                Bytes[i] = Text[i] < 0x80 ? (byte)Text[i] : (byte)'?';
+
+            return Bytes;
+        }
+
         // NT: ntdll RtlpQueryNlsSystemCodePages.
         private void ReadSystemCodePages(out uint AnsiCodePage, out uint OemCodePage)
         {
@@ -6577,21 +6638,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // user32 takes each message box button caption and control id from these slots.
-        private static readonly (string Caption, uint ControlId)[] MessageBoxButtons =
-        {
-            ("OK", 1), ("Cancel", 2), ("&Abort", 3), ("&Retry", 4), ("&Ignore", 5), ("&Yes", 6),
-            ("&No", 7), ("Close", 8), ("Help", 9), ("&Try Again", 10), ("&Continue", 11),
-        };
-
         private void WriteMessageBoxStrings(ulong Address)
         {
             Span<byte> Entry = stackalloc byte[MessageBoxStringStride];
 
-            for (int i = 0; i < MessageBoxButtons.Length; i++)
+            for (int i = 0; i < HostMessageBox.ButtonCaptions.Length; i++)
             {
                 Entry.Clear();
-                Encoding.Unicode.GetBytes(MessageBoxButtons[i].Caption, Entry);
-                BinaryPrimitives.WriteUInt32LittleEndian(Entry.Slice(MessageBoxStringCaptionBytes), MessageBoxButtons[i].ControlId);
+                Encoding.Unicode.GetBytes(HostMessageBox.ButtonCaptions[i], Entry);
+                BinaryPrimitives.WriteUInt32LittleEndian(Entry.Slice(MessageBoxStringCaptionBytes), (uint)i + 1);
                 Emulator.WriteMemory(Address + (ulong)(i * MessageBoxStringStride), Entry);
             }
         }
@@ -11195,6 +11250,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ReadOnlySpan<byte> Source = UseGlyphs && !GlyphTable.IsEmpty ? GlyphTable : MultiByteTable;
                 return (char)BinaryPrimitives.ReadUInt16LittleEndian(Source.Slice(Value * 2));
             }
+
+            public byte ToMultiByte(char Value) => WideCharTable[Value];
 
             // NT: kernelbase GetMBDefault.
             public byte FromUnicode(char Value, byte Replacement)

@@ -2,14 +2,18 @@ package dev.brovan.app;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Rect;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
+import android.view.KeyEvent;
+import android.view.LayoutInflater;
 import android.text.Spannable;
 import android.text.SpannableString;
 import android.text.SpannableStringBuilder;
@@ -20,18 +24,22 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.activity.OnBackPressedCallback;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
+import androidx.core.graphics.ColorUtils;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.lifecycle.Lifecycle;
 
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.sidesheet.SideSheetDialog;
 import com.google.android.material.slider.Slider;
 
@@ -59,7 +67,7 @@ import dev.brovan.input.PointerState;
  * allocated and the next launch starts from a clean state.
  */
 public class PlayerActivity extends AppCompatActivity
-        implements BrovanNative.Listener, BrovanNative.PlayerListener, DebuggerView.Listener {
+        implements BrovanNative.Listener, BrovanNative.PlayerListener, BrovanNative.MessageListener, DebuggerView.Listener {
 
     private static final String EXTRA_DIRECTORY = "directory";
     private static final String EXTRA_EXECUTABLE = "executable";
@@ -99,6 +107,7 @@ public class PlayerActivity extends AppCompatActivity
     private final Handler ui = new Handler(Looper.getMainLooper());
 
     private BrovanSurfaceView surface;
+    private AlertDialog messageDialog;
     private TerminalView terminal;
     private View terminalPanel;
     private TextView terminalStatus;
@@ -107,7 +116,6 @@ public class PlayerActivity extends AppCompatActivity
     private boolean windowCreated;
     private boolean viewChosen;
     private boolean programEnded;
-    private boolean keyboardOffered;
     private boolean keyboardPending;
     private TextView menuTip;
     private View closing;
@@ -192,7 +200,6 @@ public class PlayerActivity extends AppCompatActivity
 
         if (hasFocus) {
             goFullscreen();
-            offerKeyboard();
             showPendingKeyboard();
         }
     }
@@ -290,6 +297,7 @@ public class PlayerActivity extends AppCompatActivity
 
         BrovanNative.setListener(this);
         BrovanNative.setPlayerListener(this);
+        BrovanNative.setMessageListener(this);
         if (getIntent().getStringExtra(EXTRA_SESSION) == null) {
             try {
                 runToken = library.beginRun(programId, android.os.Process.myPid());
@@ -607,7 +615,17 @@ public class PlayerActivity extends AppCompatActivity
 
     private void toggleKeyboard() {
         WindowInsetsCompat insets = ViewCompat.getRootWindowInsets(surface);
-        if (insets != null && insets.isVisible(WindowInsetsCompat.Type.ime())) {
+        boolean shown = insets != null && insets.isVisible(WindowInsetsCompat.Type.ime());
+        if (consoleShown) {
+            if (shown) {
+                terminal.hideKeyboard();
+            } else {
+                terminal.showKeyboard();
+            }
+            return;
+        }
+
+        if (shown) {
             surface.hideKeyboard();
             return;
         }
@@ -675,7 +693,6 @@ public class PlayerActivity extends AppCompatActivity
         debugger.setVisibility(visible ? View.GONE : View.VISIBLE);
         if (visible) {
             focusShownView();
-            offerKeyboard();
             BrovanNative.requestRepaint();
             return;
         }
@@ -719,16 +736,7 @@ public class PlayerActivity extends AppCompatActivity
         consoleShown = true;
         terminalPanel.setVisibility(View.VISIBLE);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING);
-        terminal.post(this::offerKeyboard);
-    }
-
-    private void offerKeyboard() {
-        if (keyboardOffered || !consoleShown || !hasWindowFocus() || debugger.getVisibility() == View.VISIBLE) {
-            return;
-        }
-
-        keyboardOffered = true;
-        terminal.showKeyboard();
+        terminal.requestFocus();
     }
 
     // The app consumes IME insets. Size the terminal from the visible frame.
@@ -740,6 +748,7 @@ public class PlayerActivity extends AppCompatActivity
         getWindow().getDecorView().getWindowVisibleDisplayFrame(visibleFrame);
         terminalPanel.getLocationOnScreen(panelOrigin);
         int covered = Math.max(0, panelOrigin[1] + terminalPanel.getHeight() - visibleFrame.bottom);
+        terminal.setKeyboardShown(covered > 0);
         if (terminalPanel.getPaddingBottom() != covered) {
             terminalPanel.setPadding(0, 0, 0, covered);
         }
@@ -979,12 +988,118 @@ public class PlayerActivity extends AppCompatActivity
     }
 
     @Override
+    public void onMessage(BrovanNative.MessageRequest request) {
+        runOnUiThread(() -> showMessage(request));
+    }
+
+    /** Buttons keep the guest's left to right order: neutral, negative, positive. */
+    private void showMessage(BrovanNative.MessageRequest request) {
+        if (isFinishing() || isDestroyed() || request.isAnswered()) {
+            return;
+        }
+
+        if (messageDialog != null) {
+            messageDialog.dismiss();
+        }
+
+        int count = Math.min(request.ids.length, 3);
+        MaterialAlertDialogBuilder builder = Theming.dialog(this)
+                .setView(messageCard(request))
+                .setCancelable(false);
+
+        for (int i = 0; i < count; i++) {
+            int id = request.ids[i];
+            String caption = i < request.buttons.length ? request.buttons[i] : "";
+            int slot = count - 1 - i;
+            if (slot == 0) {
+                builder.setPositiveButton(caption, (dialog, which) -> request.answer(id));
+            } else if (slot == 1) {
+                builder.setNegativeButton(caption, (dialog, which) -> request.answer(id));
+            } else {
+                builder.setNeutralButton(caption, (dialog, which) -> request.answer(id));
+            }
+        }
+
+        builder.setOnKeyListener((dialog, keyCode, event) -> {
+            if (keyCode != KeyEvent.KEYCODE_BACK || event.getAction() != KeyEvent.ACTION_UP) {
+                return keyCode == KeyEvent.KEYCODE_BACK;
+            }
+
+            if (request.escapeId != 0) {
+                request.answer(request.escapeId);
+                dialog.dismiss();
+            }
+            return true;
+        });
+
+        AlertDialog dialog = builder.create();
+        Theming.paintOnShow(dialog, new Settings(this).palette());
+        dialog.show();
+        messageDialog = dialog;
+    }
+
+    /** A hard error caption reads "program - kind", so the kind is the title and the program the line under it. */
+    private View messageCard(BrovanNative.MessageRequest request) {
+        View card = LayoutInflater.from(this).inflate(R.layout.dialog_guest_message, null, false);
+        TextView title = card.findViewById(R.id.message_title);
+        TextView program = card.findViewById(R.id.message_program);
+        ImageView icon = card.findViewById(R.id.message_icon);
+
+        int split = request.caption.lastIndexOf(" - ");
+        if (split > 0) {
+            title.setText(request.caption.substring(split + 3));
+            program.setText(request.caption.substring(0, split));
+            program.setVisibility(View.VISIBLE);
+        } else {
+            title.setText(request.caption);
+        }
+
+        ((TextView) card.findViewById(R.id.message_text)).setText(request.text.trim());
+
+        int drawable;
+        int color;
+        switch (request.icon) {
+            case BrovanNative.ICON_ERROR:
+                drawable = R.drawable.ic_message_error;
+                color = R.color.message_error;
+                break;
+            case BrovanNative.ICON_WARNING:
+                drawable = R.drawable.ic_message_warning;
+                color = R.color.message_warning;
+                break;
+            case BrovanNative.ICON_QUESTION:
+            case BrovanNative.ICON_INFORMATION:
+                drawable = R.drawable.ic_message_info;
+                color = R.color.message_info;
+                break;
+            default:
+                return card;
+        }
+
+        int tint = ContextCompat.getColor(this, color);
+        GradientDrawable circle = new GradientDrawable();
+        circle.setShape(GradientDrawable.OVAL);
+        circle.setColor(ColorUtils.setAlphaComponent(tint, 0x33));
+        icon.setBackground(circle);
+        icon.setImageResource(drawable);
+        icon.setImageTintList(ColorStateList.valueOf(tint));
+        icon.setVisibility(View.VISIBLE);
+        return card;
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
         ui.removeCallbacksAndMessages(null);
 
+        if (messageDialog != null) {
+            messageDialog.dismiss();
+            messageDialog = null;
+        }
+
         // The emulator refuses a second guest in the same process, so the process goes with the activity.
         if (isFinishing()) {
+            BrovanNative.abandonMessage();
             finishRun(null);
             TaskbarView.withdraw(this);
             android.os.Process.killProcess(android.os.Process.myPid());

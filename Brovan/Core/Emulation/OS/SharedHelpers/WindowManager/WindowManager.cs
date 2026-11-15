@@ -504,7 +504,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 try
                 {
                     if (_pointerDisplay == IntPtr.Zero)
-                        _pointerDisplay = X11.XOpenDisplay(IntPtr.Zero);
+                        _pointerDisplay = X11.OpenDisplay();
 
                     if (_pointerDisplay == IntPtr.Zero)
                         return false;
@@ -662,7 +662,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
             IntPtr display = IntPtr.Zero;
             try
             {
-                display = X11.XOpenDisplay(IntPtr.Zero);
+                display = X11.OpenDisplay();
                 if (display == IntPtr.Zero)
                     return;
 

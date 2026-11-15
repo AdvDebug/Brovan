@@ -15,6 +15,7 @@ namespace Brovan.Android
         public const int PlayerWindowCreated = 3;
 
         private static IntPtr _playerSink;
+        private static IntPtr _messageSink;
         private static IntPtr _layerCreate;
         private static IntPtr _layerApply;
         private static IntPtr _layerRelease;
@@ -69,6 +70,24 @@ namespace Brovan.Android
             IntPtr sink = Volatile.Read(ref _playerSink);
             if (sink != IntPtr.Zero)
                 ((delegate* unmanaged<int, void>)sink)(playerEvent);
+        }
+
+        public static void SetMessageSink(IntPtr sink) => Volatile.Write(ref _messageSink, sink);
+
+        public static unsafe int ShowMessageBox(string caption, string text, string buttons, ReadOnlySpan<int> ids, int defaultIndex, int escapeId, int icon)
+        {
+            IntPtr sink = Volatile.Read(ref _messageSink);
+            if (sink == IntPtr.Zero || ids.IsEmpty)
+                return 0;
+
+            fixed (char* captionChars = caption)
+            fixed (char* textChars = text)
+            fixed (char* buttonChars = buttons)
+            fixed (int* idValues = ids)
+            {
+                return ((delegate* unmanaged<char*, int, char*, int, char*, int, int*, int, int, int, int, int>)sink)(
+                    captionChars, caption.Length, textChars, text.Length, buttonChars, buttons.Length, idValues, ids.Length, defaultIndex, escapeId, icon);
+            }
         }
 
         public static void SetLayerSinks(IntPtr create, IntPtr apply, IntPtr release)

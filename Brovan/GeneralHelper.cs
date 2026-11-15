@@ -116,6 +116,15 @@ namespace Brovan
         public static extern int GetSystemMetrics(int nIndex);
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int MessageBoxW(IntPtr hWnd, string lpText, string lpCaption, uint uType);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetProcessWindowStation();
+
+        [DllImport("user32.dll")]
+        public static extern unsafe bool GetUserObjectInformationW(IntPtr hObj, int nIndex, void* pvInfo, uint nLength, out uint lpnLengthNeeded);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         public static extern unsafe bool EnumDisplaySettingsW(string lpszDeviceName, int iModeNum, byte* lpDevMode);
 
         [DllImport("user32.dll")]

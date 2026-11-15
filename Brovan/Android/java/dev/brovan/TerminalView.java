@@ -67,6 +67,8 @@ public class TerminalView extends View {
     private float baseline;
     private int columns;
     private int rows;
+    private int visibleRows;
+    private boolean keyboardShown;
     private int scrollBack;
     private float scrollCarry;
     private int latched;
@@ -201,19 +203,24 @@ public class TerminalView extends View {
         }
     }
 
+    /** While the keyboard is up, the console keeps its size and the view shows the rows that end at the cursor. */
+    public void setKeyboardShown(boolean shown) {
+        keyboardShown = shown;
+    }
+
     @Override
     protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
         super.onSizeChanged(width, height, oldWidth, oldHeight);
 
         int newColumns = Math.max(1, (int) (width / cellWidth));
         int newRows = Math.max(1, (int) (height / cellHeight));
-        if (newColumns == columns && newRows == rows) {
-            return;
+        visibleRows = newRows;
+        boolean keepGrid = newColumns == columns && (newRows == rows || (keyboardShown && newRows < rows));
+        if (!keepGrid) {
+            columns = newColumns;
+            rows = newRows;
+            BrovanNative.terminalResize(columns, rows);
         }
-
-        columns = newColumns;
-        rows = newRows;
-        BrovanNative.terminalResize(columns, rows);
         scheduleFrame();
     }
 
@@ -227,6 +234,16 @@ public class TerminalView extends View {
         int shownColumns = cells[0];
         int shownRows = cells[1];
         int at = HEADER_INTS;
+
+        int back = cells[6];
+        int cursorRow = cells[3] + back;
+        int firstRow = 0;
+        if (visibleRows > 0 && visibleRows < shownRows) {
+            firstRow = Math.max(0, Math.min(cursorRow + 1 - visibleRows, shownRows - visibleRows));
+        }
+
+        canvas.save();
+        canvas.translate(0, -firstRow * cellHeight);
 
         for (int row = 0; row < shownRows; row++) {
             float top = row * cellHeight;
@@ -268,14 +285,14 @@ public class TerminalView extends View {
             }
         }
 
-        int back = cells[6];
-        int cursorRow = cells[3] + back;
         if ((cells[4] & STATE_CURSOR_VISIBLE) != 0 && cursorRow < shownRows) {
             float left = cells[2] * cellWidth;
             float top = cursorRow * cellHeight;
             fill.setColor(CURSOR_COLOR);
             canvas.drawRect(left, top, left + cellWidth, top + cellHeight, fill);
         }
+
+        canvas.restore();
     }
 
     private static int resolve(int color, int fallback, boolean bold) {

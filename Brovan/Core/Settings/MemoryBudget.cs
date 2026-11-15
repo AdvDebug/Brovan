@@ -115,6 +115,9 @@ namespace Brovan.Core.Settings
 
         public static ulong CompositorSurfaceBytes { get; private set; }
 
+        // Host message boxes that wait to be shown.
+        public static int HostMessageBoxes { get; private set; }
+
         // Application hives one process holds loaded.
         public static int AppHives { get; private set; }
 
@@ -185,6 +188,7 @@ namespace Brovan.Core.Settings
             CompositionTokenUpdates = (int)Pick(Off: 65536, Minimal: 49152, Medium: 32768, High: 16384, Aggressive: 8192);
             CompositorSurfaceBytes = Megabytes(Pick(Off: 512, Minimal: 384, Medium: 256, High: 128, Aggressive: 64));
             AppHives = (int)Pick(Off: 256, Minimal: 192, Medium: 128, High: 96, Aggressive: 64);
+            HostMessageBoxes = (int)Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8);
             SideBySideManifestBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 256));
             ActivationContextAssemblies = (int)Pick(Off: 64, Minimal: 64, Medium: 48, High: 32, Aggressive: 16);
             ActivationContextBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 128));

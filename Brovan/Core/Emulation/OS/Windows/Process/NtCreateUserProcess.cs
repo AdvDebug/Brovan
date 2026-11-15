@@ -22,6 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong PsAttributeImageInfo = 6;
         private const ulong PsAttributeStdHandleInfo = 10 | 0x20000;
         private const ulong PsAttributeHandleList = 11 | 0x20000;
+        private const ulong PsAttributeErrorMode = 9 | 0x20000;
 
         private const uint ProcessCreateFlagsInheritHandles = 0x4;
         private const int MaxHandleListEntries = 1024;
@@ -43,6 +44,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Handles.Add(Instance.WinHelper.ReadPointer(ValuePointer + i * PointerSize));
 
             return Handles;
+        }
+
+        // NT: the child takes the creator's mode unless CREATE_DEFAULT_ERROR_MODE passes one.
+        private static uint ReadErrorMode(BinaryEmulator Instance, ulong AttributeList)
+        {
+            Span<byte> Value = stackalloc byte[4];
+            if (!TryFindAttribute(Instance, AttributeList, PsAttributeErrorMode, out ulong ValuePointer, out ulong Size) || Size < 4
+                || !Instance.ReadMemory(ValuePointer, Value))
+                return Instance.WinHelper.DefaultHardErrorMode;
+
+            return BinaryPrimitives.ReadUInt32LittleEndian(Value);
         }
 
         // PS_STD_HANDLE_INFO. The state is the low two bits of its first ULONG, the subsystem the second ULONG.
@@ -92,8 +104,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (TokenStatus != NTSTATUS.STATUS_SUCCESS)
                 return TokenStatus;
 
+            uint HardErrorMode = ReadErrorMode(Instance, AttributeList);
             Func<uint, byte[], byte[]> InheritRecordFor = (ImageSubsystem, Identity) => ProcessInheritance.Build(
-                Instance, ProcessParameters, Environment, InheritHandles, HandleList, StdHandleState, StdHandleSubsystem, ImageSubsystem, Identity);
+                Instance, ProcessParameters, Environment, InheritHandles, HandleList, StdHandleState, StdHandleSubsystem, ImageSubsystem, Identity, HardErrorMode);
 
             if (!GuestProcessLauncher.TryLaunch(Instance, ProcessParameters, ImageNameHint, StartSuspended, Launch.AssignPrimary(0), InheritRecordFor, out WinProcess Process, out SECTION_IMAGE_INFORMATION ImageInformation, out NTSTATUS Status))
                 return Status;

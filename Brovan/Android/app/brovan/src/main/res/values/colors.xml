@@ -28,6 +28,10 @@
     <color name="asm_memory">#FF56B6C2</color>
     <color name="asm_separator">#FF636E7B</color>
 
+    <color name="message_error">#FFF2707A</color>
+    <color name="message_warning">#FFE8C36B</color>
+    <color name="message_info">#FF6FB6F1</color>
+
     <color name="debug_current">#332F81F7</color>
     <color name="debug_breakpoint">#FFF2707A</color>
     <color name="debug_value">#FFE6EDF3</color>

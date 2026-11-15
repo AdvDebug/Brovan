@@ -27,7 +27,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static ushort QueryInstallLanguage(BinaryEmulator Instance)
+        internal static ushort QueryInstallLanguage(BinaryEmulator Instance)
         {
             if (!Instance.WinHelper.RegistryKeyExists(NlsLanguageKey, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly))
                 return DefaultInstallLanguage;

@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.IO;
+using System.Text;
 
 namespace Brovan.Core
 {
@@ -107,6 +108,7 @@ namespace Brovan.Core
     {
         internal const uint TypeVersion = 16;
         internal const uint TypeManifest = 24;
+        internal const uint TypeMessageTable = 11;
 
         private const uint MaxHeaderOffset = 0x10000;
         private const uint PeSignature = 0x00004550;
@@ -126,6 +128,10 @@ namespace Brovan.Core
         private const uint FixedFileInfoSize = 0x34;
         private const uint FixedFileInfoSignature = 0xFEEF04BD;
         private const int FileVersionLowOffset = 0x0C;
+
+        private const int MessageBlockSize = 12;
+        private const int MessageEntryHeaderSize = 4;
+        private const ushort MessageEntryUnicode = 1;
 
         // This takes the first language of the resource.
         internal static bool TryFindResource<TImage>(TImage Image, uint Type, uint Id, out uint DataRva, out uint DataSize) where TImage : struct, IImageReader
@@ -183,6 +189,83 @@ namespace Brovan.Core
             {
                 return false;
             }
+        }
+
+        // MESSAGE_RESOURCE_DATA: a block count, blocks of (low id, high id, entries offset), then entries of
+        // (length, flags, text) back to back, each block's entries in id order.
+        internal static bool TryFindMessage<TImage>(TImage Image, uint Id, out string Text) where TImage : struct, IImageReader
+        {
+            Text = null;
+            if (!TryFindResource(Image, TypeMessageTable, 1, out uint DataRva, out uint DataSize) || DataSize < 4)
+                return false;
+
+            Span<byte> Field = stackalloc byte[MessageBlockSize];
+            if (!Image.TryRead(DataRva, Field.Slice(0, 4)))
+                return false;
+
+            uint Blocks = BinaryPrimitives.ReadUInt32LittleEndian(Field);
+            if (Blocks > (DataSize - 4) / MessageBlockSize)
+                return false;
+
+            for (uint i = 0; i < Blocks; i++)
+            {
+                if (!Image.TryRead(DataRva + 4 + i * MessageBlockSize, Field))
+                    return false;
+
+                uint Low = BinaryPrimitives.ReadUInt32LittleEndian(Field);
+                uint High = BinaryPrimitives.ReadUInt32LittleEndian(Field.Slice(4));
+                uint Entry = BinaryPrimitives.ReadUInt32LittleEndian(Field.Slice(8));
+                if (Id < Low || Id > High)
+                    continue;
+
+                for (uint Current = Low; ; Current++)
+                {
+                    if (Entry > DataSize - MessageEntryHeaderSize || !Image.TryRead(DataRva + Entry, Field.Slice(0, MessageEntryHeaderSize)))
+                        return false;
+
+                    uint Length = BinaryPrimitives.ReadUInt16LittleEndian(Field);
+                    if (Length < MessageEntryHeaderSize || Length > DataSize - Entry)
+                        return false;
+
+                    if (Current == Id)
+                        return TryReadMessageText(Image, DataRva + Entry, Length, BinaryPrimitives.ReadUInt16LittleEndian(Field.Slice(2)), out Text);
+
+                    Entry += Length;
+                }
+            }
+
+            return false;
+        }
+
+        internal static bool TryFindMessage(string HostPath, uint Id, out string Text)
+        {
+            Text = null;
+            try
+            {
+                using FileStream Stream = new(HostPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 0x1000, FileOptions.RandomAccess);
+                return ImageStream.TryOpen(Stream, out ImageStream Image) && TryFindMessage(Image, Id, out Text);
+            }
+            catch (Exception Error) when (Error is IOException or UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        private static bool TryReadMessageText<TImage>(TImage Image, uint EntryRva, uint Length, ushort Flags, out string Text) where TImage : struct, IImageReader
+        {
+            byte[] Data = new byte[Length - MessageEntryHeaderSize];
+            if (!Image.TryRead(EntryRva + MessageEntryHeaderSize, Data))
+            {
+                Text = null;
+                return false;
+            }
+
+            Text = Flags == MessageEntryUnicode ? Encoding.Unicode.GetString(Data, 0, Data.Length & ~1) : Encoding.Latin1.GetString(Data);
+            int End = Text.IndexOf('\0');
+            if (End >= 0)
+                Text = Text.Substring(0, End);
+
+            return true;
         }
 
         internal static bool TryGetDataDirectory<TImage>(TImage Image, uint Index, out uint Rva, out uint Size) where TImage : struct, IImageReader

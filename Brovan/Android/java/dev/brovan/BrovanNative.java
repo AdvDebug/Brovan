@@ -9,6 +9,8 @@ import android.view.Surface;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Thin binding over the emulator's exported C ABI. Every method is safe to call from any thread except
@@ -63,6 +65,52 @@ public final class BrovanNative {
         void onWindowCreated();
     }
 
+    public interface MessageListener {
+        void onMessage(MessageRequest request);
+    }
+
+    public static final int ICON_NONE = 0;
+    public static final int ICON_ERROR = 1;
+    public static final int ICON_QUESTION = 2;
+    public static final int ICON_WARNING = 3;
+    public static final int ICON_INFORMATION = 4;
+
+    public static final class MessageRequest {
+        public final String caption;
+        public final String text;
+        public final String[] buttons;
+        public final int[] ids;
+        public final int defaultIndex;
+        /** The answer to Back, or 0 when the box ignores it. */
+        public final int escapeId;
+        public final int icon;
+
+        private final CountDownLatch done = new CountDownLatch(1);
+        private final AtomicBoolean answered = new AtomicBoolean();
+        private volatile int result;
+
+        MessageRequest(String caption, String text, String[] buttons, int[] ids, int defaultIndex, int escapeId, int icon) {
+            this.caption = caption;
+            this.text = text;
+            this.buttons = buttons;
+            this.ids = ids;
+            this.defaultIndex = defaultIndex;
+            this.escapeId = escapeId;
+            this.icon = icon;
+        }
+
+        public void answer(int id) {
+            if (answered.compareAndSet(false, true)) {
+                result = id;
+                done.countDown();
+            }
+        }
+
+        public boolean isAnswered() {
+            return answered.get();
+        }
+    }
+
     private static final int PLAYER_CONSOLE_ATTACHED = 1;
     private static final int PLAYER_SCREEN_CHANGED = 2;
     private static final int PLAYER_WINDOW_CREATED = 3;
@@ -101,6 +149,8 @@ public final class BrovanNative {
     private static volatile InstallListener installListener;
     private static volatile SpawnHandler spawnHandler;
     private static volatile PlayerListener playerListener;
+    private static volatile MessageListener messageListener;
+    private static volatile MessageRequest openMessage;
 
     static {
         // .NET's crypto shim dlopens libssl.so, and Android provides none. Loading our bundled pair up front
@@ -133,6 +183,23 @@ public final class BrovanNative {
 
     public static void setPlayerListener(PlayerListener value) {
         playerListener = value;
+    }
+
+    /** A listener set while a request is open is shown that request, so a recreated activity shows it again. */
+    public static void setMessageListener(MessageListener value) {
+        messageListener = value;
+        MessageRequest open = openMessage;
+        if (value != null && open != null && !open.isAnswered()) {
+            value.onMessage(open);
+        }
+    }
+
+    public static void abandonMessage() {
+        messageListener = null;
+        MessageRequest open = openMessage;
+        if (open != null) {
+            open.answer(0);
+        }
     }
 
     /** Must be called before {@link #start}. */
@@ -326,6 +393,33 @@ public final class BrovanNative {
                                          String sessionId, int spawnToken, int depth) {
         SpawnHandler current = spawnHandler;
         return current != null && current.onSpawn(image, arguments, workingDirectory, sessionId, spawnToken, depth);
+    }
+
+    @SuppressWarnings("unused")
+    private static int onNativeMessageBox(String caption, String text, String buttons, int[] ids, int defaultIndex,
+                                          int escapeId, int icon) {
+        MessageListener current = messageListener;
+        if (current == null) {
+            return 0;
+        }
+
+        MessageRequest request = new MessageRequest(caption, text, buttons.split("\n", -1), ids, defaultIndex, escapeId, icon);
+        openMessage = request;
+        try {
+            current = messageListener;
+            if (current == null) {
+                return 0;
+            }
+
+            current.onMessage(request);
+            request.done.await();
+            return request.result;
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return 0;
+        } finally {
+            openMessage = null;
+        }
     }
 
     @SuppressWarnings("unused")

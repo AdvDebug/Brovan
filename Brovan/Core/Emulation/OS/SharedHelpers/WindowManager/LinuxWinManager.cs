@@ -12,6 +12,35 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 {
     public static partial class X11
     {
+        private static readonly object SetupSync = new();
+        private static bool _processSetup;
+
+        /// <summary>
+        /// Xlib aborts the process from its default error handler. Guest code and the Vulkan ICD both
+        /// drive this display, so a stale drawable from a race must degrade rather than kill the emulator.
+        /// </summary>
+        [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
+        private static int SwallowXError(IntPtr display, IntPtr errorEvent)
+        {
+            return 0;
+        }
+
+        // XInitThreads must come before any other Xlib call of the process, on every connection.
+        public static unsafe IntPtr OpenDisplay()
+        {
+            lock (SetupSync)
+            {
+                if (!_processSetup)
+                {
+                    XInitThreads();
+                    XSetErrorHandler(&SwallowXError);
+                    _processSetup = true;
+                }
+            }
+
+            return XOpenDisplay(IntPtr.Zero);
+        }
+
         [LibraryImport("libX11.so.6")]
         public static partial int XInitThreads();
 
@@ -350,6 +379,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         [LibraryImport("libX11.so.6", StringMarshalling = StringMarshalling.Utf8)]
         public static partial int XTextWidth(IntPtr font_struct, string str, int length);
+
+        [LibraryImport("libX11.so.6")]
+        public static unsafe partial int XDrawString(IntPtr display, IntPtr drawable, IntPtr gc, int x, int y, byte* str, int length);
+
+        [LibraryImport("libX11.so.6")]
+        public static unsafe partial int XTextWidth(IntPtr font_struct, byte* str, int length);
 
         [LibraryImport("libX11.so.6")]
         public static partial int XFreeFont(IntPtr display, IntPtr font_struct);
@@ -710,25 +745,12 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private const int ActivationEchoMilliseconds = 100;
         private IntPtr[] _restackScratch = Array.Empty<IntPtr>();
 
-        /// <summary>
-        /// Xlib aborts the process from its default error handler. Guest code and the Vulkan ICD both
-        /// drive this display, so a stale drawable from a race must degrade rather than kill the emulator.
-        /// </summary>
-        [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvCdecl) })]
-        private static int SwallowXError(IntPtr display, IntPtr errorEvent)
-        {
-            return 0;
-        }
-
         public unsafe LinuxWinManager()
         {
             if (!GeneralHelper.IsLinux)
                 throw new PlatformNotSupportedException("Linux window manager needs to be used on a Linux system.");
 
-            X11.XInitThreads();
-            X11.XSetErrorHandler(&SwallowXError);
-
-            _xDisplay = X11.XOpenDisplay(IntPtr.Zero);
+            _xDisplay = X11.OpenDisplay();
             if (_xDisplay != IntPtr.Zero)
             {
                 InitializeX11();

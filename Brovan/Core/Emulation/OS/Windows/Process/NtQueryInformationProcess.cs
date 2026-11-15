@@ -229,7 +229,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                             if (!Instance.IsRegionMapped(OutBufferPtr, sizeof(uint)))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                            if (!Instance.WinHelper.WriteUInt32(OutBufferPtr, Own ? Instance.WinHelper.DefaultHardErrorMode : 1u))
+                            if (!Instance.WinHelper.WriteUInt32(OutBufferPtr, Own ? Instance.WinHelper.DefaultHardErrorMode : WinSysHelper.InitialHardErrorMode))
                                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                             SetReturnLength(sizeof(uint));

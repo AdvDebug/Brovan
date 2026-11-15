@@ -24,7 +24,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal static class ProcessInheritance
     {
         private const uint Magic = 0x48495642;
-        private const uint Version = 3;
+        private const uint Version = 4;
         private const int MaxEntries = 4096;
         private const int MaxFileBytes = 4 << 20;
         private const int MaxEnvironmentBytes = 1 << 20;
@@ -137,7 +137,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // NT duplicates requested standard handles whether they are inheritable or not (PspCopyAndFixupParameters).
         internal static byte[] Build(BinaryEmulator Instance, ulong ProcessParameters, byte[] Environment, bool InheritHandles, List<ulong> HandleList,
-            uint StdHandleState, uint StdHandleSubsystem, uint ImageSubsystem, byte[] Identity)
+            uint StdHandleState, uint StdHandleSubsystem, uint ImageSubsystem, byte[] Identity, uint HardErrorMode)
         {
             HandleManager Handles = Instance.WinHelper.HandleManager;
             Dictionary<ulong, HandleEntry> Chosen = new Dictionary<ulong, HandleEntry>();
@@ -186,7 +186,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             using MemoryStream Buffer = new MemoryStream();
             using BinaryWriter Writer = new BinaryWriter(Buffer, Encoding.UTF8);
-            WriteRecordHeader(Writer, Std, Environment, Identity);
+            WriteRecordHeader(Writer, Std, Environment, Identity, HardErrorMode);
 
             long CountPosition = Buffer.Position;
             Writer.Write(0);
@@ -230,12 +230,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             using MemoryStream Buffer = new MemoryStream();
             using BinaryWriter Writer = new BinaryWriter(Buffer, Encoding.UTF8);
-            WriteRecordHeader(Writer, new ulong[3], null, Identity);
+            WriteRecordHeader(Writer, new ulong[3], null, Identity, WinSysHelper.InitialHardErrorMode);
             Writer.Write(0);
             return Buffer.ToArray();
         }
 
-        private static void WriteRecordHeader(BinaryWriter Writer, ulong[] Std, byte[] Environment, byte[] Identity)
+        private static void WriteRecordHeader(BinaryWriter Writer, ulong[] Std, byte[] Environment, byte[] Identity, uint HardErrorMode)
         {
             Writer.Write(Magic);
             Writer.Write(Version);
@@ -248,6 +248,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Writer.Write(Identity.Length);
             Writer.Write(Identity);
+            Writer.Write(HardErrorMode);
         }
 
         private static bool TryWriteFile(BinaryWriter Writer, ulong Handle, HandleEntry Entry, WinFile File)
@@ -408,6 +409,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 Identity = Form;
+                Helper.DefaultHardErrorMode = Reader.ReadUInt32();
 
                 int Count = Reader.ReadInt32();
                 if (Count < 0 || Count > MaxEntries)
