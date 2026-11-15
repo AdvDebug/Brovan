@@ -248,7 +248,24 @@ jobs:
           path: Brovan/.cache/unicorn
           key: brovan-unicorn-android-arm64-${{ hashFiles('Brovan/Brovan.Unicorn.targets') }}
 
+      # Without the secret the release APK is signed with the runner's own debug key, which changes per run.
+      - name: Restore the release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.BROVAN_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/brovan-release.jks"
+            echo "BROVAN_KEYSTORE=$RUNNER_TEMP/brovan-release.jks" >> "$GITHUB_ENV"
+          else
+            echo "::warning::BROVAN_KEYSTORE_BASE64 is not set, so the APK is signed with a throwaway debug key"
+          fi
+
       - name: Build APK
+        env:
+          BROVAN_APK_BUILD_TYPE: release
+          BROVAN_KEYSTORE_PASSWORD: ${{ secrets.BROVAN_KEYSTORE_PASSWORD }}
+          BROVAN_KEY_ALIAS: ${{ secrets.BROVAN_KEY_ALIAS }}
+          BROVAN_KEY_PASSWORD: ${{ secrets.BROVAN_KEY_PASSWORD }}
         run: bash Brovan/Android/build-apk.sh
 
       - name: Upload CI Artifact

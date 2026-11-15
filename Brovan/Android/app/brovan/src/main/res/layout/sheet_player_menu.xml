@@ -46,6 +46,9 @@
             <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_controls" />
             <TextView android:id="@+id/controls" style="@style/SettingsChoiceValue" />
         </LinearLayout>
+        <LinearLayout android:id="@+id/edit_controls" style="@style/SettingsChoiceRow">
+            <TextView style="@style/SettingsChoiceLabel" android:text="@string/controls_title" />
+        </LinearLayout>
         <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
             android:layout_marginTop="12dp" android:orientation="horizontal" android:gravity="center_vertical">
             <TextView style="@style/SettingsRowTitle" android:layout_width="0dp" android:layout_weight="1"

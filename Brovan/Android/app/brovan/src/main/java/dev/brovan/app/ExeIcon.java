@@ -20,9 +20,13 @@ final class ExeIcon {
     private static final int MAX_EDGE = 256;
     private static final int MAX_IMAGE_BYTES = 8 * 1024 * 1024;
     private static final int SECTION_FIELDS = 4;
+    private static final int PAGE_BYTES = 4096;
 
     private final RandomAccessFile file;
     private final long length;
+    private final byte[] page = new byte[PAGE_BYTES];
+    private long pageAt = -1;
+    private int pageLength;
 
     private long[] sections = new long[0];
     private long resourceRoot;
@@ -33,8 +37,12 @@ final class ExeIcon {
     }
 
     static Bitmap extract(File exe) {
-        try (RandomAccessFile handle = new RandomAccessFile(exe, "r")) {
-            return new ExeIcon(handle).best();
+        return extract(exe, -1);
+    }
+
+    static Bitmap extract(File image, int groupId) {
+        try (RandomAccessFile handle = new RandomAccessFile(image, "r")) {
+            return new ExeIcon(handle).best(groupId);
         } catch (IOException | RuntimeException unusable) {
             return null;
         }
@@ -119,7 +127,7 @@ final class ExeIcon {
         return (at + 3) & ~3;
     }
 
-    private Bitmap best() throws IOException {
+    private Bitmap best(int groupId) throws IOException {
         if (!openResources()) {
             return null;
         }
@@ -129,7 +137,8 @@ final class ExeIcon {
             return null;
         }
 
-        long entry = firstLeaf(firstChild(subDirectory(resourceRoot, RT_GROUP_ICON)));
+        long groups = subDirectory(resourceRoot, RT_GROUP_ICON);
+        long entry = firstLeaf(groupId < 0 ? firstChild(groups) : subDirectory(groups, groupId));
         if (entry < 0) {
             return null;
         }
@@ -438,15 +447,23 @@ final class ExeIcon {
 
     private int u16(long at) throws IOException {
         require(at, 2);
-        file.seek(at);
-        return (file.read() & 0xFF) | ((file.read() & 0xFF) << 8);
+        return byteAt(at) | (byteAt(at + 1) << 8);
     }
 
     private long u32(long at) throws IOException {
         require(at, 4);
-        file.seek(at);
-        return (file.read() & 0xFFL) | ((file.read() & 0xFFL) << 8)
-                | ((file.read() & 0xFFL) << 16) | ((file.read() & 0xFFL) << 24);
+        return byteAt(at) | ((long) byteAt(at + 1) << 8) | ((long) byteAt(at + 2) << 16)
+                | ((long) byteAt(at + 3) << 24);
+    }
+
+    private int byteAt(long at) throws IOException {
+        if (at < pageAt || at >= pageAt + pageLength) {
+            pageAt = at & ~(long) (PAGE_BYTES - 1);
+            pageLength = (int) Math.min(PAGE_BYTES, length - pageAt);
+            file.seek(pageAt);
+            file.readFully(page, 0, pageLength);
+        }
+        return page[(int) (at - pageAt)] & 0xFF;
     }
 
     private void require(long at, int count) throws IOException {

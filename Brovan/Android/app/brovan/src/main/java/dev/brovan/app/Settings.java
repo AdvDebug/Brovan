@@ -135,7 +135,7 @@ final class Settings {
     }
 
     static String formatDpi(Context context, int dpi) {
-        return context.getString(R.string.display_scale_value, dpi * 100 / BrovanSurfaceView.BASE_DPI, dpi);
+        return context.getString(R.string.display_scale_value, dpi * 100 / BrovanSurfaceView.BASE_DPI);
     }
 
     static String[] displayScaleLabels(Context context) {
@@ -205,7 +205,7 @@ final class Settings {
     }
 
     int libraryStyle() {
-        return preferences.getInt(KEY_LIBRARY_STYLE, 0);
+        return preferences.getInt(KEY_LIBRARY_STYLE, ProgramAdapter.Style.LIST.saved());
     }
 
     void setLibraryStyle(int value) {

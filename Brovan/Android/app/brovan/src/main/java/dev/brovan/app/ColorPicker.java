@@ -9,6 +9,7 @@ import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.slider.Slider;
 
 final class ColorPicker {
@@ -27,6 +28,11 @@ final class ColorPicker {
     }
 
     static void show(Context context, int titleId, int current, Palette palette, Choice choice) {
+        show(context, titleId, current, palette, choice, 0, null);
+    }
+
+    static void show(Context context, int titleId, int current, Palette palette, Choice choice,
+                     int extraId, Runnable extra) {
         float[] hsv = new float[3];
         Color.colorToHSV(0xFF000000 | current, hsv);
 
@@ -62,12 +68,17 @@ final class ColorPicker {
             brightness.setValue(snap(brightness, preset[2] * 100f));
         }), 1);
 
-        Theming.dialog(context, palette)
+        MaterialAlertDialogBuilder builder = Theming.dialog(context, palette)
                 .setTitle(titleId)
                 .setView(root)
                 .setPositiveButton(android.R.string.ok, (dialog, which) -> choice.onChosen(chosen[0]))
-                .setNegativeButton(android.R.string.cancel, null)
-                .show();
+                .setNegativeButton(android.R.string.cancel, null);
+
+        if (extra != null) {
+            builder.setNeutralButton(extraId, (dialog, which) -> extra.run());
+        }
+
+        builder.show();
     }
 
     static void swatch(View view, int rgb) {

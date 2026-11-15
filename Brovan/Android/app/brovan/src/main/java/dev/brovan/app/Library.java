@@ -608,7 +608,40 @@ final class Library {
             }
         }
 
-        return chosen != null ? chosen : directory.getName();
+        return chosen != null ? chosen : readableFolderName(directory.getName());
+    }
+
+    // Release folders use dots or underscores for spaces and end in a version, as in Name.Of.Game.v1.0.5.
+    static String readableFolderName(String folder) {
+        if (folder.indexOf(' ') >= 0) {
+            return folder;
+        }
+
+        String[] words = folder.split("[._]+");
+        if (words.length < 2) {
+            return folder;
+        }
+
+        int end = words.length;
+        for (int i = words.length - 1; i > 0; i--) {
+            if (words[i].matches("[vV][0-9]+")) {
+                end = i;
+                break;
+            }
+        }
+
+        StringBuilder name = new StringBuilder();
+        for (int i = 0; i < end; i++) {
+            if (words[i].isEmpty()) {
+                continue;
+            }
+            if (name.length() > 0) {
+                name.append(' ');
+            }
+            name.append(words[i]);
+        }
+
+        return name.length() > 0 ? name.toString() : folder;
     }
 
     private static boolean related(String key, String other) {

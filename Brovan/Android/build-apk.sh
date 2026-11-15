@@ -52,6 +52,13 @@ CMAKE="${CMAKE:-}"
 [ -x "${CMAKE:-}" ] || CMAKE="$(command -v cmake || true)"
 
 CONFIG="${CONFIG:-Release}"
+# debug keeps run-as working. CI ships release, signed by BROVAN_KEYSTORE when set.
+APK_BUILD_TYPE="${BROVAN_APK_BUILD_TYPE:-debug}"
+case "$APK_BUILD_TYPE" in
+    debug) GRADLE_TASK=assembleDebug ;;
+    release) GRADLE_TASK=assembleRelease ;;
+    *) echo "BROVAN_APK_BUILD_TYPE must be debug or release, not $APK_BUILD_TYPE" >&2; exit 1 ;;
+esac
 API_LEVEL="${API_LEVEL:-26}"
 PUBLISH_DIR="${BROVAN_PUBLISH_DIR:-/tmp/brovan-android-publish}"
 APK_OUTPUT="${BROVAN_APK_OUTPUT:-$REPO_ROOT/artifacts/android/brovan-arm64-v8a.apk}"
@@ -190,18 +197,18 @@ GRADLE_LOG="$(mktemp)"
 trap 'rm -f "$GRADLE_LOG"' EXIT
 
 gradle_status=0
-"$GRADLE" -p "$GRADLE_PROJECT" assembleDebug --no-daemon 2>&1 | tee "$GRADLE_LOG" || gradle_status=$?
+"$GRADLE" -p "$GRADLE_PROJECT" "$GRADLE_TASK" --no-daemon 2>&1 | tee "$GRADLE_LOG" || gradle_status=$?
 
 if [ "$gradle_status" -ne 0 ]; then
     grep -qE 'DexArchiveMergerException|is defined multiple times' "$GRADLE_LOG" || exit "$gradle_status"
 
     echo "    stale dex archive; dropping it and assembling again"
     rm -rf "$GRADLE_PROJECT"/*/build/intermediates/project_dex_archive "$GRADLE_PROJECT"/*/build/intermediates/dex
-    "$GRADLE" -p "$GRADLE_PROJECT" assembleDebug --no-daemon
+    "$GRADLE" -p "$GRADLE_PROJECT" "$GRADLE_TASK" --no-daemon
 fi
 
 echo "==> [5/5] Collecting the APK"
-BUILT_APK="$(find "$GRADLE_PROJECT" -path '*/outputs/apk/debug/*.apk' -print | head -1)"
+BUILT_APK="$(find "$GRADLE_PROJECT" -path "*/outputs/apk/$APK_BUILD_TYPE/*.apk" -print | head -1)"
 [ -n "$BUILT_APK" ] || { echo "gradle produced no APK under $GRADLE_PROJECT" >&2; exit 1; }
 mkdir -p "$(dirname "$APK_OUTPUT")"
 cp "$BUILT_APK" "$APK_OUTPUT"

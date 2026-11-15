@@ -5,7 +5,9 @@ import org.json.JSONObject;
 
 import java.io.IOException;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Properties;
 
 import dev.brovan.BrovanSurfaceView;
@@ -38,6 +40,16 @@ final class ProgramSettings {
 
     void setControlScheme(int value) throws IOException {
         write("controls", Integer.toString(value));
+    }
+
+    void setCustomLayout(String json) throws IOException {
+        String scheme = Integer.toString(ControlOverlay.Scheme.CUSTOM.ordinal());
+        Map<String, String> changes = new HashMap<>();
+        changes.put("layout", json);
+        changes.put("controls", scheme);
+        library.update(id, changes);
+        values.setProperty("layout", json);
+        values.setProperty("controls", scheme);
     }
 
     int pointerMode() {

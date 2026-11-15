@@ -182,11 +182,21 @@ final class Theming {
 
     static MaterialAlertDialogBuilder rowDialog(View value) {
         MaterialAlertDialogBuilder builder = dialog(value.getContext());
-        View label = ((ViewGroup) value.getParent()).getChildAt(0);
-        if (label instanceof TextView && label != value) {
-            builder.setTitle(((TextView) label).getText());
+        ViewGroup row = (ViewGroup) value.getParent();
+        View label = row.getChildAt(0);
+        if (!(label instanceof TextView) || label == value) {
+            return builder;
         }
-        return builder;
+
+        View note = row.getChildAt(row.getChildCount() - 1);
+        if (!(note instanceof TextView) || note == value || note.getVisibility() != View.GONE) {
+            return builder.setTitle(((TextView) label).getText());
+        }
+
+        View title = LayoutInflater.from(value.getContext()).inflate(R.layout.dialog_row_title, null, false);
+        ((TextView) title.findViewById(R.id.row_title)).setText(((TextView) label).getText());
+        ((TextView) title.findViewById(R.id.row_note)).setText(((TextView) note).getText());
+        return builder.setCustomTitle(title);
     }
 
     static MaterialAlertDialogBuilder dialog(Context context, Palette palette) {
@@ -195,7 +205,7 @@ final class Theming {
         if (!palette.sameAs(Palette.defaults())) {
             GradientDrawable surface = new GradientDrawable();
             surface.setShape(GradientDrawable.RECTANGLE);
-            surface.setColor(palette.get(Palette.Role.SURFACE));
+            surface.setColor(palette.get(Palette.Role.SURFACE_VARIANT));
             surface.setCornerRadius(context.getResources().getDisplayMetrics().density * 24f);
             builder.setBackground(surface);
         }
@@ -257,7 +267,7 @@ final class Theming {
         if (view instanceof AppBarLayout) {
             AppBarLayout bar = (AppBarLayout) view;
             bar.setLiftOnScroll(false);
-            bar.setBackground(new ColorDrawable(to.get(Palette.Role.SURFACE)));
+            bar.setBackground(new ColorDrawable(to.get(Palette.Role.BACKGROUND)));
             bar.setStatusBarForeground(null);
         }
 

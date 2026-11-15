@@ -2,7 +2,7 @@ package dev.brovan.input;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Paint;
+import android.graphics.RectF;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -12,16 +12,13 @@ import dev.brovan.BrovanNative;
  * Relative pointer control. Games that hide the cursor and read movement deltas cannot use absolute
  * touch positions, so this accumulates a virtual cursor and reports it as ordinary mouse motion.
  */
-public class TouchpadView extends View {
+public class TouchpadView extends ControlView {
 
     private static final float SPEED = 1.6f;
     private static final int TAP_SLOP = 40;
     private static final int TAP_TIMEOUT_MS = 400;
 
-    private final Paint hintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-    private int strokeColor = ControlItem.DEFAULT_COLOR;
-    private float opacity = 1f;
+    private final RectF bounds = new RectF();
 
     private float cursorX;
     private float cursorY;
@@ -33,22 +30,8 @@ public class TouchpadView extends View {
     private long downAt;
     private int pointerId = MotionEvent.INVALID_POINTER_ID;
 
-    public TouchpadView(Context context) {
-        super(context);
-        hintPaint.setStyle(Paint.Style.STROKE);
-        hintPaint.setStrokeWidth(2f);
-        applyStyle();
-    }
-
-    public void setStyle(int stroke, float opacity) {
-        strokeColor = stroke;
-        this.opacity = opacity;
-        applyStyle();
-        invalidate();
-    }
-
-    private void applyStyle() {
-        hintPaint.setColor(ControlItem.shade(strokeColor, 40, opacity));
+    public TouchpadView(Context context, ControlPainter painter) {
+        super(context, painter);
     }
 
     @Override
@@ -71,7 +54,10 @@ public class TouchpadView extends View {
 
     @Override
     protected void onDraw(Canvas canvas) {
-        canvas.drawRoundRect(4f, 4f, getWidth() - 4f, getHeight() - 4f, 18f, 18f, hintPaint);
+        float inset = painter.inset();
+        bounds.set(inset, inset, getWidth() - inset, getHeight() - inset);
+        painter.body(canvas, painter.pad(bounds), false, true);
+        painter.dots(canvas, bounds);
     }
 
     @Override

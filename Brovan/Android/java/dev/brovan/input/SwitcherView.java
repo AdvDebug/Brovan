@@ -2,20 +2,15 @@ package dev.brovan.input;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.LinearGradient;
-import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
-import android.graphics.Shader;
-import android.graphics.Typeface;
 import android.view.MotionEvent;
-import android.view.View;
 
 /**
  * Steps a selection one notch at a time. Tapping an end steps once and holding it repeats; sweeping a
  * finger along the control runs through several. What a step means is the overlay's business.
  */
-public class SwitcherView extends View {
+public class SwitcherView extends ControlView {
 
     public interface Listener {
         /** Direction is +1 or -1. Slot is the slot now selected, or -1 when the control keeps no slots. */
@@ -23,34 +18,16 @@ public class SwitcherView extends View {
     }
 
     private static final float END_FRACTION = 0.32f;
-    private static final float RING_DP = 1.8f;
-    private static final float DROP_DP = 3f;
-    private static final float CHEVRON_DP = 2.4f;
     private static final float STEP_DP = 26f;
     private static final long REPEAT_FIRST_MS = 360;
     private static final long REPEAT_MS = 140;
 
-    private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint dividerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint litPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint dropPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint chevronPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint glyphPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path chevron = new Path();
     private final RectF bounds = new RectF();
     private final RectF endBounds = new RectF();
     private final RectF glyphBounds = new RectF();
 
-    private final float ringWidth;
-    private final float drop;
     private final float stepDistance;
-
-    private int fillColor = ControlItem.DEFAULT_COLOR;
-    private int strokeColor = ControlItem.DEFAULT_COLOR;
-    private int labelColor = ControlItem.DEFAULT_COLOR;
-    private float opacity = 1f;
 
     private Listener listener;
     private int slots;
@@ -70,67 +47,9 @@ public class SwitcherView extends View {
         }
     };
 
-    public SwitcherView(Context context) {
-        super(context);
-
-        float density = getResources().getDisplayMetrics().density;
-        ringWidth = RING_DP * density;
-        drop = DROP_DP * density;
-        stepDistance = STEP_DP * density;
-
-        ringPaint.setStyle(Paint.Style.STROKE);
-        ringPaint.setStrokeWidth(ringWidth);
-        dividerPaint.setStyle(Paint.Style.STROKE);
-        dividerPaint.setStrokeWidth(density);
-        chevronPaint.setStyle(Paint.Style.STROKE);
-        chevronPaint.setStrokeWidth(CHEVRON_DP * density);
-        chevronPaint.setStrokeCap(Paint.Cap.ROUND);
-        chevronPaint.setStrokeJoin(Paint.Join.ROUND);
-        glyphPaint.setStyle(Paint.Style.STROKE);
-        glyphPaint.setStrokeWidth(CHEVRON_DP * density * 0.8f);
-        glyphPaint.setStrokeCap(Paint.Cap.ROUND);
-        textPaint.setTextAlign(Paint.Align.CENTER);
-        textPaint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        textPaint.setShadowLayer(2f * density, 0f, density, 0x99000000);
-        applyStyle();
-    }
-
-    public void setStyle(int fill, int stroke, int text, float opacity) {
-        fillColor = fill;
-        strokeColor = stroke;
-        labelColor = text;
-        this.opacity = opacity;
-        applyStyle();
-        invalidate();
-    }
-
-    private void applyStyle() {
-        ringPaint.setColor(ControlItem.shade(strokeColor, 150, opacity));
-        dividerPaint.setColor(ControlItem.shade(strokeColor, 60, opacity));
-        litPaint.setColor(ControlItem.shade(fillColor, 90, opacity));
-        dropPaint.setColor(ControlItem.shade(0x000000, 60, opacity));
-        textPaint.setColor(ControlItem.shade(labelColor, 235, opacity));
-        glyphPaint.setColor(ControlItem.shade(labelColor, 175, opacity));
-        buildFill();
-    }
-
-    private void buildFill() {
-        if (getWidth() <= 0 || getHeight() <= 0) {
-            fillPaint.setShader(null);
-            fillPaint.setColor(ControlItem.shade(fillColor, 70, opacity));
-            return;
-        }
-
-        fillPaint.setShader(new LinearGradient(0f, 0f, horizontal ? getWidth() : 0f,
-                horizontal ? 0f : getHeight(),
-                ControlItem.shade(fillColor, 95, opacity), ControlItem.shade(fillColor, 45, opacity),
-                Shader.TileMode.CLAMP));
-    }
-
-    @Override
-    protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
-        super.onSizeChanged(width, height, oldWidth, oldHeight);
-        buildFill();
+    public SwitcherView(Context context, ControlPainter painter) {
+        super(context, painter);
+        stepDistance = STEP_DP * getResources().getDisplayMetrics().density;
     }
 
     /** Zero keeps no selection of its own, which is what a control that only turns a wheel wants. */
@@ -142,7 +61,6 @@ public class SwitcherView extends View {
 
     public void setHorizontal(boolean value) {
         horizontal = value;
-        buildFill();
         invalidate();
     }
 
@@ -152,38 +70,30 @@ public class SwitcherView extends View {
 
     @Override
     protected void onDraw(Canvas canvas) {
-        float inset = ringWidth + drop;
-        float corner = (horizontal ? getHeight() : getWidth()) / 2f - inset;
-        if (corner <= 0f) {
+        float inset = painter.inset();
+        if ((horizontal ? getHeight() : getWidth()) / 2f - inset <= 0f) {
             return;
         }
 
         bounds.set(inset, inset, getWidth() - inset, getHeight() - inset);
-
-        canvas.save();
-        canvas.translate(0f, drop * 0.7f);
-        canvas.drawRoundRect(bounds, corner, corner, dropPaint);
-        canvas.restore();
-
-        canvas.drawRoundRect(bounds, corner, corner, fillPaint);
+        Path pill = painter.pill(bounds);
+        painter.body(canvas, pill, false, false);
 
         if (lit != 0) {
             canvas.save();
             canvas.clipRect(endBounds());
-            canvas.drawRoundRect(bounds, corner, corner, litPaint);
+            canvas.drawPath(pill, painter.lit());
             canvas.restore();
         }
 
-        canvas.drawRoundRect(bounds, corner, corner, ringPaint);
         drawDividers(canvas);
 
         float across = horizontal ? bounds.height() : bounds.width();
         drawEnds(canvas, across * 0.18f);
 
         if (slots > 0) {
-            textPaint.setTextSize(across * 0.40f);
-            float baseline = bounds.centerY() - (textPaint.descent() + textPaint.ascent()) / 2f;
-            canvas.drawText(Integer.toString(index + 1), bounds.centerX(), baseline, textPaint);
+            painter.label(canvas, Integer.toString(index + 1), bounds.centerX(), bounds.centerY(),
+                    across * 0.40f, false);
         } else {
             drawWheel(canvas, bounds.centerX(), bounds.centerY(), across * 0.20f);
         }
@@ -205,15 +115,13 @@ public class SwitcherView extends View {
 
     private void drawChevron(Canvas canvas, float centreX, float centreY, float rotation, float half,
                              boolean bright) {
-        chevronPaint.setColor(ControlItem.shade(labelColor, bright ? 255 : 170, opacity));
-
         canvas.save();
         canvas.rotate(rotation, centreX, centreY);
         chevron.reset();
         chevron.moveTo(centreX - half, centreY + half * 0.5f);
         chevron.lineTo(centreX, centreY - half * 0.5f);
         chevron.lineTo(centreX + half, centreY + half * 0.5f);
-        canvas.drawPath(chevron, chevronPaint);
+        canvas.drawPath(chevron, painter.line(bright));
         canvas.restore();
     }
 
@@ -246,21 +154,21 @@ public class SwitcherView extends View {
         if (horizontal) {
             float top = bounds.top + bounds.height() * 0.24f;
             float bottom = bounds.bottom - bounds.height() * 0.24f;
-            canvas.drawLine(bounds.left + end, top, bounds.left + end, bottom, dividerPaint);
-            canvas.drawLine(bounds.right - end, top, bounds.right - end, bottom, dividerPaint);
+            canvas.drawLine(bounds.left + end, top, bounds.left + end, bottom, painter.divider());
+            canvas.drawLine(bounds.right - end, top, bounds.right - end, bottom, painter.divider());
         } else {
             float left = bounds.left + bounds.width() * 0.24f;
             float right = bounds.right - bounds.width() * 0.24f;
-            canvas.drawLine(left, bounds.top + end, right, bounds.top + end, dividerPaint);
-            canvas.drawLine(left, bounds.bottom - end, right, bounds.bottom - end, dividerPaint);
+            canvas.drawLine(left, bounds.top + end, right, bounds.top + end, painter.divider());
+            canvas.drawLine(left, bounds.bottom - end, right, bounds.bottom - end, painter.divider());
         }
     }
 
     /** A control with no slots of its own still has to say what it does, so it draws the wheel it turns. */
     private void drawWheel(Canvas canvas, float centreX, float centreY, float half) {
         glyphBounds.set(centreX - half * 0.70f, centreY - half, centreX + half * 0.70f, centreY + half);
-        canvas.drawRoundRect(glyphBounds, half * 0.70f, half * 0.70f, glyphPaint);
-        canvas.drawLine(centreX, centreY - half * 0.52f, centreX, centreY - half * 0.10f, glyphPaint);
+        canvas.drawRoundRect(glyphBounds, half * 0.70f, half * 0.70f, painter.line(false));
+        canvas.drawLine(centreX, centreY - half * 0.52f, centreX, centreY - half * 0.10f, painter.line(false));
     }
 
     @Override

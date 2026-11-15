@@ -50,13 +50,28 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    signingConfigs {
+        release {
+            def keystore = System.getenv('BROVAN_KEYSTORE')
+            if (keystore) {
+                storeFile file(keystore)
+                storePassword System.getenv('BROVAN_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('BROVAN_KEY_ALIAS')
+                keyPassword System.getenv('BROVAN_KEY_PASSWORD')
+            }
+        }
+    }
+
     buildTypes {
         debug {
             debuggable true
             jniDebuggable true
         }
         release {
+            // Theming builds widgets by class name through reflection, so R8 must not rename or drop them.
             minifyEnabled false
+            // Without a release key the APK is signed like a debug build, so it installs over one.
+            signingConfig System.getenv('BROVAN_KEYSTORE') ? signingConfigs.release : signingConfigs.debug
         }
     }
 }

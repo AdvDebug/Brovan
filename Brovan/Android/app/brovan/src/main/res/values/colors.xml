@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="background">#FF0D1117</color>
-    <color name="surface">#FF161C24</color>
-    <color name="surface_variant">#FF1E2733</color>
-    <color name="outline">#FF2A3542</color>
-    <color name="accent">#FF7C9CF5</color>
-    <color name="on_accent">#FF0B1020</color>
-    <color name="text_primary">#FFE6EDF3</color>
-    <color name="text_secondary">#FF95A1B2</color>
+    <color name="background">#FF0E0E10</color>
+    <color name="surface">#FF17171A</color>
+    <color name="surface_variant">#FF1F1F23</color>
+    <color name="outline">#FF2A2A2F</color>
+    <color name="accent">#FF3BD6E1</color>
+    <color name="on_accent">#FF031A1C</color>
+    <color name="text_primary">#FFEDEDEF</color>
+    <color name="text_secondary">#FF9A9AA2</color>
 
     <!-- One per marker the emulator prefixes its output with: [!!] [-] [!] [+] [*] [#] [$] [/]. -->
     <color name="log_error">#FFF2707A</color>
@@ -34,6 +34,6 @@
 
     <color name="debug_current">#332F81F7</color>
     <color name="debug_breakpoint">#FFF2707A</color>
-    <color name="debug_value">#FFE6EDF3</color>
+    <color name="debug_value">#FFEDEDEF</color>
     <color name="debug_value_zero">#FF6E7681</color>
 </resources>

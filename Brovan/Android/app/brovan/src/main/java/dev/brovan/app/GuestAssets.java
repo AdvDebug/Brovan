@@ -26,6 +26,10 @@ final class GuestAssets {
     private GuestAssets() {
     }
 
+    static File systemResource(Context context, String name) {
+        return new File(context.getFilesDir(), "VirtualFS/C/Windows/SystemResources/" + name);
+    }
+
     static void deploy(Context context) {
         File files = context.getFilesDir();
         File stamp = new File(files, STAMP);

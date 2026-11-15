@@ -1,60 +1,59 @@
 <?xml version="1.0" encoding="utf-8"?>
-<com.google.android.material.card.MaterialCardView
-    xmlns:android="http://schemas.android.com/apk/res/android"
-    style="@style/Widget.Brovan.Card"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:layout_margin="6dp"
+    android:background="@drawable/bg_row_press"
     android:clickable="true"
-    android:focusable="true">
+    android:focusable="true"
+    android:gravity="center_vertical"
+    android:minHeight="72dp"
+    android:orientation="horizontal"
+    android:paddingStart="16dp"
+    android:paddingTop="8dp"
+    android:paddingEnd="16dp"
+    android:paddingBottom="8dp">
+
+    <FrameLayout
+        android:id="@+id/art"
+        android:layout_width="56dp"
+        android:layout_height="56dp">
+
+        <ImageView
+            android:id="@+id/icon"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@null"
+            android:scaleType="fitCenter" />
+    </FrameLayout>
 
     <LinearLayout
-        android:layout_width="match_parent"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        android:padding="12dp">
+        android:layout_marginStart="16dp"
+        android:layout_weight="1"
+        android:orientation="vertical">
 
-        <FrameLayout
-            android:id="@+id/art"
-            android:layout_width="52dp"
-            android:layout_height="52dp">
-
-            <ImageView
-                android:id="@+id/icon"
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:contentDescription="@null"
-                android:padding="9dp"
-                android:scaleType="fitCenter" />
-        </FrameLayout>
-
-        <LinearLayout
-            android:layout_width="0dp"
+        <TextView
+            android:id="@+id/name"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="14dp"
-            android:layout_weight="1"
-            android:orientation="vertical">
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:fontFamily="sans-serif-medium"
+            android:includeFontPadding="false"
+            android:lineHeight="24sp"
+            android:textColor="@color/text_primary"
+            android:textSize="16sp" />
 
-            <TextView
-                android:id="@+id/name"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:ellipsize="end"
-                android:maxLines="1"
-                android:textColor="@color/text_primary"
-                android:textSize="15sp" />
-
-            <TextView
-                android:id="@+id/detail"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="2dp"
-                android:ellipsize="middle"
-                android:maxLines="1"
-                android:textColor="@color/text_secondary"
-                android:textSize="12sp" />
-        </LinearLayout>
-        <ImageButton android:id="@+id/actions" style="@style/ProgramActions" />
+        <TextView
+            android:id="@+id/detail"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:ellipsize="middle"
+            android:lineHeight="20sp"
+            android:maxLines="1"
+            android:textColor="@color/text_secondary"
+            android:textSize="14sp" />
     </LinearLayout>
-</com.google.android.material.card.MaterialCardView>
+</LinearLayout>

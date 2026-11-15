@@ -60,27 +60,27 @@ public enum VirtualKey {
     F11(0x7A, 0x57, "F11"),
     F12(0x7B, 0x58, "F12"),
 
-    UP(0x26, 0x48, "Up"),
-    DOWN(0x28, 0x50, "Down"),
-    LEFT(0x25, 0x4B, "Left"),
-    RIGHT(0x27, 0x4D, "Right"),
+    UP(0x26, 0x48, "Up", "↑"),
+    DOWN(0x28, 0x50, "Down", "↓"),
+    LEFT(0x25, 0x4B, "Left", "←"),
+    RIGHT(0x27, 0x4D, "Right", "→"),
 
     SPACE(0x20, 0x39, "Space"),
-    ENTER(0x0D, 0x1C, "Enter"),
+    ENTER(0x0D, 0x1C, "Enter", "⏎"),
     ESCAPE(0x1B, 0x01, "Esc"),
-    TAB(0x09, 0x0F, "Tab"),
-    BACKSPACE(0x08, 0x0E, "Backspace"),
-    SHIFT(0xA0, 0x2A, "Shift"),
+    TAB(0x09, 0x0F, "Tab", "⇥"),
+    BACKSPACE(0x08, 0x0E, "Backspace", "⌫"),
+    SHIFT(0xA0, 0x2A, "Shift", "⇧"),
     CONTROL(0xA2, 0x1D, "Ctrl"),
     ALT(0x12, 0x38, "Alt"),
     CAPS_LOCK(0x14, 0x3A, "Caps"),
 
-    INSERT(0x2D, 0x52, "Insert"),
-    DELETE(0x2E, 0x53, "Delete"),
+    INSERT(0x2D, 0x52, "Insert", "Ins"),
+    DELETE(0x2E, 0x53, "Delete", "Del"),
     HOME(0x24, 0x47, "Home"),
     END(0x23, 0x4F, "End"),
-    PAGE_UP(0x21, 0x49, "Page up"),
-    PAGE_DOWN(0x22, 0x51, "Page down"),
+    PAGE_UP(0x21, 0x49, "Page up", "PgUp"),
+    PAGE_DOWN(0x22, 0x51, "Page down", "PgDn"),
 
     MINUS(0xBD, 0x0C, "-"),
     EQUALS(0xBB, 0x0D, "="),
@@ -97,11 +97,17 @@ public enum VirtualKey {
     private final int code;
     private final int scanCode;
     private final String label;
+    private final String shortLabel;
 
     VirtualKey(int code, int scanCode, String label) {
+        this(code, scanCode, label, label);
+    }
+
+    VirtualKey(int code, int scanCode, String label, String shortLabel) {
         this.code = code;
         this.scanCode = scanCode;
         this.label = label;
+        this.shortLabel = shortLabel;
     }
 
     public int code() {
@@ -114,6 +120,10 @@ public enum VirtualKey {
 
     public String label() {
         return label;
+    }
+
+    public String shortLabel() {
+        return shortLabel;
     }
 
     public static VirtualKey byName(String name, VirtualKey fallback) {

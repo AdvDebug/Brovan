@@ -40,26 +40,26 @@ public final class ControlLayout {
         switch (scheme) {
             case WASD:
                 layout.add(ControlItem.stick(ControlItem.Kind.JOYSTICK,
-                        VirtualKey.W, VirtualKey.S, VirtualKey.A, VirtualKey.D, 0.13f, 0.68f, 180));
+                        VirtualKey.W, VirtualKey.S, VirtualKey.A, VirtualKey.D, 180).at(false, 119, true, 132));
                 addActions(layout);
                 break;
 
             case ARROWS:
                 layout.add(ControlItem.stick(ControlItem.Kind.JOYSTICK,
-                        VirtualKey.UP, VirtualKey.DOWN, VirtualKey.LEFT, VirtualKey.RIGHT, 0.13f, 0.68f, 180));
+                        VirtualKey.UP, VirtualKey.DOWN, VirtualKey.LEFT, VirtualKey.RIGHT, 180).at(false, 119, true, 132));
                 addActions(layout);
                 break;
 
             case DPAD:
                 layout.add(ControlItem.stick(ControlItem.Kind.DPAD,
-                        VirtualKey.UP, VirtualKey.DOWN, VirtualKey.LEFT, VirtualKey.RIGHT, 0.13f, 0.68f, 190));
+                        VirtualKey.UP, VirtualKey.DOWN, VirtualKey.LEFT, VirtualKey.RIGHT, 190).at(false, 119, true, 132));
                 addActions(layout);
                 break;
 
             case TOUCHPAD:
-                layout.add(ControlItem.touchpad(0.82f, 0.70f, 260));
-                layout.add(ControlItem.mouse(BrovanNative.BUTTON_LEFT, "L", 0.62f, 0.84f, 66));
-                layout.add(ControlItem.mouse(BrovanNative.BUTTON_RIGHT, "R", 0.62f, 0.60f, 66));
+                layout.add(ControlItem.touchpad(260).at(true, 165, true, 124));
+                layout.add(ControlItem.mouse(BrovanNative.BUTTON_LEFT, "L", 66).at(true, 348, true, 66));
+                layout.add(ControlItem.mouse(BrovanNative.BUTTON_RIGHT, "R", 66).at(true, 348, true, 165));
                 break;
 
             case NONE:
@@ -71,10 +71,10 @@ public final class ControlLayout {
     }
 
     private static void addActions(ControlLayout layout) {
-        layout.add(ControlItem.button(VirtualKey.SPACE, "A", 0.88f, 0.86f, 70));
-        layout.add(ControlItem.button(VirtualKey.ENTER, "B", 0.94f, 0.66f, 70));
-        layout.add(ControlItem.button(VirtualKey.SHIFT, "X", 0.82f, 0.66f, 70));
-        layout.add(ControlItem.button(VirtualKey.ESCAPE, "Esc", 0.88f, 0.46f, 70));
+        layout.add(ControlItem.button(VirtualKey.SPACE, 70).at(true, 110, true, 58));
+        layout.add(ControlItem.button(VirtualKey.ENTER, 70).at(true, 55, true, 140));
+        layout.add(ControlItem.button(VirtualKey.SHIFT, 70).at(true, 165, true, 140));
+        layout.add(ControlItem.button(VirtualKey.ESCAPE, 70).at(true, 110, true, 222));
     }
 
     public String toJson() {

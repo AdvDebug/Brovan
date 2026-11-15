@@ -2,23 +2,42 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:background="?attr/selectableItemBackground"
+    android:background="@drawable/bg_row_press"
     android:baselineAligned="false"
     android:clickable="true"
     android:focusable="true"
     android:gravity="center_vertical"
     android:minHeight="60dp"
     android:orientation="horizontal"
-    android:paddingStart="20dp"
-    android:paddingTop="10dp"
-    android:paddingEnd="20dp"
-    android:paddingBottom="10dp">
+    android:paddingStart="16dp"
+    android:paddingTop="8dp"
+    android:paddingEnd="16dp"
+    android:paddingBottom="8dp">
 
-    <ImageView
-        android:id="@+id/icon"
-        android:layout_width="24dp"
-        android:layout_height="24dp"
-        android:contentDescription="@null" />
+    <FrameLayout
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="@drawable/bg_icon_tile">
+
+        <ImageView
+            android:id="@+id/icon"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@null"
+            android:padding="8dp"
+            android:tint="@color/text_secondary" />
+
+        <TextView
+            android:id="@+id/kind"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:fontFamily="sans-serif-medium"
+            android:gravity="center"
+            android:maxLines="1"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp"
+            android:visibility="gone" />
+    </FrameLayout>
 
     <LinearLayout
         android:layout_width="0dp"
@@ -34,15 +53,16 @@
             android:ellipsize="middle"
             android:maxLines="1"
             android:textColor="@color/text_primary"
-            android:textSize="15sp" />
+            android:textSize="16sp" />
 
         <TextView
             android:id="@+id/detail"
+            android:fontFeatureSettings="tnum"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="2dp"
             android:maxLines="1"
             android:textColor="@color/text_secondary"
-            android:textSize="12sp" />
+            android:textSize="14sp" />
     </LinearLayout>
 </LinearLayout>

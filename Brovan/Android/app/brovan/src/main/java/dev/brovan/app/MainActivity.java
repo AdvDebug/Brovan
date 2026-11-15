@@ -25,7 +25,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.animation.PathInterpolator;
-import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.GridLayout;
@@ -38,6 +37,7 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.ContextCompat;
+import androidx.core.graphics.ColorUtils;
 import androidx.interpolator.view.animation.FastOutSlowInInterpolator;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.LinearLayoutManager;
@@ -56,8 +56,6 @@ import com.google.android.material.navigation.NavigationBarView;
 import com.google.android.material.progressindicator.CircularProgressIndicator;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.android.material.snackbar.Snackbar;
-import com.google.android.material.textfield.MaterialAutoCompleteTextView;
-import com.google.android.material.textfield.TextInputLayout;
 
 import java.io.File;
 import java.io.IOException;
@@ -112,6 +110,11 @@ public class MainActivity extends AppCompatActivity {
     private TextView runtimesStatus;
     private MaterialButton runtimesAction;
     private TextView dxvkStatus;
+    private List<String> dxvkTags = Collections.emptyList();
+    private View windowsHint;
+    private View windowsOpenPage;
+    private MaterialButton windowsChoose;
+    private View runtimesNotice;
     private MaterialButton dxvkAction;
     private FileBrowser files;
     private ViewPager2 pages;
@@ -162,16 +165,14 @@ public class MainActivity extends AppCompatActivity {
         }
         paintNavigationBar();
 
-        Menu tabs = navigation.getMenu();
-        Palette defaults = Palette.defaults();
-        tabPages = new View[tabs.size()];
-        for (int i = 0; i < tabPages.length; i++) {
-            tabPages[i] = createTab(tabs.getItem(i).getItemId());
-            Theming.apply(tabPages[i], defaults, palette);
+        tabPages = new View[navigation.getMenu().size()];
+        if (savedInstanceState == null) {
+            tabPage(tabIndex(R.id.nav_library));
+        } else {
+            createAllTabs();
         }
 
         pages = findViewById(R.id.pages);
-        pages.setOffscreenPageLimit(tabPages.length - 1);
         pages.setAdapter(new TabPages());
         pages.registerOnPageChangeCallback(new ViewPager2.OnPageChangeCallback() {
             @Override
@@ -190,6 +191,13 @@ public class MainActivity extends AppCompatActivity {
                 ? R.id.nav_library
                 : savedInstanceState.getInt(STATE_SCREEN, R.id.nav_library));
 
+        // A fresh start builds the other tabs after the first frame, so they do not delay it.
+        if (savedInstanceState == null) {
+            afterFirstFrame(this::createAllTabs);
+        } else {
+            pages.setOffscreenPageLimit(tabPages.length - 1);
+        }
+
         if (savedInstanceState == null && !WindowsInstall.filesPresent(this) && !settings.setupDismissed()) {
             startActivity(new Intent(this, SetupActivity.class));
         }
@@ -199,7 +207,9 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         refresh();
-        files.refresh();
+        if (files != null) {
+            files.refresh();
+        }
         refreshRuntimes();
     }
 
@@ -211,9 +221,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void showRuntimeBadge(boolean windowsPresent) {
         if (windowsPresent) {
-            navigation.removeBadge(R.id.nav_windows);
+            navigation.removeBadge(R.id.nav_settings);
         } else {
-            navigation.getOrCreateBadge(R.id.nav_windows).setBackgroundColor(getColor(R.color.log_warn));
+            navigation.getOrCreateBadge(R.id.nav_settings).setBackgroundColor(palette.get(Palette.Role.WARNING));
         }
     }
 
@@ -246,12 +256,45 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private View createTab(int id) {
-        if (id == R.id.nav_windows) {
-            return createWindows();
+    private View tabPage(int index) {
+        if (tabPages[index] == null) {
+            tabPages[index] = createTab(navigation.getMenu().getItem(index).getItemId());
+            Theming.apply(tabPages[index], Palette.defaults(), palette);
         }
+        return tabPages[index];
+    }
+
+    private void createAllTabs() {
+        if (isDestroyed()) {
+            return;
+        }
+        boolean settingsBuilt = settingsRoot != null;
+        for (int i = 0; i < tabPages.length; i++) {
+            tabPage(i);
+        }
+        if (!settingsBuilt) {
+            refreshRuntimes();
+        }
+        if (pages != null) {
+            pages.setOffscreenPageLimit(tabPages.length - 1);
+        }
+    }
+
+    private void afterFirstFrame(Runnable task) {
+        View decor = getWindow().getDecorView();
+        decor.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override
+            public boolean onPreDraw() {
+                decor.getViewTreeObserver().removeOnPreDrawListener(this);
+                decor.post(task);
+                return true;
+            }
+        });
+    }
+
+    private View createTab(int id) {
         if (id == R.id.nav_files) {
-            files = new FileBrowser(this, worker);
+            files = new FileBrowser(this, worker, palette);
             return files.create(content);
         }
         if (id == R.id.nav_settings) {
@@ -277,7 +320,7 @@ public class MainActivity extends AppCompatActivity {
         @NonNull
         @Override
         public RecyclerView.ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
-            View page = tabPages[viewType];
+            View page = tabPage(viewType);
             page.setLayoutParams(new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT));
             return new RecyclerView.ViewHolder(page) {
@@ -299,7 +342,7 @@ public class MainActivity extends AppCompatActivity {
         int tab = item.getItemId();
         if (tab == R.id.nav_files) {
             files.refresh();
-        } else if (tab == R.id.nav_windows) {
+        } else if (tab == R.id.nav_settings) {
             refreshRuntimes();
         }
     }
@@ -307,6 +350,7 @@ public class MainActivity extends AppCompatActivity {
     private void showTitle() {
         int screen = currentScreen();
         boolean nested = tabOf(screen) != screen;
+        toolbar.setVisibility(nested ? View.VISIBLE : View.GONE);
         if (nested != (toolbar.getNavigationIcon() != null)) {
             toolbar.setNavigationIcon(nested ? ContextCompat.getDrawable(this, R.drawable.ic_back) : null);
         }
@@ -335,8 +379,8 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        View leaving = tabPages[from];
-        View arriving = tabPages[index];
+        View leaving = tabPage(from);
+        View arriving = tabPage(index);
         float width = pages.getWidth();
         float direction = index > from ? 1f : -1f;
         float arrivingStart = direction * width - (index - from) * width;
@@ -362,7 +406,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void showPagesBetween(int from, int to, int visibility) {
         for (int i = Math.min(from, to) + 1; i < Math.max(from, to); i++) {
-            tabPages[i].setVisibility(visibility);
+            tabPage(i).setVisibility(visibility);
         }
     }
 
@@ -501,8 +545,14 @@ public class MainActivity extends AppCompatActivity {
 
     private void refreshRuntimes() {
         boolean windows = WindowsInstall.filesPresent(this);
-        showStatus(windowsStatus, windows);
         showRuntimeBadge(windows);
+        if (settingsRoot == null) {
+            return;
+        }
+        showStatus(windowsStatus, windows);
+        windowsHint.setVisibility(windows ? View.GONE : View.VISIBLE);
+        windowsOpenPage.setVisibility(windows ? View.GONE : View.VISIBLE);
+        windowsChoose.setVisibility(windows ? View.GONE : View.VISIBLE);
         showRuntimeState(runtimesStatus, runtimesAction);
         showDxvkState(dxvkStatus, dxvkAction);
     }
@@ -529,12 +579,14 @@ public class MainActivity extends AppCompatActivity {
         emptyTitle = view.findViewById(R.id.empty_title);
         emptyBody = view.findViewById(R.id.empty_body);
         progress = view.findViewById(R.id.progress);
-        libraryCount = view.findViewById(R.id.library_count);
+        libraryCount = view.findViewById(R.id.list_count);
         libraryLayout = view.findViewById(R.id.library_layout);
+        libraryLayout.setVisibility(View.VISIBLE);
         libraryLayout.setOnClickListener(button -> showStyles());
 
         programList = view.findViewById(R.id.apps);
-        adapter = new ProgramAdapter(new File(getCacheDir(), "icons"), worker, new ProgramAdapter.Listener() {
+        adapter = new ProgramAdapter(new File(getCacheDir(), "icons"),
+                GuestAssets.systemResource(this, "imageres.dll.mun"), palette, new ProgramAdapter.Listener() {
             @Override
             public void onLaunch(Program program) {
                 launch(program);
@@ -546,16 +598,19 @@ public class MainActivity extends AppCompatActivity {
             }
         });
         programList.setAdapter(adapter);
+        RowDivider.showHeaderEdge(programList, view.findViewById(R.id.header_edge));
+        programList.addItemDecoration(new RowDivider(palette,
+                () -> adapter.style().rows() ? 16 + adapter.style().artDp() + 16 : -1));
         applyLibraryStyle(ProgramAdapter.Style.of(settings.libraryStyle()));
 
-        view.findViewById(R.id.add).setOnClickListener(this::showAddOptions);
+        view.findViewById(R.id.list_add).setOnClickListener(this::showAddOptions);
         bindSearch(view);
         return view;
     }
 
     private void bindSearch(View view) {
-        EditText search = view.findViewById(R.id.search);
-        View clear = view.findViewById(R.id.search_clear);
+        EditText search = view.findViewById(R.id.list_search);
+        View clear = view.findViewById(R.id.list_search_clear);
 
         search.addTextChangedListener(new TextWatcher() {
             @Override
@@ -590,7 +645,7 @@ public class MainActivity extends AppCompatActivity {
             int index = i;
             View option = styleOption(styles[i]);
             option.setOnClickListener(view -> {
-                settings.setLibraryStyle(index);
+                settings.setLibraryStyle(styles[index].saved());
                 applyLibraryStyle(styles[index]);
                 TextView label = subPage == null ? null : subPage.findViewById(R.id.library_style);
                 if (label != null) {
@@ -667,7 +722,7 @@ public class MainActivity extends AppCompatActivity {
             snap = null;
         }
 
-        programList.clearOnScrollListeners();
+        programList.removeOnScrollListener(centreFocus);
 
         if (style == ProgramAdapter.Style.CAROUSEL) {
             snap = new PagerSnapHelper();
@@ -692,7 +747,8 @@ public class MainActivity extends AppCompatActivity {
         programList.setLayoutParams(bounds);
 
         if (!style.horizontal()) {
-            programList.setPadding(dp(12), dp(4), dp(12), dp(16));
+            int side = style.rows() ? 0 : dp(12);
+            programList.setPadding(side, dp(4), side, dp(16));
             return;
         }
 
@@ -704,15 +760,17 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private View createWindows() {
-        View view = LayoutInflater.from(this).inflate(R.layout.screen_windows, content, false);
-
+    private void bindRuntimes(View view) {
         windowsStatus = view.findViewById(R.id.windows_status);
         MaterialButton install = view.findViewById(R.id.windows_install);
         LinearProgressIndicator bar = view.findViewById(R.id.windows_progress);
         TextView detail = view.findViewById(R.id.windows_progress_text);
         MaterialButton openPage = view.findViewById(R.id.windows_open_page);
         MaterialButton choose = view.findViewById(R.id.windows_choose);
+        windowsHint = view.findViewById(R.id.windows_hint);
+        windowsOpenPage = openPage;
+        windowsChoose = choose;
+        runtimesNotice = view.findViewById(R.id.windows_runtimes_notice);
         runtimesAction = view.findViewById(R.id.windows_runtimes);
         runtimesStatus = view.findViewById(R.id.windows_runtimes_status);
         LinearProgressIndicator runtimesBar = view.findViewById(R.id.windows_runtimes_progress);
@@ -729,9 +787,30 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        choose.setOnClickListener(button -> pick(new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                .addCategory(Intent.CATEGORY_OPENABLE)
-                .setType("*/*"), REQUEST_ISO));
+        choose.setOnClickListener(button -> chooseWindowsMedia());
+        view.findViewById(R.id.windows_row).setOnClickListener(row -> {
+            if (!WindowsInstall.filesPresent(this)) {
+                chooseWindowsMedia();
+                return;
+            }
+            String[] actions = {getString(R.string.windows_replace), getString(R.string.windows_open_page)};
+            Theming.dialog(this).setTitle(R.string.windows_title).setItems(actions, (dialog, index) -> {
+                if (index == 0) {
+                    chooseWindowsMedia();
+                } else {
+                    openPage.performClick();
+                }
+            }).show();
+        });
+        view.findViewById(R.id.windows_runtimes_row).setOnClickListener(row -> {
+            if (!WindowsInstall.runtimesPresent(this)) {
+                runtimesAction.performClick();
+                return;
+            }
+            String[] actions = {getString(R.string.runtime_update)};
+            Theming.dialog(this).setTitle(R.string.windows_runtimes_title)
+                    .setItems(actions, (dialog, index) -> runtimesAction.performClick()).show();
+        });
 
         bindDxvk(view);
 
@@ -786,8 +865,12 @@ public class MainActivity extends AppCompatActivity {
                 }
             });
         });
+    }
 
-        return view;
+    private void chooseWindowsMedia() {
+        pick(new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*"), REQUEST_ISO);
     }
 
     private void startInstall(LinearProgressIndicator bar, TextView detail, int messageId) {
@@ -823,6 +906,8 @@ public class MainActivity extends AppCompatActivity {
         boolean present = WindowsInstall.runtimesPresent(this);
 
         showStatus(status, present);
+        runtimesNotice.setVisibility(present ? View.GONE : View.VISIBLE);
+        action.setVisibility(present ? View.GONE : View.VISIBLE);
         action.setText(present ? R.string.runtime_update : R.string.runtime_install);
         action.setContentDescription(getString(present ? R.string.windows_runtimes_again : R.string.windows_runtimes));
     }
@@ -832,10 +917,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showStatus(TextView chip, boolean present, CharSequence text) {
-        int color = getColor(present ? R.color.log_ok : R.color.log_warn);
         chip.setText(text);
-        chip.setTextColor(color);
-        chip.setCompoundDrawableTintList(ColorStateList.valueOf(color));
+        chip.setTextColor(present ? ColorUtils.setAlphaComponent(palette.get(Palette.Role.TEXT_PRIMARY), 204)
+                : palette.get(Palette.Role.WARNING));
     }
 
     private final RecyclerView.OnScrollListener centreFocus = new RecyclerView.OnScrollListener() {
@@ -1016,9 +1100,10 @@ public class MainActivity extends AppCompatActivity {
         boolean failed = !program.lastFailure().isEmpty();
         SpannableString remove = new SpannableString(getString(R.string.library_remove));
         remove.setSpan(new ForegroundColorSpan(getColor(R.color.log_error)), 0, remove.length(), 0);
+        CharSequence settingsItem = primaryText(getString(R.string.program_settings));
         CharSequence[] actions = failed
-                ? new CharSequence[]{getString(R.string.program_settings), getString(R.string.program_last_run), remove}
-                : new CharSequence[]{getString(R.string.program_settings), remove};
+                ? new CharSequence[]{settingsItem, primaryText(getString(R.string.program_last_run)), remove}
+                : new CharSequence[]{settingsItem, remove};
         Theming.dialog(this)
                 .setTitle(program.name())
                 .setItems(actions, (dialog, index) -> {
@@ -1032,6 +1117,12 @@ public class MainActivity extends AppCompatActivity {
                         confirmRemove(program);
                     }
                 }).show();
+    }
+
+    private CharSequence primaryText(String text) {
+        SpannableString item = new SpannableString(text);
+        item.setSpan(new ForegroundColorSpan(palette.get(Palette.Role.TEXT_PRIMARY)), 0, item.length(), 0);
+        return item;
     }
 
     private void confirmRemove(Program program) {
@@ -1089,6 +1180,7 @@ public class MainActivity extends AppCompatActivity {
         bindSwitch(view, R.id.developer, settings.developerMode(), settings::setDeveloperMode);
         view.findViewById(R.id.nav_theme).setOnClickListener(row -> openSubPage(R.id.nav_theme, true));
         view.findViewById(R.id.nav_about).setOnClickListener(row -> openSubPage(R.id.nav_about, true));
+        bindRuntimes(view);
         return view;
     }
 
@@ -1104,7 +1196,7 @@ public class MainActivity extends AppCompatActivity {
         int initial = Math.max(0, Math.min(selected, labels.length - 1));
         value.setText(labels[initial]);
         value.setTag(initial);
-        View row = (View) value.getParent();
+        View row = (View) value.getParent().getParent();
         row.setFocusable(true);
         row.setOnClickListener(clicked -> Theming.rowDialog(value)
                 .setSingleChoiceItems(labels, (int) value.getTag(), (dialog, position) -> {
@@ -1117,37 +1209,32 @@ public class MainActivity extends AppCompatActivity {
 
     private void bindDxvk(View view) {
         dxvkStatus = view.findViewById(R.id.dxvk_status);
-        MaterialAutoCompleteTextView version = view.findViewById(R.id.dxvk_version);
         dxvkAction = view.findViewById(R.id.dxvk_install);
         LinearProgressIndicator bar = view.findViewById(R.id.dxvk_progress);
         TextView detail = view.findViewById(R.id.dxvk_progress_text);
 
-        showDxvkVersions(version, Collections.emptyList());
-
         boolean[] requested = {false};
-        View.OnClickListener openVersions = button -> {
-            version.showDropDown();
+        view.findViewById(R.id.dxvk_row).setOnClickListener(row -> {
             if (requested[0]) {
+                pickDxvkVersion();
                 return;
             }
             requested[0] = true;
             worker.execute(() -> {
                 List<String> tags = Dxvk.versions();
                 runOnUiThread(() -> {
-                    if (!version.isAttachedToWindow()) {
+                    if (!dxvkStatus.isAttachedToWindow()) {
                         return;
                     }
-                    showDxvkVersions(version, tags);
+                    dxvkTags = tags;
                     if (tags.isEmpty()) {
                         detail.setVisibility(View.VISIBLE);
                         detail.setText(R.string.settings_dxvk_offline);
                     }
-                    version.showDropDown();
+                    pickDxvkVersion();
                 });
             });
-        };
-        version.setOnClickListener(openVersions);
-        ((TextInputLayout) view.findViewById(R.id.dxvk_version_layout)).setEndIconOnClickListener(openVersions);
+        });
 
         dxvkAction.setOnClickListener(button -> {
             startInstall(bar, detail, R.string.settings_dxvk_working);
@@ -1172,29 +1259,45 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void showDxvkVersions(MaterialAutoCompleteTextView picker, List<String> tags) {
+    private void pickDxvkVersion() {
         List<String> labels = new ArrayList<>();
         labels.add(getString(R.string.settings_dxvk_version_latest));
 
         String chosen = settings.dxvkVersion();
-        if (!chosen.isEmpty() && !tags.contains(chosen)) {
+        if (!chosen.isEmpty() && !dxvkTags.contains(chosen)) {
             labels.add(chosen);
         }
-        labels.addAll(tags);
+        labels.addAll(dxvkTags);
 
-        picker.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, labels));
-        picker.setText(chosen.isEmpty() ? labels.get(0) : chosen, false);
-        picker.setOnItemClickListener((parent, item, position, id) ->
-                settings.setDxvkVersion(position == 0 ? Dxvk.LATEST : labels.get(position)));
+        Theming.rowDialog(dxvkStatus)
+                .setSingleChoiceItems(labels.toArray(new CharSequence[0]),
+                        chosen.isEmpty() ? 0 : labels.indexOf(chosen), (dialog, position) -> {
+                            settings.setDxvkVersion(position == 0 ? Dxvk.LATEST : labels.get(position));
+                            showDxvkState(dxvkStatus, dxvkAction);
+                            dialog.dismiss();
+                        })
+                .setNegativeButton(android.R.string.cancel, null).show();
     }
 
     private void showDxvkState(TextView status, MaterialButton action) {
         String installed = Dxvk.installedVersion(this);
+        String chosen = settings.dxvkVersion();
 
         showStatus(status, !installed.isEmpty(), installed.isEmpty()
                 ? getString(R.string.runtime_missing)
                 : getString(R.string.runtime_dxvk_installed, installed));
-        action.setText(installed.isEmpty() ? R.string.runtime_install : R.string.runtime_reinstall);
+
+        if (!installed.isEmpty() && (chosen.isEmpty() || chosen.equals(installed))) {
+            action.setVisibility(View.GONE);
+            return;
+        }
+
+        action.setVisibility(View.VISIBLE);
+        if (installed.isEmpty()) {
+            action.setText(R.string.runtime_install);
+        } else {
+            action.setText(getString(R.string.runtime_install_version, chosen));
+        }
         action.setContentDescription(getString(installed.isEmpty()
                 ? R.string.settings_dxvk_install : R.string.settings_dxvk_install_again));
     }

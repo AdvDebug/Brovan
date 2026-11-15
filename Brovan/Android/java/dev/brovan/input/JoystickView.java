@@ -2,11 +2,9 @@ package dev.brovan.input;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
 import android.view.MotionEvent;
-import android.view.View;
 
 import java.util.EnumSet;
 import java.util.Set;
@@ -15,29 +13,23 @@ import java.util.Set;
  * Analog-looking stick that resolves to the eight compass directions, because the guest only has keys to
  * press. The dead zone stops a resting thumb from walking the character.
  */
-public class JoystickView extends View {
+public class JoystickView extends ControlView {
 
     public interface Listener {
         void onDirections(Set<VirtualKey> directions);
     }
 
     private static final float DEAD_ZONE = 0.28f;
+    private static final float KNOB = 0.36f;
+    private static final float KNOB_OVERHANG = 0.55f;
+    private static final float LEGEND_REACH = 0.72f;
     private static final float ARM_HALF_WIDTH = 0.34f;
     private static final float[] ARM_ROTATION = {0f, 180f, 270f, 90f};
 
-    private final Paint basePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint knobPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint litPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint arrowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path pad = new Path();
     private final Path arrow = new Path();
     private final RectF armBounds = new RectF();
-
-    private int fillColor = ControlItem.DEFAULT_COLOR;
-    private int strokeColor = ControlItem.DEFAULT_COLOR;
-    private int labelColor = ControlItem.DEFAULT_COLOR;
-    private float opacity = 1f;
+    private final float[] legendSizes = new float[4];
 
     private VirtualKey up = VirtualKey.W;
     private VirtualKey down = VirtualKey.S;
@@ -51,35 +43,15 @@ public class JoystickView extends View {
     private boolean cross;
     private int pointerId = MotionEvent.INVALID_POINTER_ID;
 
-    public JoystickView(Context context) {
-        super(context);
-
-        ringPaint.setStyle(Paint.Style.STROKE);
-        ringPaint.setStrokeWidth(3f);
-        applyStyle();
-    }
-
-    public void setStyle(int fill, int stroke, int text, float opacity) {
-        fillColor = fill;
-        strokeColor = stroke;
-        labelColor = text;
-        this.opacity = opacity;
-        applyStyle();
-        invalidate();
-    }
-
-    private void applyStyle() {
-        basePaint.setColor(ControlItem.shade(fillColor, 70, opacity));
-        ringPaint.setColor(ControlItem.shade(strokeColor, 120, opacity));
-        knobPaint.setColor(ControlItem.shade(labelColor, 170, opacity));
-        litPaint.setColor(ControlItem.shade(labelColor, 90, opacity));
-        arrowPaint.setColor(ControlItem.shade(labelColor, 220, opacity));
+    public JoystickView(Context context, ControlPainter painter) {
+        super(context, painter);
     }
 
     @Override
     protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
         super.onSizeChanged(width, height, oldWidth, oldHeight);
         buildCross();
+        fitLegends();
     }
 
     public void setListener(Listener listener) {
@@ -91,6 +63,7 @@ public class JoystickView extends View {
         this.down = down;
         this.left = left;
         this.right = right;
+        fitLegends();
     }
 
     /** Draws as a four-way cross instead of a stick; the touch handling is the same either way. */
@@ -99,23 +72,52 @@ public class JoystickView extends View {
         invalidate();
     }
 
+    private float radius() {
+        return Math.min(getWidth(), getHeight()) / 2f - painter.inset();
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {
         float centreX = getWidth() / 2f;
         float centreY = getHeight() / 2f;
-        float radius = Math.min(centreX, centreY) - 6f;
+        float radius = radius();
 
         if (cross) {
             drawCross(canvas, centreX, centreY, radius);
             return;
         }
 
-        canvas.drawCircle(centreX, centreY, radius, basePaint);
-        canvas.drawCircle(centreX, centreY, radius, ringPaint);
+        painter.body(canvas, painter.circle(centreX, centreY, radius), false, true);
+        painter.deadZone(canvas, centreX, centreY, radius * DEAD_ZONE);
+        drawLegends(canvas, centreX, centreY, radius);
 
-        float x = active ? centreX + knobX * radius : centreX;
-        float y = active ? centreY + knobY * radius : centreY;
-        canvas.drawCircle(x, y, radius * 0.38f, knobPaint);
+        float knob = radius * KNOB;
+        float travel = radius - knob * KNOB_OVERHANG;
+        float x = active ? centreX + knobX * travel : centreX;
+        float y = active ? centreY + knobY * travel : centreY;
+        painter.knob(canvas, x, y, knob, active);
+    }
+
+    private void drawLegends(Canvas canvas, float centreX, float centreY, float radius) {
+        boolean moving = active && Math.hypot(knobX, knobY) >= DEAD_ZONE;
+        float reach = radius * LEGEND_REACH;
+
+        painter.legend(canvas, up.shortLabel(), centreX, centreY - reach, legendSizes[0],
+                moving && knobY <= -DEAD_ZONE);
+        painter.legend(canvas, down.shortLabel(), centreX, centreY + reach, legendSizes[1],
+                moving && knobY >= DEAD_ZONE);
+        painter.legend(canvas, left.shortLabel(), centreX - reach, centreY, legendSizes[2],
+                moving && knobX <= -DEAD_ZONE);
+        painter.legend(canvas, right.shortLabel(), centreX + reach, centreY, legendSizes[3],
+                moving && knobX >= DEAD_ZONE);
+    }
+
+    private void fitLegends() {
+        float radius = radius();
+        VirtualKey[] keys = {up, down, left, right};
+        for (int i = 0; i < keys.length; i++) {
+            legendSizes[i] = painter.fit(keys[i].shortLabel(), radius * 0.34f, radius * 0.2f);
+        }
     }
 
     private void drawCross(Canvas canvas, float centreX, float centreY, float radius) {
@@ -126,8 +128,7 @@ public class JoystickView extends View {
         float half = radius * ARM_HALF_WIDTH;
         float corner = half * 0.6f;
 
-        canvas.drawPath(pad, basePaint);
-        canvas.drawPath(pad, ringPaint);
+        painter.body(canvas, pad, false, false);
 
         for (int index = 0; index < 4; index++) {
             boolean horizontal = index >= 2;
@@ -143,7 +144,7 @@ public class JoystickView extends View {
                 canvas.save();
                 canvas.clipPath(pad);
                 armBounds.set(centreX - half, centreY - radius, centreX + half, centreY - half * 0.2f);
-                canvas.drawRoundRect(armBounds, corner, corner, litPaint);
+                canvas.drawRoundRect(armBounds, corner, corner, painter.lit());
                 canvas.restore();
             }
 
@@ -154,34 +155,19 @@ public class JoystickView extends View {
             arrow.lineTo(centreX + half * 0.62f, tip + half * 0.9f);
             arrow.close();
 
-            arrowPaint.setColor(ControlItem.shade(labelColor, lit ? 255 : 190, opacity));
-            canvas.drawPath(arrow, arrowPaint);
+            canvas.drawPath(arrow, painter.ink(lit));
             canvas.restore();
         }
     }
 
     private void buildCross() {
-        pad.reset();
-
-        float centreX = getWidth() / 2f;
-        float centreY = getHeight() / 2f;
-        float radius = Math.min(centreX, centreY) - 6f;
+        float radius = radius();
         if (radius <= 0f) {
+            pad.reset();
             return;
         }
 
-        float half = radius * ARM_HALF_WIDTH;
-        float corner = half * 0.6f;
-
-        Path vertical = new Path();
-        vertical.addRoundRect(centreX - half, centreY - radius, centreX + half, centreY + radius,
-                corner, corner, Path.Direction.CW);
-
-        Path horizontal = new Path();
-        horizontal.addRoundRect(centreX - radius, centreY - half, centreX + radius, centreY + half,
-                corner, corner, Path.Direction.CW);
-
-        pad.op(vertical, horizontal, Path.Op.UNION);
+        painter.buildCross(pad, getWidth() / 2f, getHeight() / 2f, radius, radius * ARM_HALF_WIDTH);
     }
 
     /**

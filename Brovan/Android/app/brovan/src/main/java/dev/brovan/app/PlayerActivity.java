@@ -124,6 +124,7 @@ public class PlayerActivity extends AppCompatActivity
     private final int[] panelOrigin = new int[2];
     private SideSheetDialog menu;
     private ControlOverlay controls;
+    private ControlEditor controlEditor;
     private TaskbarView taskbar;
     private Settings settings;
     private ProgramSettings program;
@@ -243,6 +244,7 @@ public class PlayerActivity extends AppCompatActivity
         taskbar = findViewById(R.id.taskbar);
         TaskbarView.publish(this, getIntent().getStringExtra(EXTRA_NAME), getIntent().getStringExtra(EXTRA_EXECUTABLE));
 
+        controls.setAccent(palette.get(Palette.Role.ACCENT), palette.get(Palette.Role.ON_ACCENT));
         controls.setCustomLayout(ControlLayout.fromJson(getIntent().getStringExtra(EXTRA_LAYOUT)));
         int scheme = getIntent().getIntExtra(EXTRA_CONTROLS, 0);
         controls.apply(ControlOverlay.Scheme.values()[scheme]);
@@ -454,6 +456,11 @@ public class PlayerActivity extends AppCompatActivity
                     dialog.dismiss();
                 }).setNegativeButton(android.R.string.cancel, null).show());
 
+        view.findViewById(R.id.edit_controls).setOnClickListener(button -> {
+            dismissMenu();
+            editControls();
+        });
+
         TextView speedValue = view.findViewById(R.id.sensitivity_value);
         Slider speed = view.findViewById(R.id.sensitivity);
         speed.setValue(ProgramSettings.snapSpeed(program.pointerSpeed()));
@@ -604,6 +611,49 @@ public class PlayerActivity extends AppCompatActivity
         if (menu != null) {
             menu.dismiss();
         }
+    }
+
+    // Edited over the running game, because leaving the player would freeze the guest.
+    private void editControls() {
+        if (controlEditor == null) {
+            View root = findViewById(R.id.control_editor);
+            ((TextView) root.findViewById(R.id.controls_save)).setText(R.string.controls_done);
+            controlEditor = new ControlEditor(this, controls, root, new Settings(this).palette(),
+                    new ControlEditor.Host() {
+                        @Override
+                        public void onSave(ControlLayout layout) {
+                            saveControls(layout);
+                        }
+
+                        @Override
+                        public void onCancel() {
+                            stopEditingControls();
+                        }
+                    });
+        }
+
+        controlEditor.start(controls.layout());
+    }
+
+    private void saveControls(ControlLayout layout) {
+        String json = layout.toJson();
+        try {
+            program.setCustomLayout(json);
+        } catch (IOException failure) {
+            showSaveFailure(failure);
+            return;
+        }
+
+        getIntent().putExtra(EXTRA_LAYOUT, json);
+        getIntent().putExtra(EXTRA_CONTROLS, ControlOverlay.Scheme.CUSTOM.ordinal());
+        controlEditor.stop();
+        controls.setCustomLayout(layout);
+        controls.apply(ControlOverlay.Scheme.CUSTOM);
+    }
+
+    private void stopEditingControls() {
+        controlEditor.stop();
+        controls.apply(controls.scheme());
     }
 
     // Back opens the panel, so the key it used to send has to be reachable from inside it. A guest that polls

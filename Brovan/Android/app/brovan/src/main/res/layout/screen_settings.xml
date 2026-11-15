@@ -1,57 +1,76 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
-    android:layout_width="match_parent" android:layout_height="match_parent" android:fillViewport="true">
+    android:layout_width="match_parent" android:layout_height="match_parent" android:fillViewport="true"
+    android:scrollbars="none">
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:orientation="vertical" android:paddingHorizontal="16dp" android:paddingBottom="24dp">
-        <TextView style="@style/SectionLabel.Group" android:layout_marginTop="8dp" android:text="@string/settings_graphics" />
-        <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+        android:orientation="vertical" android:paddingBottom="24dp">
+        <TextView style="@style/SectionLabel.Icons" android:layout_marginTop="16dp" android:text="@string/settings_runtimes" />
+        <include layout="@layout/section_runtimes" />
+        <TextView style="@style/SectionLabel.Icons" android:text="@string/settings_graphics" />
             <LinearLayout style="@style/SettingsGroupBody">
-                <LinearLayout style="@style/SettingsChoiceRow.Group">
-                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_render_scale" />
-                    <TextView android:id="@+id/render_scale" style="@style/SettingsChoiceValue" />
+                <LinearLayout style="@style/SettingsIconRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_render" />
+                    <LinearLayout style="@style/SettingsIconRowText">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_render_scale" />
+                        <TextView android:id="@+id/render_scale" style="@style/SettingsChoiceValue" />
+                    </LinearLayout>
                 </LinearLayout>
-                <LinearLayout style="@style/SettingsChoiceRow.Group">
-                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_display_scale" />
-                    <TextView android:id="@+id/display_scale" style="@style/SettingsChoiceValue" />
-                    <TextView style="@style/SettingsRowSummary" android:text="@string/settings_display_scale_summary" />
+                <LinearLayout style="@style/SettingsIconRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_display" />
+                    <LinearLayout style="@style/SettingsIconRowText">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_display_scale" />
+                        <TextView android:id="@+id/display_scale" style="@style/SettingsChoiceValue" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_display_scale_summary"
+                            android:visibility="gone" />
+                    </LinearLayout>
                 </LinearLayout>
             </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
 
-        <TextView style="@style/SectionLabel.Group" android:text="@string/player_controls" />
-        <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+        <TextView style="@style/SectionLabel.Icons" android:text="@string/player_controls" />
             <LinearLayout style="@style/SettingsGroupBody">
-                <LinearLayout style="@style/SettingsChoiceRow.Group">
-                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_controls" />
-                    <TextView android:id="@+id/controls" style="@style/SettingsChoiceValue" />
+                <LinearLayout style="@style/SettingsIconRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_gamepad" />
+                    <LinearLayout style="@style/SettingsIconRowText">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_controls" />
+                        <TextView android:id="@+id/controls" style="@style/SettingsChoiceValue" />
+                    </LinearLayout>
                 </LinearLayout>
-                <LinearLayout style="@style/SettingsChoiceRow.Group">
-                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_pointer" />
-                    <TextView android:id="@+id/pointer" style="@style/SettingsChoiceValue" />
+                <LinearLayout style="@style/SettingsIconRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_touch" />
+                    <LinearLayout style="@style/SettingsIconRowText">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_pointer" />
+                        <TextView android:id="@+id/pointer" style="@style/SettingsChoiceValue" />
+                    </LinearLayout>
                 </LinearLayout>
                 <LinearLayout android:id="@+id/edit_controls" style="@style/SettingsSwitchRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_layout" />
                     <LinearLayout style="@style/SettingsSwitchText">
                         <TextView style="@style/SettingsRowTitle" android:text="@string/program_control_layout" />
                         <TextView style="@style/SettingsRowSummary" android:text="@string/settings_control_layout_summary" />
                     </LinearLayout>
-                    <ImageView style="@style/SettingsChevron" />
                 </LinearLayout>
             </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
 
-        <TextView style="@style/SectionLabel.Group" android:text="@string/settings_advanced" />
-        <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+        <TextView style="@style/SectionLabel.Icons" android:text="@string/settings_advanced" />
             <LinearLayout style="@style/SettingsGroupBody">
-                <LinearLayout style="@style/SettingsChoiceRow.Group">
-                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_network" />
-                    <TextView android:id="@+id/network" style="@style/SettingsChoiceValue" />
+                <LinearLayout style="@style/SettingsIconRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_network" />
+                    <LinearLayout style="@style/SettingsIconRowText">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_network" />
+                        <TextView android:id="@+id/network" style="@style/SettingsChoiceValue" />
+                    </LinearLayout>
                 </LinearLayout>
-                <LinearLayout style="@style/SettingsChoiceRow.Group">
-                    <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_low_memory" />
-                    <TextView android:id="@+id/low_memory" style="@style/SettingsChoiceValue" />
-                    <TextView style="@style/SettingsRowSummary" android:text="@string/settings_low_memory_summary" />
+                <LinearLayout style="@style/SettingsIconRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_memory" />
+                    <LinearLayout style="@style/SettingsIconRowText">
+                        <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_low_memory" />
+                        <TextView android:id="@+id/low_memory" style="@style/SettingsChoiceValue" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_low_memory_summary"
+                            android:visibility="gone" />
+                    </LinearLayout>
                 </LinearLayout>
                 <LinearLayout style="@style/SettingsSwitchRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_bolt" />
                     <LinearLayout style="@style/SettingsSwitchText">
                         <TextView style="@style/SettingsRowTitle" android:text="@string/settings_jit_cache" />
                         <TextView style="@style/SettingsRowSummary" android:text="@string/settings_jit_cache_summary" />
@@ -60,6 +79,7 @@
                         style="@style/SettingsSwitch" android:contentDescription="@string/settings_jit_cache" />
                 </LinearLayout>
                 <LinearLayout style="@style/SettingsSwitchRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_shader" />
                     <LinearLayout style="@style/SettingsSwitchText">
                         <TextView style="@style/SettingsRowTitle" android:text="@string/settings_relax_vulkan" />
                         <TextView style="@style/SettingsRowSummary" android:text="@string/settings_relax_vulkan_summary" />
@@ -68,6 +88,7 @@
                         style="@style/SettingsSwitch" android:contentDescription="@string/settings_relax_vulkan" />
                 </LinearLayout>
                 <LinearLayout style="@style/SettingsSwitchRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_speed" />
                     <LinearLayout style="@style/SettingsSwitchText">
                         <TextView style="@style/SettingsRowTitle" android:text="@string/settings_sustained" />
                         <TextView style="@style/SettingsRowSummary" android:text="@string/settings_sustained_summary" />
@@ -76,6 +97,7 @@
                         style="@style/SettingsSwitch" android:contentDescription="@string/settings_sustained" />
                 </LinearLayout>
                 <LinearLayout style="@style/SettingsSwitchRow">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_code" />
                     <LinearLayout style="@style/SettingsSwitchText">
                         <TextView style="@style/SettingsRowTitle" android:text="@string/settings_developer" />
                         <TextView style="@style/SettingsRowSummary" android:text="@string/settings_developer_summary" />
@@ -84,26 +106,23 @@
                         style="@style/SettingsSwitch" android:contentDescription="@string/settings_developer" />
                 </LinearLayout>
             </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
 
-        <TextView style="@style/SectionLabel.Group" android:text="@string/settings_app" />
-        <com.google.android.material.card.MaterialCardView style="@style/Widget.Brovan.Card.Group">
+        <TextView style="@style/SectionLabel.Icons" android:text="@string/settings_app" />
             <LinearLayout style="@style/SettingsGroupBody">
-                <LinearLayout android:id="@+id/nav_theme" style="@style/SettingsSwitchRow">
+                <LinearLayout android:id="@+id/nav_theme" style="@style/SettingsSwitchRow"
+                    android:minHeight="56dp">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_palette" />
                     <LinearLayout style="@style/SettingsSwitchText">
                         <TextView style="@style/SettingsRowTitle" android:text="@string/nav_theme" />
-                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_appearance_summary" />
                     </LinearLayout>
-                    <ImageView style="@style/SettingsChevron" />
                 </LinearLayout>
-                <LinearLayout android:id="@+id/nav_about" style="@style/SettingsSwitchRow">
+                <LinearLayout android:id="@+id/nav_about" style="@style/SettingsSwitchRow"
+                    android:minHeight="56dp">
+                    <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_info" />
                     <LinearLayout style="@style/SettingsSwitchText">
                         <TextView style="@style/SettingsRowTitle" android:text="@string/nav_about" />
-                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_about_summary" />
                     </LinearLayout>
-                    <ImageView style="@style/SettingsChevron" />
                 </LinearLayout>
             </LinearLayout>
-        </com.google.android.material.card.MaterialCardView>
     </LinearLayout>
 </ScrollView>

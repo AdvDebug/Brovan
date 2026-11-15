@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Point;
 import android.util.AttributeSet;
 import android.view.MotionEvent;
 import android.view.View;
@@ -43,6 +44,8 @@ public class ControlOverlay extends FrameLayout {
     private final Paint selectionPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint gridPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
+    private int accent;
+    private int onAccent;
     private Scheme scheme = Scheme.NONE;
     private ControlLayout layout = new ControlLayout();
     private ControlLayout custom;
@@ -66,12 +69,22 @@ public class ControlOverlay extends FrameLayout {
     private void initialize() {
         setClipChildren(false);
 
-        selectionPaint.setColor(Color.argb(220, 124, 156, 245));
         selectionPaint.setStyle(Paint.Style.STROKE);
         selectionPaint.setStrokeWidth(4f);
 
         gridPaint.setColor(Color.argb(40, 255, 255, 255));
         gridPaint.setStrokeWidth(1f);
+    }
+
+    /** Call before the first render. */
+    public void setAccent(int accent, int onAccent) {
+        this.accent = accent & 0xFFFFFF;
+        this.onAccent = onAccent & 0xFFFFFF;
+        selectionPaint.setColor(ControlItem.shade(this.accent, 220, 1f));
+    }
+
+    public int accent() {
+        return accent;
     }
 
     public Scheme scheme() {
@@ -99,7 +112,8 @@ public class ControlOverlay extends FrameLayout {
         selected = null;
 
         for (ControlItem item : layout.items()) {
-            View view = create(item);
+            ControlView view = create(item, new ControlPainter(getContext(), accent, onAccent));
+            view.setStyle(item);
             view.setTag(item);
             addView(view, new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT));
         }
@@ -110,20 +124,8 @@ public class ControlOverlay extends FrameLayout {
     public void restyle() {
         for (int i = 0; i < getChildCount(); i++) {
             View child = getChildAt(i);
-            if (!(child.getTag() instanceof ControlItem)) {
-                continue;
-            }
-
-            ControlItem item = (ControlItem) child.getTag();
-
-            if (child instanceof ActionButtonView) {
-                ((ActionButtonView) child).setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
-            } else if (child instanceof JoystickView) {
-                ((JoystickView) child).setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
-            } else if (child instanceof TouchpadView) {
-                ((TouchpadView) child).setStyle(item.strokeColor, item.opacity);
-            } else if (child instanceof SwitcherView) {
-                ((SwitcherView) child).setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
+            if (child instanceof ControlView && child.getTag() instanceof ControlItem) {
+                ((ControlView) child).setStyle((ControlItem) child.getTag());
             }
         }
     }
@@ -145,7 +147,6 @@ public class ControlOverlay extends FrameLayout {
         editing = value;
         editListener = listener;
         keys.releaseAll();
-        setWillNotDraw(!value);
         invalidate();
     }
 
@@ -162,29 +163,26 @@ public class ControlOverlay extends FrameLayout {
         }
     }
 
-    private View create(ControlItem item) {
+    private ControlView create(ControlItem item, ControlPainter painter) {
         switch (item.kind) {
             case JOYSTICK:
             case DPAD:
-                return stick(item);
+                return stick(item, painter);
 
-            case TOUCHPAD: {
-                TouchpadView view = new TouchpadView(getContext());
-                view.setStyle(item.strokeColor, item.opacity);
-                return view;
-            }
+            case TOUCHPAD:
+                return new TouchpadView(getContext(), painter);
 
             case MOUSE: {
-                ActionButtonView view = button(item);
+                ActionButtonView view = new ActionButtonView(getContext(), painter, item.caption());
                 view.setListener(down -> PointerState.press(item.mouseButton, down));
                 return view;
             }
 
             case SWITCHER:
-                return switcher(item);
+                return switcher(item, painter);
 
             default: {
-                ActionButtonView view = button(item);
+                ActionButtonView view = new ActionButtonView(getContext(), painter, item.caption());
                 view.setListener(down -> {
                     if (down) {
                         keys.press(item, item.key);
@@ -197,15 +195,8 @@ public class ControlOverlay extends FrameLayout {
         }
     }
 
-    private ActionButtonView button(ControlItem item) {
-        ActionButtonView view = new ActionButtonView(getContext(), item.caption());
-        view.setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
-        return view;
-    }
-
-    private View stick(ControlItem item) {
-        JoystickView view = new JoystickView(getContext());
-        view.setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
+    private ControlView stick(ControlItem item, ControlPainter painter) {
+        JoystickView view = new JoystickView(getContext(), painter);
         view.setKeys(item.up, item.down, item.left, item.right);
         view.setCross(item.kind == ControlItem.Kind.DPAD);
         view.setListener(new JoystickView.Listener() {
@@ -217,9 +208,8 @@ public class ControlOverlay extends FrameLayout {
         return view;
     }
 
-    private View switcher(ControlItem item) {
-        SwitcherView view = new SwitcherView(getContext());
-        view.setStyle(item.fillColor, item.strokeColor, item.labelColor, item.opacity);
+    private ControlView switcher(ControlItem item, ControlPainter painter) {
+        SwitcherView view = new SwitcherView(getContext(), painter);
         view.setSlots(item.slots);
         view.setHorizontal(item.horizontal);
         view.setListener((direction, slot) -> {
@@ -236,6 +226,9 @@ public class ControlOverlay extends FrameLayout {
     protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
         int width = right - left;
         int height = bottom - top;
+        float density = getResources().getDisplayMetrics().density;
+        float widthDp = width / density;
+        float heightDp = height / density;
 
         for (int i = 0; i < getChildCount(); i++) {
             View child = getChildAt(i);
@@ -260,8 +253,8 @@ public class ControlOverlay extends FrameLayout {
                 itemHeight = item.horizontal ? across : span;
             }
 
-            int centreX = Math.round(item.x * width);
-            int centreY = Math.round(item.y * height);
+            int centreX = keepInside(Math.round(item.centreX(widthDp) * density), itemWidth, width);
+            int centreY = keepInside(Math.round(item.centreY(heightDp) * density), itemHeight, height);
 
             child.measure(MeasureSpec.makeMeasureSpec(itemWidth, MeasureSpec.EXACTLY),
                     MeasureSpec.makeMeasureSpec(itemHeight, MeasureSpec.EXACTLY));
@@ -299,8 +292,15 @@ public class ControlOverlay extends FrameLayout {
                     return true;
                 }
 
-                selected.x = clamp((event.getX() - grabX) / getWidth());
-                selected.y = clamp((event.getY() - grabY) / getHeight());
+                View child = viewOf(selected);
+                if (child == null) {
+                    return true;
+                }
+
+                float density = getResources().getDisplayMetrics().density;
+                int centreX = keepInside(Math.round(event.getX() - grabX), child.getWidth(), getWidth());
+                int centreY = keepInside(Math.round(event.getY() - grabY), child.getHeight(), getHeight());
+                selected.anchorAt(centreX / density, centreY / density, widthDp(), heightDp());
                 requestLayout();
                 return true;
             }
@@ -332,41 +332,99 @@ public class ControlOverlay extends FrameLayout {
         return null;
     }
 
-    @Override
-    protected void onDraw(Canvas canvas) {
-        if (!editing) {
-            return;
-        }
-
-        for (int i = 1; i < 4; i++) {
-            float x = getWidth() * i / 4f;
-            float y = getHeight() * i / 4f;
-            canvas.drawLine(x, 0f, x, getHeight(), gridPaint);
-            canvas.drawLine(0f, y, getWidth(), y, gridPaint);
-        }
-    }
-
+    /** Drawn after the children, because a guest SurfaceView child clears whatever is drawn under it. */
     @Override
     protected void dispatchDraw(Canvas canvas) {
         super.dispatchDraw(canvas);
 
-        if (!editing || selected == null) {
+        if (!editing) {
             return;
         }
 
-        for (int i = 0; i < getChildCount(); i++) {
-            View child = getChildAt(i);
-            if (child.getTag() != selected) {
-                continue;
-            }
+        // Where ControlItem.anchorAt changes the edge a dragged control is measured from.
+        float middle = getWidth() / 2f;
+        float third = getHeight() / 3f;
+        canvas.drawLine(middle, 0f, middle, getHeight(), gridPaint);
+        canvas.drawLine(0f, third, getWidth(), third, gridPaint);
 
+        View child = viewOf(selected);
+        if (child != null) {
             canvas.drawRoundRect(child.getLeft() - 6f, child.getTop() - 6f,
                     child.getRight() + 6f, child.getBottom() + 6f, 20f, 20f, selectionPaint);
         }
     }
 
-    private static float clamp(float value) {
-        return Math.max(0.02f, Math.min(0.98f, value));
+    private View viewOf(ControlItem item) {
+        if (item == null) {
+            return null;
+        }
+
+        for (int i = 0; i < getChildCount(); i++) {
+            View child = getChildAt(i);
+            if (child.getTag() == item) {
+                return child;
+            }
+        }
+
+        return null;
+    }
+
+    /** Picks the spot that covers the fewest controls, nearest the selected one or else the bottom centre. */
+    public void findClearSpot(int width, int height, int margin, int top, Point out) {
+        View anchor = viewOf(selected);
+        float anchorX = anchor != null ? (anchor.getLeft() + anchor.getRight()) / 2f : getWidth() / 2f;
+        float anchorY = anchor != null ? (anchor.getTop() + anchor.getBottom()) / 2f : getHeight();
+        int step = dp(8);
+        int pad = dp(10);
+        int right = getWidth() - margin - width;
+        int bottom = getHeight() - margin - height;
+
+        out.set(margin, top);
+        long best = Long.MAX_VALUE;
+
+        for (int y = top; y <= bottom; y += step) {
+            for (int x = margin; x <= right; x += step) {
+                long covered = 0;
+                long area = 0;
+
+                for (int i = 0; i < getChildCount(); i++) {
+                    View child = getChildAt(i);
+                    if (!(child.getTag() instanceof ControlItem)) {
+                        continue;
+                    }
+
+                    long across = Math.min(x + width, child.getRight() + pad) - Math.max(x, child.getLeft() - pad);
+                    long down = Math.min(y + height, child.getBottom() + pad) - Math.max(y, child.getTop() - pad);
+                    if (across > 0 && down > 0) {
+                        covered++;
+                        area += across * down;
+                    }
+                }
+
+                double distance = Math.hypot(x + width / 2f - anchorX, y + height / 2f - anchorY);
+                long score = covered * 1_000_000_000_000L + area * 16 + (long) distance;
+                if (score < best) {
+                    best = score;
+                    out.set(x, y);
+                }
+            }
+        }
+    }
+
+    public float widthDp() {
+        return getWidth() / getResources().getDisplayMetrics().density;
+    }
+
+    public float heightDp() {
+        return getHeight() / getResources().getDisplayMetrics().density;
+    }
+
+    private static int keepInside(int centre, int span, int limit) {
+        if (span >= limit) {
+            return limit / 2;
+        }
+
+        return Math.max(span / 2, Math.min(limit - span / 2, centre));
     }
 
     private int dp(int value) {

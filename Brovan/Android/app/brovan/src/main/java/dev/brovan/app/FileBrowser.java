@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.ColorStateList;
 import android.net.Uri;
 import android.system.ErrnoException;
 import android.system.Os;
@@ -11,6 +12,7 @@ import android.system.OsConstants;
 import android.system.StructStat;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.text.format.DateUtils;
 import android.text.format.Formatter;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -30,6 +32,7 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.google.android.material.progressindicator.CircularProgressIndicator;
 import com.google.android.material.snackbar.Snackbar;
+import com.google.android.material.button.MaterialButton;
 import com.google.android.material.textfield.TextInputEditText;
 
 import java.io.ByteArrayOutputStream;
@@ -42,10 +45,8 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.CharacterCodingException;
 import java.nio.charset.StandardCharsets;
-import java.text.DateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
@@ -67,6 +68,7 @@ final class FileBrowser {
 
     private final AppCompatActivity activity;
     private final Executor worker;
+    private final Palette palette;
     private final File root;
 
     private final List<Entry> loaded = new ArrayList<>();
@@ -91,9 +93,10 @@ final class FileBrowser {
     private int pendingScroll = -1;
     private File exporting;
 
-    FileBrowser(AppCompatActivity activity, Executor worker) {
+    FileBrowser(AppCompatActivity activity, Executor worker, Palette palette) {
         this.activity = activity;
         this.worker = worker;
+        this.palette = palette;
         this.root = activity.getFilesDir();
     }
 
@@ -102,16 +105,19 @@ final class FileBrowser {
 
         path = view.findViewById(R.id.path);
         pathScroll = view.findViewById(R.id.path_scroll);
-        summary = view.findViewById(R.id.files_summary);
+        summary = view.findViewById(R.id.list_count);
         empty = view.findViewById(R.id.files_empty);
         progress = view.findViewById(R.id.files_progress);
-        filter = view.findViewById(R.id.files_filter);
+        filter = view.findViewById(R.id.list_search);
+        filter.setHint(R.string.files_filter);
 
         entries = view.findViewById(R.id.entries);
         entries.setLayoutManager(new LinearLayoutManager(activity));
         entries.setHasFixedSize(true);
         entries.setItemAnimator(null);
         entries.setAdapter(adapter);
+        entries.addItemDecoration(new RowDivider(palette, () -> 72));
+        RowDivider.showHeaderEdge(entries, view.findViewById(R.id.header_edge));
 
         filter.addTextChangedListener(new TextWatcher() {
             @Override
@@ -129,7 +135,9 @@ final class FileBrowser {
             }
         });
 
-        view.findViewById(R.id.files_add).setOnClickListener(button -> showAddOptions());
+        MaterialButton add = view.findViewById(R.id.list_add);
+        add.setText(R.string.files_add_title);
+        add.setOnClickListener(button -> showAddOptions());
 
         open(root);
         return view;
@@ -244,8 +252,6 @@ final class FileBrowser {
             return found;
         }
 
-        DateFormat dates = android.text.format.DateFormat.getDateFormat(context);
-        String folderLabel = context.getString(R.string.files_folder);
         StringBuilder child = new StringBuilder(folder.getPath()).append('/');
         int base = child.length();
 
@@ -262,9 +268,10 @@ final class FileBrowser {
             }
 
             boolean directory = OsConstants.S_ISDIR(stat.st_mode);
-            String size = directory ? folderLabel : Formatter.formatShortFileSize(context, stat.st_size);
-            String detail = context.getString(R.string.files_detail, size,
-                    dates.format(new Date(stat.st_mtime * 1000L)));
+            String detail = directory ? "" : context.getString(R.string.files_detail,
+                    Formatter.formatShortFileSize(context, stat.st_size),
+                    DateUtils.formatDateTime(context, stat.st_mtime * 1000L,
+                            DateUtils.FORMAT_SHOW_DATE | DateUtils.FORMAT_ABBREV_MONTH));
 
             found.add(new Entry(name, directory, detail));
         }
@@ -304,6 +311,7 @@ final class FileBrowser {
 
     private void showPath() {
         path.removeAllViews();
+        pathScroll.setVisibility(current.equals(root) ? View.GONE : View.VISIBLE);
 
         List<File> chain = new ArrayList<>();
         for (File folder = current; folder != null; folder = folder.getParentFile()) {
@@ -722,12 +730,28 @@ final class FileBrowser {
         final String lower;
         final String detail;
         final boolean folder;
+        final String kind;
 
         Entry(String name, boolean folder, String detail) {
             this.name = name;
             this.lower = name.toLowerCase(Locale.ROOT);
             this.folder = folder;
             this.detail = detail;
+            this.kind = folder ? "" : extensionLabel(name);
+        }
+
+        private static String extensionLabel(String name) {
+            int dot = name.lastIndexOf('.');
+            if (dot <= 0 || dot == name.length() - 1 || name.length() - dot - 1 > 4) {
+                return "";
+            }
+            String extension = name.substring(dot + 1);
+            for (int i = 0; i < extension.length(); i++) {
+                if (Character.isLetter(extension.charAt(i))) {
+                    return extension.toUpperCase(Locale.ROOT);
+                }
+            }
+            return "";
         }
     }
 
@@ -745,7 +769,13 @@ final class FileBrowser {
             Entry entry = shown.get(position);
             holder.name.setText(entry.name);
             holder.detail.setText(entry.detail);
+            holder.detail.setVisibility(entry.detail.isEmpty() ? View.GONE : View.VISIBLE);
+            holder.kind.setText(entry.kind);
+            holder.kind.setVisibility(entry.kind.isEmpty() ? View.GONE : View.VISIBLE);
+            holder.icon.setVisibility(entry.kind.isEmpty() ? View.VISIBLE : View.GONE);
             holder.icon.setImageResource(entry.folder ? R.drawable.ic_folder : R.drawable.ic_file);
+            holder.icon.setImageTintList(ColorStateList.valueOf(
+                    palette.get(entry.folder ? Palette.Role.ACCENT : Palette.Role.TEXT_SECONDARY)));
         }
 
         @Override
@@ -758,12 +788,14 @@ final class FileBrowser {
     /// does not allocate a closure for every row it passes.
     private final class EntryHolder extends RecyclerView.ViewHolder {
         final ImageView icon;
+        final TextView kind;
         final TextView name;
         final TextView detail;
 
         EntryHolder(View row) {
             super(row);
             icon = row.findViewById(R.id.icon);
+            kind = row.findViewById(R.id.kind);
             name = row.findViewById(R.id.name);
             detail = row.findViewById(R.id.detail);
 

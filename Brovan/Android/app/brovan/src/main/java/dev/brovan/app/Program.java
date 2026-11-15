@@ -10,6 +10,7 @@ public final class Program {
     private final File directory;
     private final Properties values;
     private final String lastFailure;
+    private final String name;
 
     Program(String id, File directory, Properties values, String lastFailure) {
         this.id = id;
@@ -17,12 +18,15 @@ public final class Program {
         this.values = new Properties();
         this.values.putAll(values);
         this.lastFailure = lastFailure;
+
+        String stored = values.getProperty(Library.KEY_NAME, directory.getName());
+        this.name = stored.equals(directory.getName()) ? Library.readableFolderName(stored) : stored;
     }
 
     public String id() { return id; }
     public File directory() { return directory; }
     public File executable() { return new File(directory, executableName()); }
-    public String name() { return values.getProperty(Library.KEY_NAME, directory.getName()); }
+    public String name() { return name; }
     public String executableName() { return values.getProperty(Library.KEY_EXECUTABLE, ""); }
     public String arguments() { return values.getProperty(Library.KEY_ARGUMENTS, ""); }
     public String workingDirectory() { return values.getProperty(Library.KEY_WORKING_DIRECTORY, ""); }

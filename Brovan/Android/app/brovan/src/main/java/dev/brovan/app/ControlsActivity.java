@@ -2,64 +2,32 @@ package dev.brovan.app;
 
 import android.os.Bundle;
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.Map;
-import android.view.View;
-import android.widget.LinearLayout;
-import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
 
-import com.google.android.material.button.MaterialButton;
-import com.google.android.material.slider.Slider;
-
-import dev.brovan.BrovanNative;
-import dev.brovan.input.ControlItem;
 import dev.brovan.input.ControlLayout;
 import dev.brovan.input.ControlOverlay;
-import dev.brovan.input.VirtualKey;
 
-/** Lays out the touch controls: drag to place, tap to select, and every control binds to a key of its own. */
-public class ControlsActivity extends AppCompatActivity implements ControlOverlay.EditListener {
+public class ControlsActivity extends AppCompatActivity implements ControlEditor.Host {
 
     static final String EXTRA_LAYOUT = "initial_layout";
 
     private Settings settings;
     private Library library;
     private Program program;
-    private Palette palette;
-    private ControlOverlay overlay;
-    private ControlLayout layout;
-    private View editor;
-    private TextView hint;
-    private LinearLayout keyRow;
-    private Slider size;
-    private Slider opacity;
-    private View fillSwatch;
-    private View strokeSwatch;
-    private View labelSwatch;
-    private ControlItem selected;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         settings = new Settings(this);
-        palette = settings.palette();
+        Palette palette = settings.palette();
         Theming.install(this, palette);
 
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_controls);
         Theming.apply(this, Palette.defaults(), palette);
 
-        overlay = findViewById(R.id.controls);
-        editor = findViewById(R.id.controls_editor);
-        hint = findViewById(R.id.controls_hint);
-        keyRow = findViewById(R.id.controls_keys);
-        size = findViewById(R.id.controls_size);
-        opacity = findViewById(R.id.controls_opacity);
-        fillSwatch = findViewById(R.id.controls_colour_fill);
-        strokeSwatch = findViewById(R.id.controls_colour_stroke);
-        labelSwatch = findViewById(R.id.controls_colour_label);
+        ControlOverlay overlay = findViewById(R.id.controls);
 
         library = new Library(this);
         String profileId = getIntent().getStringExtra(ProgramSettings.EXTRA_PROFILE_ID);
@@ -76,344 +44,23 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
                 return;
             }
         }
-        layout = ControlLayout.fromJson(initial == null ? settings.controlLayout() : initial);
+        ControlLayout layout = ControlLayout.fromJson(initial == null ? settings.controlLayout() : initial);
         if (layout.items().isEmpty()) {
             layout = ControlLayout.forScheme(ControlOverlay.Scheme.WASD);
         }
 
-        overlay.render(layout);
-        overlay.setEditing(true, this);
-
-        size.addOnChangeListener((slider, value, fromUser) -> {
-            if (selected != null && fromUser) {
-                selected.size = (int) value;
-                overlay.requestLayout();
-            }
-        });
-
-        opacity.addOnChangeListener((slider, value, fromUser) -> {
-            if (selected != null && fromUser) {
-                selected.opacity = value / 100f;
-                overlay.restyle();
-            }
-        });
-
-        fillSwatch.setOnClickListener(view -> {
-            if (selected != null) {
-                ColorPicker.show(this, R.string.controls_colour_fill, selected.fillColor, palette, rgb -> {
-                    selected.fillColor = rgb;
-                    applyStyle();
-                });
-            }
-        });
-
-        strokeSwatch.setOnClickListener(view -> {
-            if (selected != null) {
-                ColorPicker.show(this, R.string.controls_colour_stroke, selected.strokeColor, palette, rgb -> {
-                    selected.strokeColor = rgb;
-                    applyStyle();
-                });
-            }
-        });
-
-        labelSwatch.setOnClickListener(view -> {
-            if (selected != null) {
-                ColorPicker.show(this, R.string.controls_colour_label, selected.labelColor, palette, rgb -> {
-                    selected.labelColor = rgb;
-                    applyStyle();
-                });
-            }
-        });
-
-        findViewById(R.id.controls_style_all).setOnClickListener(button -> applyStyleToAll());
-        findViewById(R.id.controls_delete).setOnClickListener(button -> deleteSelected());
-        findViewById(R.id.controls_add).setOnClickListener(button -> showAdd());
-        findViewById(R.id.controls_preset).setOnClickListener(button -> showPresets());
-        findViewById(R.id.controls_save).setOnClickListener(button -> save());
+        overlay.setAccent(palette.get(Palette.Role.ACCENT), palette.get(Palette.Role.ON_ACCENT));
+        new ControlEditor(this, overlay, findViewById(R.id.control_editor), palette, this).start(layout);
     }
 
     @Override
-    public void onSelected(ControlItem item) {
-        selected = item;
-        showSelection();
-    }
-
-    @Override
-    public void onMoved(ControlItem item) {
-        // Positions are written straight into the layout while dragging; nothing left to do here.
-    }
-
-    private void showSelection() {
-        keyRow.removeAllViews();
-
-        if (selected == null) {
-            editor.setVisibility(View.GONE);
-            hint.setText(R.string.controls_hint);
-            return;
-        }
-
-        editor.setVisibility(View.VISIBLE);
-        hint.setText(getString(R.string.controls_selected, selected.caption()));
-        size.setValue(Math.max(size.getValueFrom(), Math.min(size.getValueTo(), selected.size)));
-        opacity.setValue(snap(opacity, selected.opacity * 100f));
-
-        boolean pad = selected.kind == ControlItem.Kind.TOUCHPAD;
-        fillSwatch.setVisibility(pad ? View.GONE : View.VISIBLE);
-        labelSwatch.setVisibility(pad ? View.GONE : View.VISIBLE);
-        showSwatches();
-
-        switch (selected.kind) {
-            case BUTTON:
-                addKeyButton(R.string.controls_key, selected.key, key -> {
-                    selected.key = key;
-                    selected.label = key.label();
-                    refresh();
-                });
-                break;
-
-            case JOYSTICK:
-            case DPAD:
-                addKeyButton(R.string.controls_up, selected.up, key -> {
-                    selected.up = key;
-                    refresh();
-                });
-                addKeyButton(R.string.controls_down, selected.down, key -> {
-                    selected.down = key;
-                    refresh();
-                });
-                addKeyButton(R.string.controls_left, selected.left, key -> {
-                    selected.left = key;
-                    refresh();
-                });
-                addKeyButton(R.string.controls_right, selected.right, key -> {
-                    selected.right = key;
-                    refresh();
-                });
-                break;
-
-            case MOUSE:
-                addMouseButton();
-                break;
-
-            case SWITCHER:
-                addSlotsButton();
-                addOrientationButton();
-                break;
-
-            default:
-                break;
-        }
-    }
-
-    private void showSwatches() {
-        ColorPicker.swatch(fillSwatch, selected.fillColor);
-        ColorPicker.swatch(strokeSwatch, selected.strokeColor);
-        ColorPicker.swatch(labelSwatch, selected.labelColor);
-    }
-
-    private void applyStyle() {
-        overlay.restyle();
-        showSwatches();
-    }
-
-    private void applyStyleToAll() {
-        if (selected == null) {
-            return;
-        }
-
-        for (ControlItem item : layout.items()) {
-            selected.copyStyleTo(item);
-        }
-
-        overlay.restyle();
-        Toast.makeText(this, R.string.controls_style_all_done, Toast.LENGTH_SHORT).show();
-    }
-
-    private static float snap(Slider slider, float value) {
-        float step = slider.getStepSize();
-        float from = slider.getValueFrom();
-        float snapped = from + Math.round((value - from) / step) * step;
-        return Math.max(from, Math.min(slider.getValueTo(), snapped));
-    }
-
-    private interface KeyChoice {
-        void onChosen(VirtualKey key);
-    }
-
-    private void addChoice(CharSequence text, View.OnClickListener click) {
-        MaterialButton button = new MaterialButton(this, null,
-                com.google.android.material.R.attr.materialButtonOutlinedStyle);
-        button.setText(text);
-        button.setOnClickListener(click);
-
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        params.setMarginEnd(dp(8));
-        keyRow.addView(button, params);
-    }
-
-    private void addKeyButton(int labelId, VirtualKey current, KeyChoice choice) {
-        addChoice(getString(labelId, current.label()), view -> pickKey(choice));
-    }
-
-    private void addMouseButton() {
-        boolean right = selected.mouseButton == BrovanNative.BUTTON_RIGHT;
-
-        addChoice(getString(right ? R.string.controls_mouse_right : R.string.controls_mouse_left), view -> {
-            selected.mouseButton = right ? BrovanNative.BUTTON_LEFT : BrovanNative.BUTTON_RIGHT;
-            selected.label = right ? "L" : "R";
-            refresh();
-        });
-    }
-
-    private void addSlotsButton() {
-        String slots = selected.slots > 0
-                ? Integer.toString(selected.slots)
-                : getString(R.string.controls_slots_wheel);
-
-        addChoice(getString(R.string.controls_slots, slots), view -> pickSlots());
-    }
-
-    private void addOrientationButton() {
-        addChoice(getString(selected.horizontal ? R.string.controls_horizontal : R.string.controls_vertical),
-                view -> {
-                    selected.horizontal = !selected.horizontal;
-                    refresh();
-                });
-    }
-
-    /** The first entry keeps no slots, which leaves the control turning the wheel. */
-    private void pickSlots() {
-        CharSequence[] labels = new CharSequence[ControlItem.MAX_SLOTS];
-        labels[0] = getString(R.string.controls_slots_wheel);
-        for (int i = 1; i < labels.length; i++) {
-            labels[i] = Integer.toString(i + 1);
-        }
-
-        Theming.dialog(this)
-                .setTitle(R.string.controls_slots_title)
-                .setItems(labels, (dialog, index) -> {
-                    selected.slots = index == 0 ? 0 : index + 1;
-                    refresh();
-                })
-                .show();
-    }
-
-    private void pickKey(KeyChoice choice) {
-        VirtualKey[] all = VirtualKey.values();
-        CharSequence[] labels = new CharSequence[all.length];
-        for (int i = 0; i < all.length; i++) {
-            labels[i] = all[i].label();
-        }
-
-        Theming.dialog(this)
-                .setTitle(R.string.controls_pick_key)
-                .setItems(labels, (dialog, index) -> choice.onChosen(all[index]))
-                .show();
-    }
-
-    private void showAdd() {
-        CharSequence[] options = {
-                getString(R.string.controls_add_button),
-                getString(R.string.controls_add_joystick),
-                getString(R.string.controls_add_dpad),
-                getString(R.string.controls_add_touchpad),
-                getString(R.string.controls_add_mouse),
-                getString(R.string.controls_add_switcher),
-                getString(R.string.controls_add_wheel)};
-
-        Theming.dialog(this)
-                .setTitle(R.string.controls_add)
-                .setItems(options, (dialog, index) -> add(index))
-                .show();
-    }
-
-    private void add(int index) {
-        ControlItem item;
-
-        switch (index) {
-            case 1:
-                item = ControlItem.stick(ControlItem.Kind.JOYSTICK,
-                        VirtualKey.W, VirtualKey.S, VirtualKey.A, VirtualKey.D, 0.5f, 0.5f, 180);
-                break;
-
-            case 2:
-                item = ControlItem.stick(ControlItem.Kind.DPAD,
-                        VirtualKey.UP, VirtualKey.DOWN, VirtualKey.LEFT, VirtualKey.RIGHT, 0.5f, 0.5f, 190);
-                break;
-
-            case 3:
-                item = ControlItem.touchpad(0.5f, 0.5f, 260);
-                break;
-
-            case 4:
-                item = ControlItem.mouse(BrovanNative.BUTTON_LEFT, "L", 0.5f, 0.5f, 66);
-                break;
-
-            case 5:
-                item = ControlItem.switcher(4, false, 0.5f, 0.5f, 190);
-                break;
-
-            case 6:
-                item = ControlItem.switcher(0, false, 0.5f, 0.5f, 150);
-                break;
-
-            default:
-                item = ControlItem.button(VirtualKey.SPACE, VirtualKey.SPACE.label(), 0.5f, 0.5f, 70);
-                break;
-        }
-
-        layout.add(item);
-        overlay.render(layout);
-        overlay.select(item);
-    }
-
-    private void deleteSelected() {
-        if (selected == null) {
-            return;
-        }
-
-        layout.remove(selected);
-        selected = null;
-        overlay.render(layout);
-        showSelection();
-    }
-
-    private void showPresets() {
-        ControlOverlay.Scheme[] schemes = {ControlOverlay.Scheme.WASD, ControlOverlay.Scheme.ARROWS,
-                ControlOverlay.Scheme.DPAD, ControlOverlay.Scheme.TOUCHPAD};
-        String[] names = getResources().getStringArray(R.array.control_schemes);
-        CharSequence[] labels = new CharSequence[schemes.length];
-        for (int i = 0; i < schemes.length; i++) {
-            labels[i] = names[schemes[i].ordinal()];
-        }
-
-        Theming.dialog(this)
-                .setTitle(R.string.controls_preset_title)
-                .setItems(labels, (dialog, index) -> {
-                    layout = ControlLayout.forScheme(schemes[index]);
-                    selected = null;
-                    overlay.render(layout);
-                    showSelection();
-                })
-                .show();
-    }
-
-    private void refresh() {
-        overlay.render(layout);
-        overlay.select(selected);
-    }
-
-    private void save() {
+    public void onSave(ControlLayout layout) {
         if (program == null) {
             settings.setControlLayout(layout.toJson());
             settings.setControlScheme(ControlOverlay.Scheme.CUSTOM.ordinal());
         } else {
-            Map<String, String> changes = new HashMap<>();
-            changes.put("layout", layout.toJson());
-            changes.put("controls", Integer.toString(ControlOverlay.Scheme.CUSTOM.ordinal()));
             try {
-                library.update(program.id(), changes);
+                new ProgramSettings(library, program, settings).setCustomLayout(layout.toJson());
             } catch (IOException failure) {
                 Toast.makeText(this, getString(R.string.program_save_failed, failure.getMessage()),
                         Toast.LENGTH_LONG).show();
@@ -424,7 +71,8 @@ public class ControlsActivity extends AppCompatActivity implements ControlOverla
         finish();
     }
 
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
+    @Override
+    public void onCancel() {
+        finish();
     }
 }

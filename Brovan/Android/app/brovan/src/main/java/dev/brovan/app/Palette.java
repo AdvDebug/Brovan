@@ -6,14 +6,15 @@ import android.graphics.Color;
 final class Palette {
 
     enum Role {
-        BACKGROUND(R.string.theme_background, 0xFF0D1117),
-        SURFACE(R.string.theme_surface, 0xFF161C24),
-        SURFACE_VARIANT(R.string.theme_surface_variant, 0xFF1E2733),
-        OUTLINE(R.string.theme_outline, 0xFF2A3542),
-        ACCENT(R.string.theme_accent, 0xFF7C9CF5),
-        ON_ACCENT(R.string.theme_on_accent, 0xFF0B1020),
-        TEXT_PRIMARY(R.string.theme_text_primary, 0xFFE6EDF3),
-        TEXT_SECONDARY(R.string.theme_text_secondary, 0xFF95A1B2);
+        BACKGROUND(R.string.theme_background, 0xFF0E0E10),
+        SURFACE(R.string.theme_surface, 0xFF17171A),
+        SURFACE_VARIANT(R.string.theme_surface_variant, 0xFF1F1F23),
+        OUTLINE(R.string.theme_outline, 0xFF2A2A2F),
+        ACCENT(R.string.theme_accent, 0xFF3BD6E1),
+        ON_ACCENT(R.string.theme_on_accent, 0xFF031A1C),
+        TEXT_PRIMARY(R.string.theme_text_primary, 0xFFEDEDEF),
+        TEXT_SECONDARY(R.string.theme_text_secondary, 0xFF9A9AA2),
+        WARNING(R.string.theme_warning, 0xFFE8C36B);
 
         final int labelId;
         final int fallback;
@@ -25,6 +26,8 @@ final class Palette {
     }
 
     enum Preset {
+        GRAPHITE(R.string.theme_preset_graphite,
+                0x0E0E10, 0x17171A, 0x1F1F23, 0x2A2A2F, 0x3BD6E1, 0x031A1C, 0xEDEDEF, 0x9A9AA2),
         MIDNIGHT(R.string.theme_preset_midnight,
                 0x0D1117, 0x161C24, 0x1E2733, 0x2A3542, 0x7C9CF5, 0x0B1020, 0xE6EDF3, 0x95A1B2),
         SLATE(R.string.theme_preset_slate,
@@ -47,7 +50,7 @@ final class Palette {
         }
 
         Palette palette() {
-            Palette palette = new Palette();
+            Palette palette = defaults();
 
             for (int i = 0; i < colors.length; i++) {
                 palette.colors[i] = 0xFF000000 | colors[i];

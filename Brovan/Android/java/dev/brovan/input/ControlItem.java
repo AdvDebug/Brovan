@@ -3,13 +3,16 @@ package dev.brovan.input;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/**
- * One control on the overlay. Positions are fractions of the overlay so a layout survives a different
- * screen or orientation; sizes stay in dp so a control keeps its physical size.
- */
 public final class ControlItem {
 
+    /** The screen the defaults are laid out on and that stored fractions refer to, in dp. */
+    private static final float REFERENCE_WIDTH_DP = 915f;
+    private static final float REFERENCE_HEIGHT_DP = 412f;
+
     public static final int DEFAULT_COLOR = 0xFFFFFF;
+
+    /** No fill was chosen, so the control draws in the app accent and follows the theme. */
+    public static final int ACCENT_FILL = -1;
 
     /** A switcher steps along the digit row, so ten is as many slots as one can bind. */
     public static final int MAX_SLOTS = 10;
@@ -24,8 +27,10 @@ public final class ControlItem {
     }
 
     public Kind kind;
-    public float x;
-    public float y;
+    public boolean fromEnd;
+    public float offsetX;
+    public boolean fromBottom;
+    public float offsetY;
     public int size;
     public VirtualKey key;
     public VirtualKey up;
@@ -36,68 +41,84 @@ public final class ControlItem {
     public int slots;
     public boolean horizontal;
     public String label;
-    public int fillColor = DEFAULT_COLOR;
+    public int fillColor = ACCENT_FILL;
     public int strokeColor = DEFAULT_COLOR;
     public int labelColor = DEFAULT_COLOR;
     public float opacity = 1f;
+
+    public int fill(int accent) {
+        return fillColor == ACCENT_FILL ? accent & 0xFFFFFF : fillColor;
+    }
 
     public static int shade(int rgb, int alpha, float opacity) {
         return (Math.round(alpha * opacity) << 24) | (rgb & 0xFFFFFF);
     }
 
-    public static ControlItem button(VirtualKey key, String label, float x, float y, int size) {
+    public ControlItem at(boolean fromEnd, float offsetX, boolean fromBottom, float offsetY) {
+        this.fromEnd = fromEnd;
+        this.offsetX = offsetX;
+        this.fromBottom = fromBottom;
+        this.offsetY = offsetY;
+        return this;
+    }
+
+    /** Measures from the nearer side, and from the bottom below the top third, so a thumb cluster keeps its spacing. */
+    public ControlItem anchorAt(float centreX, float centreY, float widthDp, float heightDp) {
+        boolean end = centreX > widthDp / 2f;
+        boolean bottom = centreY > heightDp / 3f;
+        return at(end, end ? widthDp - centreX : centreX, bottom, bottom ? heightDp - centreY : centreY);
+    }
+
+    public float centreX(float widthDp) {
+        return fromEnd ? widthDp - offsetX : offsetX;
+    }
+
+    public float centreY(float heightDp) {
+        return fromBottom ? heightDp - offsetY : offsetY;
+    }
+
+    public static ControlItem button(VirtualKey key, int size) {
         ControlItem item = new ControlItem();
         item.kind = Kind.BUTTON;
         item.key = key;
-        item.label = label;
-        item.x = x;
-        item.y = y;
         item.size = size;
         return item;
     }
 
     public static ControlItem stick(Kind kind, VirtualKey up, VirtualKey down, VirtualKey left, VirtualKey right,
-                                    float x, float y, int size) {
+                                    int size) {
         ControlItem item = new ControlItem();
         item.kind = kind;
         item.up = up;
         item.down = down;
         item.left = left;
         item.right = right;
-        item.x = x;
-        item.y = y;
         item.size = size;
         return item;
     }
 
-    public static ControlItem touchpad(float x, float y, int size) {
+    public static ControlItem touchpad(int size) {
         ControlItem item = new ControlItem();
         item.kind = Kind.TOUCHPAD;
-        item.x = x;
-        item.y = y;
         item.size = size;
         return item;
     }
 
-    public static ControlItem mouse(int button, String label, float x, float y, int size) {
+    public static ControlItem mouse(int button, String label, int size) {
         ControlItem item = new ControlItem();
         item.kind = Kind.MOUSE;
         item.mouseButton = button;
         item.label = label;
-        item.x = x;
-        item.y = y;
         item.size = size;
         return item;
     }
 
     /** No slots leaves the control with nothing of its own to select, which is what turns the wheel instead. */
-    public static ControlItem switcher(int slots, boolean horizontal, float x, float y, int size) {
+    public static ControlItem switcher(int slots, boolean horizontal, int size) {
         ControlItem item = new ControlItem();
         item.kind = Kind.SWITCHER;
         item.slots = slots;
         item.horizontal = horizontal;
-        item.x = x;
-        item.y = y;
         item.size = size;
         return item;
     }
@@ -105,8 +126,7 @@ public final class ControlItem {
     public ControlItem copy() {
         ControlItem item = new ControlItem();
         item.kind = kind;
-        item.x = x;
-        item.y = y;
+        item.at(fromEnd, offsetX, fromBottom, offsetY);
         item.size = size;
         item.key = key;
         item.up = up;
@@ -135,7 +155,7 @@ public final class ControlItem {
     public String caption() {
         switch (kind) {
             case BUTTON:
-                return label != null ? label : key.label();
+                return label != null ? label : key.shortLabel();
             case MOUSE:
                 return label != null ? label : "Click";
             case TOUCHPAD:
@@ -143,20 +163,28 @@ public final class ControlItem {
             case SWITCHER:
                 return slots > 0 ? "Switcher" : "Wheel";
             default:
-                return up.label() + left.label() + down.label() + right.label();
+                return up.shortLabel() + left.shortLabel() + down.shortLabel() + right.shortLabel();
         }
     }
 
     JSONObject toJson() throws JSONException {
         JSONObject json = new JSONObject();
         json.put("kind", kind.name());
-        json.put("x", x);
-        json.put("y", y);
+        json.put("end", fromEnd);
+        json.put("dx", offsetX);
+        json.put("bottom", fromBottom);
+        json.put("dy", offsetY);
+        // Older builds read only these fractions and place them unclamped.
+        json.put("x", fraction(centreX(REFERENCE_WIDTH_DP) / REFERENCE_WIDTH_DP));
+        json.put("y", fraction(centreY(REFERENCE_HEIGHT_DP) / REFERENCE_HEIGHT_DP));
         json.put("size", size);
         json.put("mouseButton", mouseButton);
         json.put("slots", slots);
         json.put("horizontal", horizontal);
-        json.put("fill", fillColor);
+        if (fillColor != ACCENT_FILL) {
+            json.put("colour", fillColor);
+            json.put("fill", fillColor);
+        }
         json.put("stroke", strokeColor);
         json.put("text", labelColor);
         json.put("opacity", opacity);
@@ -188,8 +216,14 @@ public final class ControlItem {
             return null;
         }
 
-        item.x = (float) json.optDouble("x", 0.5);
-        item.y = (float) json.optDouble("y", 0.5);
+        if (json.has("dx") && json.has("dy")) {
+            item.at(json.optBoolean("end", false), (float) json.optDouble("dx", 0.0),
+                    json.optBoolean("bottom", false), (float) json.optDouble("dy", 0.0));
+        } else {
+            // "x" and "y" alone are fractions of the screen; they are read on the reference screen.
+            item.anchorAt((float) json.optDouble("x", 0.5) * REFERENCE_WIDTH_DP,
+                    (float) json.optDouble("y", 0.5) * REFERENCE_HEIGHT_DP, REFERENCE_WIDTH_DP, REFERENCE_HEIGHT_DP);
+        }
         item.size = json.optInt("size", 70);
         item.mouseButton = json.optInt("mouseButton", 0);
         item.slots = Math.max(0, Math.min(MAX_SLOTS, json.optInt("slots", 0)));
@@ -199,13 +233,24 @@ public final class ControlItem {
         item.down = VirtualKey.byName(json.optString("down", null), VirtualKey.S);
         item.left = VirtualKey.byName(json.optString("left", null), VirtualKey.A);
         item.right = VirtualKey.byName(json.optString("right", null), VirtualKey.D);
-        item.label = json.optString("label", null);
-        item.fillColor = json.optInt("fill", DEFAULT_COLOR);
+        // A button shows the key it sends. A label stored for a button is an older default.
+        item.label = item.kind == Kind.BUTTON ? null : json.optString("label", null);
+        if (json.has("colour")) {
+            item.fillColor = json.optInt("colour", ACCENT_FILL);
+        } else {
+            // A layout with only "fill" stores a fill nobody chose as white.
+            int fill = json.optInt("fill", ACCENT_FILL);
+            item.fillColor = fill == DEFAULT_COLOR ? ACCENT_FILL : fill;
+        }
         item.strokeColor = json.optInt("stroke", DEFAULT_COLOR);
         item.labelColor = json.optInt("text", DEFAULT_COLOR);
         item.opacity = clampOpacity((float) json.optDouble("opacity", 1.0));
 
         return item;
+    }
+
+    private static float fraction(float value) {
+        return Math.max(0.02f, Math.min(0.98f, value));
     }
 
     private static float clampOpacity(float value) {

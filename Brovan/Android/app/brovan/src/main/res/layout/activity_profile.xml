@@ -64,7 +64,8 @@
                     <LinearLayout style="@style/SettingsChoiceRow.Group">
                         <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_display_scale" />
                         <TextView android:id="@+id/profile_display_scale" style="@style/SettingsChoiceValue" />
-                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_display_scale_summary" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_display_scale_summary"
+                        android:visibility="gone" />
                     </LinearLayout>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -110,7 +111,6 @@
                             <TextView style="@style/SettingsRowTitle" android:text="@string/program_control_layout" />
                             <TextView style="@style/SettingsRowSummary" android:text="@string/settings_control_layout_summary" />
                         </LinearLayout>
-                        <ImageView style="@style/SettingsChevron" />
                     </LinearLayout>
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
@@ -125,7 +125,8 @@
                     <LinearLayout style="@style/SettingsChoiceRow.Group">
                         <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_low_memory" />
                         <TextView android:id="@+id/profile_memory" style="@style/SettingsChoiceValue" />
-                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_low_memory_summary" />
+                        <TextView style="@style/SettingsRowSummary" android:text="@string/settings_low_memory_summary"
+                        android:visibility="gone" />
                     </LinearLayout>
                     <LinearLayout style="@style/SettingsChoiceRow.Group">
                         <TextView style="@style/SettingsChoiceLabel" android:text="@string/settings_jit_cache" />

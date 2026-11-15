@@ -23,6 +23,10 @@
                 android:layout_height="match_parent" />
         </dev.brovan.input.ControlOverlay>
 
+        <include
+            layout="@layout/view_control_editor"
+            android:visibility="gone" />
+
         <!-- Keep the SurfaceView visible so later guest windows can use its surface. -->
         <LinearLayout
             android:id="@+id/terminal_panel"

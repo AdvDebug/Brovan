@@ -1,5 +1,6 @@
 package dev.brovan.app;
 
+import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
@@ -27,15 +28,17 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.nio.charset.StandardCharsets;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
 
@@ -46,12 +49,14 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
     }
 
     enum Style {
-        GRID(R.string.library_style_grid, R.drawable.ic_style_grid, R.layout.item_app_tile, 176, 0, 15f, false, 0f),
-        COMPACT(R.string.library_style_compact, R.drawable.ic_style_compact, R.layout.item_app, 112, 48, 13f, false, 0f),
-        LIST(R.string.library_style_list, R.drawable.ic_style_list, R.layout.item_app_row, 0, 52, 15f, true, 0f),
-        LARGE(R.string.library_style_large, R.drawable.ic_style_large, R.layout.item_app_row, 0, 84, 18f, true, 0f),
-        CAROUSEL(R.string.library_style_carousel, R.drawable.ic_style_carousel, R.layout.item_app_hero, 0, 0, 26f, true, 1f),
-        SHELF(R.string.library_style_shelf, R.drawable.ic_style_shelf, R.layout.item_app_tile, 0, 0, 16f, false, 0.52f);
+        GRID(0, R.string.library_style_grid, R.drawable.ic_style_grid, R.layout.item_app_tile, 176, 0, 16f, 0f),
+        COMPACT(1, R.string.library_style_compact, R.drawable.ic_style_compact, R.layout.item_app, 112, 48, 14f, 0f),
+        LIST(2, R.string.library_style_list, R.drawable.ic_style_list, R.layout.item_app_row, 0, 56, 16f, 0f),
+        CAROUSEL(4, R.string.library_style_carousel, R.drawable.ic_style_carousel, R.layout.item_app_hero, 0, 0, 26f, 1f),
+        SHELF(5, R.string.library_style_shelf, R.drawable.ic_style_shelf, R.layout.item_app_tile, 0, 0, 16f, 0.52f);
+
+        // Saved values stay stable across releases; a value with no style opens as List.
+        private final int saved;
 
         private final int labelId;
         private final int previewId;
@@ -59,18 +64,17 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         private final int columnDp;
         private final int artDp;
         private final float nameSize;
-        private final boolean detail;
         private final float pageFraction;
 
-        Style(int labelId, int previewId, int layoutId, int columnDp, int artDp, float nameSize,
-              boolean detail, float pageFraction) {
+        Style(int saved, int labelId, int previewId, int layoutId, int columnDp, int artDp, float nameSize,
+              float pageFraction) {
+            this.saved = saved;
             this.labelId = labelId;
             this.previewId = previewId;
             this.layoutId = layoutId;
             this.columnDp = columnDp;
             this.artDp = artDp;
             this.nameSize = nameSize;
-            this.detail = detail;
             this.pageFraction = pageFraction;
         }
 
@@ -86,6 +90,14 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
             return pageFraction > 0f;
         }
 
+        int artDp() {
+            return artDp;
+        }
+
+        boolean rows() {
+            return layoutId == R.layout.item_app_row;
+        }
+
         int pageWidth(int viewport) {
             return Math.round(viewport * pageFraction);
         }
@@ -94,18 +106,35 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
             return columnDp == 0 ? 1 : Math.max(2, widthDp / columnDp);
         }
 
-        static Style of(int ordinal) {
-            Style[] all = values();
-            return ordinal >= 0 && ordinal < all.length ? all[ordinal] : GRID;
+        int saved() {
+            return saved;
+        }
+
+        static Style of(int saved) {
+            for (Style style : values()) {
+                if (style.saved == saved) {
+                    return style;
+                }
+            }
+            return LIST;
         }
     }
 
-    private static final int SAMPLE = 16;
-    private static final float RADIUS = 18f;
 
     private static final LruCache<String, Bitmap> icons = new LruCache<>(64);
     private static final Set<String> withoutIcon = new HashSet<>();
-    private static final Map<String, Integer> tints = new HashMap<>();
+    private static final Set<String> fullBleed = ConcurrentHashMap.newKeySet();
+    private static final String FULL_BLEED_SUFFIX = ".full.png";
+    private static final String INSET_SUFFIX = ".inset.png";
+    private static final String NO_ICON_SUFFIX = ".none";
+    private static final ExecutorService LOADER = iconLoader();
+    // SIID_APPLICATION, the icon the shell gives an executable that has none.
+    private static final int STOCK_APPLICATION_ICON = 15;
+    private static final float ICON_INSET = 0.14f;
+    private static final float STOCK_ICON_INSET = 0.22f;
+    private static final int STOCK_ICON_ALPHA = 230;
+    private static volatile Bitmap stockIcon;
+    private static boolean stockIconRead;
 
     private final List<Program> all = new ArrayList<>();
     private final List<Program> visible = new ArrayList<>();
@@ -113,16 +142,24 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private final File iconCache;
-    private final Executor worker;
+    private final File stockIcons;
+    private final Palette palette;
     private final Listener listener;
 
     private Style style = Style.GRID;
     private String query = "";
 
-    ProgramAdapter(File iconCache, Executor worker, Listener listener) {
+    ProgramAdapter(File iconCache, File stockIcons, Palette palette, Listener listener) {
         this.iconCache = iconCache;
-        this.worker = worker;
+        this.stockIcons = stockIcons;
+        this.palette = palette;
         this.listener = listener;
+    }
+
+    private static ExecutorService iconLoader() {
+        ThreadPoolExecutor loader = new ThreadPoolExecutor(2, 2, 10, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
+        loader.allowCoreThreadTimeOut(true);
+        return loader;
     }
 
     void submit(List<Program> updated) {
@@ -194,12 +231,14 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         holder.name.setText(program.name());
         holder.name.setTextSize(style.nameSize);
         boolean failed = !program.lastFailure().isEmpty();
-        holder.detail.setText(failed ? holder.itemView.getContext().getString(R.string.program_last_run_failed)
-                : program.executableName());
-        holder.detail.setTextColor(failed ? holder.itemView.getContext().getColor(R.color.log_warn)
-                : Theming.color(holder.itemView.getContext(), Palette.Role.TEXT_SECONDARY));
-        holder.detail.setVisibility(style.detail || failed ? View.VISIBLE : View.GONE);
-        holder.actions.setOnClickListener(view -> listener.onActions(program));
+        holder.detail.setVisibility(failed ? View.VISIBLE : View.GONE);
+        if (failed) {
+            holder.detail.setText(R.string.program_last_run_failed);
+            holder.detail.setTextColor(palette.get(Palette.Role.WARNING));
+        }
+        if (holder.actions != null) {
+            holder.actions.setOnClickListener(view -> listener.onActions(program));
+        }
         holder.itemView.setScaleX(1f);
         holder.itemView.setScaleY(1f);
         holder.itemView.setAlpha(1f);
@@ -217,10 +256,8 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
 
         String key = iconKey(program);
         if (holder.art != null) {
-            Integer tint = tints.get(key);
-            holder.art.setBackground(backdrop(tint != null ? tint : monogramColor(program.name())));
+            frameIcon(holder);
         }
-
         holder.itemView.setOnClickListener(view -> listener.onLaunch(program));
         holder.itemView.setOnLongClickListener(view -> {
             listener.onActions(program);
@@ -239,6 +276,49 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         return visible.size();
     }
 
+    private void frameIcon(Holder holder) {
+        int size = holder.art.getLayoutParams().width;
+        if (size <= 0) {
+            return;
+        }
+
+        GradientDrawable tile = new GradientDrawable();
+        tile.setColor(palette.get(Palette.Role.OUTLINE));
+        tile.setCornerRadius(size * 0.23f);
+        holder.art.setBackground(tile);
+        holder.art.setClipToOutline(true);
+    }
+
+    private static void placeIcon(Holder holder, float inset, boolean fill) {
+        holder.icon.setScaleType(fill ? ImageView.ScaleType.CENTER_CROP : ImageView.ScaleType.FIT_CENTER);
+
+        if (holder.art == null) {
+            return;
+        }
+
+        int padding = Math.round(holder.art.getLayoutParams().width * inset);
+        holder.icon.setPadding(padding, padding, padding, padding);
+    }
+
+    private static boolean fillsTile(Bitmap icon) {
+        if (!icon.hasAlpha()) {
+            return true;
+        }
+
+        int width = icon.getWidth();
+        int height = icon.getHeight();
+        int[] pixels = new int[width * height];
+        icon.getPixels(pixels, 0, width, 0, 0, width, height);
+
+        int solid = 0;
+        for (int pixel : pixels) {
+            if ((pixel >>> 24) >= 128) {
+                solid++;
+            }
+        }
+        return solid >= pixels.length * 0.85;
+    }
+
     private static String iconKey(Program program) {
         return program.id() + "-" + UUID.nameUUIDFromBytes(
                 program.executableName().getBytes(StandardCharsets.UTF_8));
@@ -248,27 +328,39 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         holder.key = key;
 
         Bitmap ready = icons.get(key);
+        if (ready == null && !loading.contains(key) && !withoutIcon.contains(key)) {
+            ready = icon(program, key, false);
+            if (ready != null) {
+                icons.put(key, ready);
+            }
+        }
+
         if (ready != null) {
+            boolean fill = fullBleed.contains(key);
+            placeIcon(holder, ready == stockIcon ? STOCK_ICON_INSET : fill ? 0f : ICON_INSET, fill);
+            holder.icon.setImageAlpha(ready == stockIcon ? STOCK_ICON_ALPHA : 255);
+            holder.icon.setImageTintList(null);
             holder.icon.setImageBitmap(ready);
             return;
         }
 
-        holder.icon.setImageDrawable(new Monogram(program.name()));
+        placeIcon(holder, STOCK_ICON_INSET, false);
+        holder.icon.setImageAlpha(255);
+        holder.icon.setImageResource(R.drawable.ic_window);
+        holder.icon.setImageTintList(ColorStateList.valueOf(palette.get(Palette.Role.TEXT_SECONDARY)));
 
         if (withoutIcon.contains(key) || !loading.add(key)) {
             return;
         }
 
-        worker.execute(() -> {
-            Bitmap loaded = read(program, key);
-            int tint = loaded != null ? dominant(loaded) : monogramColor(program.name());
-            main.post(() -> finish(key, loaded, tint));
+        LOADER.execute(() -> {
+            Bitmap loaded = icon(program, key, true);
+            main.post(() -> finish(key, loaded));
         });
     }
 
-    private void finish(String key, Bitmap loaded, int tint) {
+    private void finish(String key, Bitmap loaded) {
         loading.remove(key);
-        tints.put(key, tint);
 
         if (loaded == null) {
             withoutIcon.add(key);
@@ -284,82 +376,118 @@ final class ProgramAdapter extends RecyclerView.Adapter<ProgramAdapter.Holder> {
         }
     }
 
-    private static Drawable backdrop(int tint) {
-        float[] hsv = new float[3];
-        Color.colorToHSV(tint, hsv);
-
-        int top = Color.HSVToColor(new float[]{hsv[0], Math.min(hsv[1], 0.55f), 0.42f});
-        int bottom = Color.HSVToColor(new float[]{hsv[0], Math.min(hsv[1], 0.4f), 0.17f});
-
-        GradientDrawable panel = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{top, bottom});
-        panel.setShape(GradientDrawable.RECTANGLE);
-        panel.setCornerRadius(RADIUS);
-        panel.setStroke(1, Color.argb(40, 255, 255, 255));
-        return panel;
-    }
-
-    private static int dominant(Bitmap icon) {
-        Bitmap small = Bitmap.createScaledBitmap(icon, SAMPLE, SAMPLE, true);
-        int[] pixels = new int[SAMPLE * SAMPLE];
-        small.getPixels(pixels, 0, SAMPLE, 0, 0, SAMPLE, SAMPLE);
-        small.recycle();
-
-        float[] hsv = new float[3];
-        float best = -1f;
-        float hue = 0f;
-        float saturation = 0f;
-
-        for (int pixel : pixels) {
-            if ((pixel >>> 24) < 128) {
-                continue;
-            }
-
-            Color.colorToHSV(pixel, hsv);
-            float score = hsv[1] * hsv[2];
-
-            if (score > best) {
-                best = score;
-                hue = hsv[0];
-                saturation = hsv[1];
-            }
-        }
-
-        if (best <= 0f) {
-            return 0xFF5A6472;
-        }
-
-        return Color.HSVToColor(new float[]{hue, Math.max(0.25f, Math.min(saturation, 0.6f)), 0.5f});
-    }
-
     private static int monogramColor(String name) {
         return Color.HSVToColor(new float[]{(name.hashCode() & 0x7FFFFFFF) % 360f, 0.4f, 0.52f});
     }
 
-    private Bitmap read(Program program, String key) {
+    // Without mayExtract the executable is not parsed, so an icon missing from the cache comes back null.
+    private Bitmap icon(Program program, String key, boolean mayExtract) {
         File exe = program.executable();
-        File cached = new File(iconCache, String.format(Locale.ROOT, "%s-%d.png", key, exe.lastModified()));
+        String base = key + "-" + exe.lastModified();
+        File full = new File(iconCache, base + FULL_BLEED_SUFFIX);
+        File inset = new File(iconCache, base + INSET_SUFFIX);
+        File none = new File(iconCache, base + NO_ICON_SUFFIX);
 
-        Bitmap stored = BitmapFactory.decodeFile(cached.getPath());
+        Bitmap stored = decode(full);
+        if (stored != null) {
+            fullBleed.add(key);
+            return stored;
+        }
+        stored = decode(inset);
         if (stored != null) {
             return stored;
         }
-
-        Bitmap extracted = ExeIcon.extract(exe);
-        if (extracted != null) {
-            store(cached, extracted);
+        if (none.isFile()) {
+            return stockIcon(stockIcons, iconCache, mayExtract);
+        }
+        if (!mayExtract) {
+            return null;
         }
 
-        return extracted;
+        Bitmap extracted = ExeIcon.extract(exe);
+        if (extracted == null) {
+            store(none, null);
+            return stockIcon(stockIcons, iconCache, true);
+        }
+
+        Bitmap art = trimmed(extracted);
+        boolean fill = fillsTile(art);
+        if (fill) {
+            fullBleed.add(key);
+        }
+        store(fill ? full : inset, art);
+        return art;
     }
 
-    private void store(File destination, Bitmap bitmap) {
-        if (!iconCache.isDirectory() && !iconCache.mkdirs()) {
+    private static Bitmap decode(File file) {
+        return file.isFile() ? BitmapFactory.decodeFile(file.getPath()) : null;
+    }
+
+    private static Bitmap trimmed(Bitmap icon) {
+        int width = icon.getWidth();
+        int height = icon.getHeight();
+        int[] pixels = new int[width * height];
+        icon.getPixels(pixels, 0, width, 0, 0, width, height);
+
+        int left = width, top = height, right = -1, bottom = -1;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                if ((pixels[y * width + x] >>> 24) > 24) {
+                    left = Math.min(left, x);
+                    right = Math.max(right, x);
+                    top = Math.min(top, y);
+                    bottom = Math.max(bottom, y);
+                }
+            }
+        }
+
+        if (right < 0 || (left == 0 && top == 0 && right == width - 1 && bottom == height - 1)) {
+            return icon;
+        }
+
+        int artWidth = right - left + 1;
+        int artHeight = bottom - top + 1;
+        int side = Math.max(artWidth, artHeight);
+        Bitmap square = Bitmap.createBitmap(side, side, Bitmap.Config.ARGB_8888);
+        new Canvas(square).drawBitmap(icon, new Rect(left, top, right + 1, bottom + 1),
+                new Rect((side - artWidth) / 2, (side - artHeight) / 2,
+                        (side - artWidth) / 2 + artWidth, (side - artHeight) / 2 + artHeight), null);
+        return square;
+    }
+
+    private static synchronized Bitmap stockIcon(File source, File iconCache, boolean mayExtract) {
+        if (stockIconRead) {
+            return stockIcon;
+        }
+
+        File stored = new File(iconCache, "stock-" + source.lastModified() + INSET_SUFFIX);
+        Bitmap icon = decode(stored);
+        if (icon == null) {
+            if (!mayExtract) {
+                return null;
+            }
+            icon = ExeIcon.extract(source, STOCK_APPLICATION_ICON);
+            if (icon != null) {
+                store(stored, icon);
+            }
+        }
+
+        stockIcon = icon;
+        stockIconRead = true;
+        return icon;
+    }
+
+    // A null bitmap leaves an empty marker file.
+    private static void store(File destination, Bitmap bitmap) {
+        File folder = destination.getParentFile();
+        if (folder == null || (!folder.isDirectory() && !folder.mkdirs())) {
             return;
         }
 
         try (OutputStream stream = new FileOutputStream(destination)) {
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream);
+            if (bitmap != null) {
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream);
+            }
         } catch (IOException unwritable) {
             destination.delete();
         }

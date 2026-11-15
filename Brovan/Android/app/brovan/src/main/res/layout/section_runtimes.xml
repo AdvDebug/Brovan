@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <LinearLayout android:id="@+id/windows_row" style="@style/SettingsIconRow">
+        <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_system" />
+        <LinearLayout style="@style/RuntimeText">
+            <TextView style="@style/RuntimeTitle" android:text="@string/windows_title" />
+            <TextView android:id="@+id/windows_status" style="@style/RuntimeStatus" />
+        </LinearLayout>
+        <com.google.android.material.button.MaterialButton android:id="@+id/windows_choose"
+            style="@style/Widget.Brovan.RuntimeAction" android:text="@string/windows_choose" />
+    </LinearLayout>
+    <TextView android:id="@+id/windows_hint" android:layout_marginHorizontal="16dp" style="@style/SettingsSummary"
+        android:text="@string/windows_media_hint" />
+    <com.google.android.material.button.MaterialButton android:id="@+id/windows_open_page"
+        style="@style/Widget.Material3.Button.TextButton" android:layout_width="wrap_content"
+        android:layout_height="wrap_content" android:layout_marginStart="4dp"
+        android:text="@string/windows_open_page" />
+    <com.google.android.material.progressindicator.LinearProgressIndicator android:id="@+id/windows_progress" android:layout_marginHorizontal="16dp"
+        android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp"
+        android:indeterminate="true" android:visibility="gone" />
+    <TextView android:id="@+id/windows_progress_text" android:layout_marginHorizontal="16dp" style="@style/SettingsSummary"
+        android:layout_marginTop="8dp" android:visibility="gone" />
+    <com.google.android.material.button.MaterialButton android:id="@+id/windows_install" android:layout_marginHorizontal="16dp"
+        android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:layout_marginTop="8dp" android:text="@string/windows_install" android:visibility="gone" />
+
+    <LinearLayout android:id="@+id/windows_runtimes_row" style="@style/SettingsIconRow">
+        <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_package" />
+        <LinearLayout style="@style/RuntimeText">
+            <TextView style="@style/RuntimeTitle" android:text="@string/windows_runtimes_title" />
+            <TextView android:id="@+id/windows_runtimes_status" style="@style/RuntimeStatus" />
+        </LinearLayout>
+        <com.google.android.material.button.MaterialButton android:id="@+id/windows_runtimes"
+            style="@style/Widget.Brovan.RuntimeAction" android:text="@string/runtime_install" />
+    </LinearLayout>
+    <TextView android:id="@+id/windows_runtimes_notice" android:layout_marginHorizontal="16dp" style="@style/SettingsSummary"
+        android:layout_marginBottom="8dp" android:text="@string/windows_runtimes_notice" />
+    <com.google.android.material.progressindicator.LinearProgressIndicator
+        android:id="@+id/windows_runtimes_progress" android:layout_marginHorizontal="16dp"
+        android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp"
+        android:indeterminate="true" android:visibility="gone" />
+    <TextView android:id="@+id/windows_runtimes_progress_text" android:layout_marginHorizontal="16dp" style="@style/SettingsSummary"
+        android:layout_marginTop="8dp" android:visibility="gone" />
+
+    <LinearLayout android:id="@+id/dxvk_row" style="@style/SettingsIconRow">
+        <ImageView style="@style/SettingsRowIcon" android:src="@drawable/ic_row_layers" />
+        <LinearLayout style="@style/RuntimeText">
+            <TextView style="@style/RuntimeTitle" android:text="@string/settings_dxvk" />
+            <TextView android:id="@+id/dxvk_status" style="@style/RuntimeStatus" />
+        </LinearLayout>
+        <com.google.android.material.button.MaterialButton android:id="@+id/dxvk_install"
+            style="@style/Widget.Brovan.RuntimeAction" android:text="@string/runtime_install" />
+    </LinearLayout>
+    <com.google.android.material.progressindicator.LinearProgressIndicator android:id="@+id/dxvk_progress" android:layout_marginHorizontal="16dp"
+        android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp"
+        android:indeterminate="true" android:visibility="gone" />
+    <TextView android:id="@+id/dxvk_progress_text" android:layout_marginHorizontal="16dp" style="@style/SettingsSummary"
+        android:layout_marginTop="8dp" android:visibility="gone" />
+
+</LinearLayout>
