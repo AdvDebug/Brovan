@@ -1766,8 +1766,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void ReleaseDevice(GenState st, IntPtr device)
         {
-            if (device == IntPtr.Zero ? !st.Retire.Active : !st.Retire.IsCpu(device))
+            if (!st.Retire.IsCpu(device))
                 ReleaseHostDevice(st, device);
+        }
+
+        internal static void ReleaseInstance(GenState st, uint instance)
+        {
+            foreach (IntPtr device in st.DevicesOf(instance))
+                ReleaseDevice(st, device);
         }
 
         internal static void ReleaseHostDevice(GenState st, IntPtr device)
@@ -1780,7 +1786,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             List<IntPtr> gone = new List<IntPtr>();
             foreach (KeyValuePair<IntPtr, CommandBufferRecord> entry in state.CommandBuffers)
             {
-                if (device == IntPtr.Zero || entry.Value.Device == device)
+                if (entry.Value.Device == device)
                     gone.Add(entry.Key);
             }
 
@@ -1790,7 +1796,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             gone.Clear();
             foreach (KeyValuePair<IntPtr, CommandPoolRecord> entry in state.CommandPools)
             {
-                if (device == IntPtr.Zero || entry.Value.Device == device)
+                if (entry.Value.Device == device)
                     gone.Add(entry.Key);
             }
 

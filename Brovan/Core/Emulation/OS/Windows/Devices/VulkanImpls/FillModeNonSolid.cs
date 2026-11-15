@@ -389,7 +389,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             List<IntPtr> gone = new List<IntPtr>();
             foreach (KeyValuePair<IntPtr, PipelineRecord> entry in state.Pipelines)
             {
-                if (device != IntPtr.Zero && entry.Value.Device != device)
+                if (entry.Value.Device != device)
                     continue;
 
                 if (entry.Value.Wireframe != IntPtr.Zero)
@@ -403,7 +403,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             gone.Clear();
             foreach (KeyValuePair<IntPtr, ShaderModuleRecord> entry in state.Modules)
             {
-                if (device == IntPtr.Zero || entry.Value.Device == device)
+                if (entry.Value.Device == device)
                     gone.Add(entry.Key);
             }
 
@@ -411,19 +411,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 state.Modules.Remove(key);
         }
 
-        private static CommandBufferRecord Record(VulkanStandInState state, IntPtr commandBuffer)
-        {
-            if (!state.CommandBuffers.TryGetValue(commandBuffer, out CommandBufferRecord? record))
-                state.CommandBuffers[commandBuffer] = record = new CommandBufferRecord();
-            return record;
-        }
-
+        // A command buffer with no record belongs to a device without stand-ins.
         internal static IntPtr Bind(VulkanStandInState state, IntPtr commandBuffer, int bindPoint, IntPtr pipeline)
         {
-            if (bindPoint != BindPointGraphics || !state.WireframeActive)
+            if (bindPoint != BindPointGraphics || !state.WireframeActive || !state.CommandBuffers.TryGetValue(commandBuffer, out CommandBufferRecord? record))
                 return pipeline;
 
-            CommandBufferRecord record = Record(state, commandBuffer);
             record.Bound = pipeline;
             record.BoundWireframe = false;
             if (!state.Pipelines.TryGetValue(pipeline, out PipelineRecord? info) || info.Wireframe == IntPtr.Zero)
@@ -436,10 +429,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void SetTopology(VulkanStandInState state, IntPtr commandBuffer, int topology)
         {
-            if (!state.WireframeActive)
+            if (!state.WireframeActive || !state.CommandBuffers.TryGetValue(commandBuffer, out CommandBufferRecord? record))
                 return;
 
-            CommandBufferRecord record = Record(state, commandBuffer);
             record.Topology = topology;
             if (record.Bound == IntPtr.Zero || !state.Pipelines.TryGetValue(record.Bound, out PipelineRecord? info)
                 || info.Wireframe == IntPtr.Zero || !info.DynamicTopology)

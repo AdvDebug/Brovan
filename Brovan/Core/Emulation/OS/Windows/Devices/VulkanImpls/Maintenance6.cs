@@ -292,7 +292,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             List<IntPtr> gone = new List<IntPtr>();
             foreach (KeyValuePair<IntPtr, NullIndexRecord> entry in state.NullIndexBuffers)
             {
-                if (device != IntPtr.Zero && entry.Key != device)
+                if (entry.Key != device)
                     continue;
 
                 if (entry.Value.Buffer != IntPtr.Zero)

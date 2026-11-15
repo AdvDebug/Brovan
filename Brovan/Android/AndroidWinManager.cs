@@ -355,9 +355,11 @@ namespace Brovan.Android
         private sealed class AndroidTopLevel : ITopLevelWindow
         {
             private readonly AndroidWinManager _manager;
-            private readonly int _layer;
             private readonly ulong _guest;
+            private int _layer;
             private IntPtr _native;
+            private bool _presenting;
+            private bool _pixelsPosted;
 
             private AndroidTopLevel _owner;
             private uint _style;
@@ -492,22 +494,63 @@ namespace Brovan.Android
 
             internal void Flush()
             {
-                if (!_shown || _native == IntPtr.Zero)
+                if (!_shown || _native == IntPtr.Zero || _presenting)
                     return;
 
                 if (_layered != null)
                 {
                     if (_layered.Dirty && _layered.Width != 0)
+                    {
                         AndroidGdiSurface.Post(_native, _layered.Pixels, _layered.Width, _layered.Height, false, 0, true);
+                        _pixelsPosted = true;
+                    }
 
                     _layered.Dirty = false;
                     return;
                 }
 
                 if (Buffer.Dirty && Buffer.Width != 0)
+                {
                     AndroidGdiSurface.Post(_native, Buffer.Pixels, Buffer.Width, Buffer.Height, _keyed, _key, false);
+                    _pixelsPosted = true;
+                }
 
                 Buffer.Dirty = false;
+            }
+
+            // An Android buffer queue takes one producer, and the window stays connected once it has posted pixels.
+            public void BeginPresentation()
+            {
+                if (_pixelsPosted)
+                    RenewLayer();
+
+                _presenting = true;
+            }
+
+            public void EndPresentation()
+            {
+                _presenting = false;
+                Buffer.Dirty = true;
+                if (_layered != null)
+                    _layered.Dirty = true;
+            }
+
+            private void RenewLayer()
+            {
+                if (_native == IntPtr.Zero)
+                    return;
+
+                IntPtr native = AndroidHost.CreateLayer(out int layer);
+                if (native == IntPtr.Zero)
+                    return;
+
+                ReleaseNative();
+                _native = native;
+                _layer = layer;
+                _manager._topLevels[native] = this;
+                _pixelsPosted = false;
+                _applied = null;
+                Apply();
             }
 
             public string Title
@@ -687,9 +730,14 @@ namespace Brovan.Android
                 if (_native == IntPtr.Zero)
                     return;
 
+                ReleaseNative();
+                _native = IntPtr.Zero;
+            }
+
+            private void ReleaseNative()
+            {
                 _manager._topLevels.Remove(_native);
                 AndroidNative.NativeWindowRelease(_native);
-                _native = IntPtr.Zero;
                 AndroidHost.ReleaseLayer(_layer);
             }
         }

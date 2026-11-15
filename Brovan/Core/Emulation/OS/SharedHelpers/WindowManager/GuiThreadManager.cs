@@ -947,8 +947,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 {
                     ApplyPendingTopLevels();
                     ITopLevelWindow host = EnsureHostWindow(command.Hwnd, 0);
-                    if (host != null)
-                        CollectionsMarshal.GetValueRefOrAddDefault(_surfaceHolds, host, out _)++;
+                    if (host != null && CollectionsMarshal.GetValueRefOrAddDefault(_surfaceHolds, host, out _)++ == 0)
+                        RunHostCall(host, static window => window.BeginPresentation());
 
                     ((TaskCompletionSource<(ITopLevelWindow, IntPtr)>)command.Request).SetResult((host, host?.NativeHandle ?? IntPtr.Zero));
                     return;
@@ -1301,6 +1301,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 return;
 
             _surfaceHolds.Remove(host);
+            RunHostCall(host, static window => window.EndPresentation());
             if (_orphanedHosts.Remove(host))
                 RunHostCall(host, static window => window.Dispose());
         }

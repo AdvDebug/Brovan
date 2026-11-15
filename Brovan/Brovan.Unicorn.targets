@@ -35,6 +35,15 @@
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_fp_vec.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_fp_vec_arm64.inc.c" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_fp_vec_i386.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_vecmem.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_lookup_stub.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_rep_string.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_rep_string.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_pin.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_pin_arm64.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_helper_flags.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_ldst_keep.inc.h" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_xmm.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_setjmp_win64.asm" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_setjmp_win64.h" />
   </ItemGroup>

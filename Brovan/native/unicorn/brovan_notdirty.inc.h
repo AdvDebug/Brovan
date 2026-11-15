@@ -16,6 +16,18 @@
 #ifndef BROVAN_NOTDIRTY_H
 #define BROVAN_NOTDIRTY_H
 
+/* A region that lost EXEC keeps its blocks, and they run again when EXEC comes back.
+ * notdirty_write() asks this before it invalidates and before it promotes, and both answers must agree.
+ * Paging is off, so tlbe->addr_code is never -1 and the region permission is the test. */
+static inline bool brov_page_holds_code(struct uc_struct *uc, MemoryRegion *mr,
+                                        ram_addr_t ram_addr)
+{
+    if ((mr->perms & UC_PROT_EXEC) != 0) {
+        return true;
+    }
+    return uc->brov.page_has_tbs && uc->brov.page_has_tbs(uc, ram_addr);
+}
+
 static inline bool brov_notdirty_allowed(CPUState *cpu, vaddr mem_vaddr,
                                          CPUTLBEntry *tlbe)
 {
@@ -32,17 +44,9 @@ static inline bool brov_notdirty_allowed(CPUState *cpu, vaddr mem_vaddr,
     if (mr->priority < cpu->uc->snapshot_level) {
         return false;
     }
-    /* A page that can hold translated code keeps dirty tracking, so that a store
-     * into it still reaches tb_invalidate_phys_page_fast.
-     *
-     * The region's own permission is the test, not tlbe->addr_code. Brovan runs
-     * the guest with paging off, and target/i386 hands tlb_fill
-     * PAGE_READ|PAGE_WRITE|PAGE_EXEC for every page in that mode, so addr_code
-     * is never -1 and would reject every page. The region permission is also
-     * the condition guarding the tb_invalidate_phys_page_fast call above, and no
-     * TB can exist for a region that is not executable, because an instruction
-     * fetch from one faults. */
-    if ((mr->perms & UC_PROT_EXEC) != 0) {
+    /* Paging is off, so the guest address is the address inside the region. */
+    if (!mr->ram_block ||
+        brov_page_holds_code(cpu->uc, mr, memory_region_get_ram_addr(mr) + (pa - mr->addr))) {
         return false;
     }
     return !brov_mem_hook_needs_slow_path(cpu->uc, pa);

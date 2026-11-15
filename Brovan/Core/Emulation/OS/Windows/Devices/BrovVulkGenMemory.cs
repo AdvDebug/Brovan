@@ -535,15 +535,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             ImportStats.RecordSync(copied, bytes);
         }
 
-        internal static void ReleaseMappings(GenState st, IGuestMemory inst)
+        internal static void ReleaseMappings(GenState st, IGuestMemory inst, uint owner)
         {
-            foreach (GenState.MapEntry e in st.Mappings)
+            List<GenState.MapEntry>? taken = st.TakeMappings(owner);
+            if (taken == null)
+                return;
+
+            foreach (GenState.MapEntry e in taken)
             {
                 if (e.Shared && !inst.RestoreRegionBacking(e.GuestVa, e.Size) && inst.IsRegionMapped(e.GuestVa, e.Size))
                     Utils.LogError($"[BrovVulk] guest range 0x{e.GuestVa:X}+0x{e.Size:X} could not be re-backed, it still aliases driver memory.");
             }
-
-            st.ClearMappings();
         }
 
         private static int SyncRanges(GenReader r, GenState st, IGuestMemory inst, bool invalidate)

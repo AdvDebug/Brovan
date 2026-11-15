@@ -648,12 +648,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        public bool TryDeferInstance(uint command, IntPtr instance)
+        public bool TryDeferInstance(GenState st, uint command, IntPtr instance, uint id)
         {
             if (!Active)
                 return false;
 
-            Enqueue(new Entry { Kind = Kind.DestroyInstance, Command = command, Type = "VkInstance", Handle = instance });
+            Enqueue(new Entry { Kind = Kind.DestroyInstance, Command = command, Type = "VkInstance", Handle = instance, Handles = Array.FindAll(st.DevicesOf(id), IsCpu) });
             return true;
         }
 
@@ -848,7 +848,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     break;
                 case Kind.DestroyInstance:
                     RunParkedChildren(st, entry.Handle);
-                    VulkanStandIns.ReleaseHostDevice(st, IntPtr.Zero);
+                    foreach (IntPtr made in entry.Handles!)
+                        VulkanStandIns.ReleaseHostDevice(st, made);
                     if (!st.Waits.TryDeferDestroy(entry.Command, entry.Type, IntPtr.Zero, entry.Handle))
                         BrovVulkGenDispatch.RunDeferredDestroy(entry.Command, IntPtr.Zero, entry.Handle);
                     break;

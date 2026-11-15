@@ -97,7 +97,12 @@ namespace Brovan.Core.Emulation
                 Configured = true;
 
                 if (!Enabled)
+                {
+                    // The reservation also holds the block lookup table that translated code reads.
+                    if (!Unicorn.ConfigureCodeCache(0, ReserveHeaderSize + MemoryBudget.CodeBufferBytes, false))
+                        Utils.LogError("[jit-cache] address reservation failed; block lookups take the slow path.");
                     return;
+                }
 
                 try
                 {

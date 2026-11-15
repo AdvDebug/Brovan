@@ -1430,7 +1430,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             List<IntPtr> gone = new List<IntPtr>();
             foreach (KeyValuePair<IntPtr, ImageRecord> entry in state.Images)
             {
-                if (device != IntPtr.Zero && entry.Value.Device != device)
+                if (entry.Value.Device != device)
                     continue;
 
                 DestroyViews(entry.Value);
@@ -1443,7 +1443,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             gone.Clear();
             foreach (KeyValuePair<IntPtr, DeviceRecord> entry in state.Decoders)
             {
-                if (device != IntPtr.Zero && entry.Key != device)
+                if (entry.Key != device)
                     continue;
 
                 DeviceRecord record = entry.Value;

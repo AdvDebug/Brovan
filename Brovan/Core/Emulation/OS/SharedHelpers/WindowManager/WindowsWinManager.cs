@@ -1986,6 +1986,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             public IntPtr NativeHandle => _hwnd;
 
+            public void BeginPresentation()
+            {
+            }
+
+            public void EndPresentation()
+            {
+            }
+
             public void Show() => Visible = true;
 
             public void Hide() => Visible = false;

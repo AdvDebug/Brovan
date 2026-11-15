@@ -91,6 +91,12 @@ static inline bool brov_lookup_tb_ptr(CPUArchState *env, void **out)
     cf_mask |= ((uint32_t)cpu->cluster_index) << CF_CLUSTER_SHIFT;
     id = brov_flagkey(uc, flags, cf_mask);
 
+#if defined(__aarch64__)
+    /* The lookup stub answers for this flag set until another one is keyed. */
+    uc->brov_lookup.flags = id != 0 ? flags : BROV_LOOKUP_NO_FLAGS;
+    uc->brov_lookup.key = (uint64_t)id << BROV_JMP_ID_SHIFT;
+#endif
+
     /* cs_base and the trace state are not in the key, so anything but a flat
      * code segment with tracing off takes the ordinary path. */
     if (likely(id != 0 && e->tc_ptr != NULL &&

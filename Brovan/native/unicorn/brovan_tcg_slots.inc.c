@@ -38,23 +38,24 @@ static bool brov_slot_emit(TCGContext *s, const void *dest, bool is_call)
 
 #if defined(__aarch64__)
     {
+        /* A jump leaves X30 alone, because the code it jumps to returns through it. */
+        const uint32_t reg = is_call ? (uint32_t)TCG_REG_TMP : (uint32_t)TCG_REG_X17;
         intptr_t pc = (intptr_t)s->code_ptr;
         intptr_t page_delta = ((intptr_t)slot & ~(intptr_t)0xfff) - (pc & ~(intptr_t)0xfff);
         intptr_t imm = page_delta >> 12;
         uint32_t immlo, immhi;
 
-        if (!is_call || imm != sextract64(imm, 0, 21)) {
+        if (imm != sextract64(imm, 0, 21)) {
             s->brov_slots_overflowed = 1;
             return false;
         }
         immlo = (uint32_t)(imm & 3);
         immhi = (uint32_t)((imm >> 2) & 0x7ffff);
 
-        /* ADRP TMP, page(slot) ; LDR TMP, [TMP, #off] ; BLR TMP */
-        tcg_out32(s, 0x90000000u | (immlo << 29) | (immhi << 5) | (uint32_t)TCG_REG_TMP);
-        tcg_out32(s, 0xf9400000u | ((uint32_t)((slot & 0xfff) >> 3) << 10) |
-                         ((uint32_t)TCG_REG_TMP << 5) | (uint32_t)TCG_REG_TMP);
-        tcg_out32(s, 0xd63f0000u | ((uint32_t)TCG_REG_TMP << 5));
+        /* ADRP reg, page(slot) ; LDR reg, [reg, #off] ; BLR reg or BR reg */
+        tcg_out32(s, 0x90000000u | (immlo << 29) | (immhi << 5) | reg);
+        tcg_out32(s, 0xf9400000u | ((uint32_t)((slot & 0xfff) >> 3) << 10) | (reg << 5) | reg);
+        tcg_out32(s, (is_call ? 0xd63f0000u : 0xd61f0000u) | (reg << 5));
     }
 #elif TCG_TARGET_REG_BITS == 64
     {

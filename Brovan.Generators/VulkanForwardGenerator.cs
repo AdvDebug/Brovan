@@ -2148,7 +2148,7 @@ namespace Brovan.Generators
             }
 
             if (ReleasesMappings(c))
-                b.Append("                BrovVulkGenMemory.ReleaseMappings(st, inst);\n");
+                b.Append("                BrovVulkGenMemory.ReleaseMappings(st, inst, p0Id);\n");
 
             // VUID-09647.
             if (c.Name == "vkCmdSetDepthClampRangeEXT")
@@ -2257,7 +2257,7 @@ namespace Brovan.Generators
                     ? "st.Waits.TryDeferDestroy(" + id + "u, \"" + type + "\", " + (parent >= 0 ? "p" + parent : "System.IntPtr.Zero") + ", p" + forgetIdx + ")"
                     : null;
                 string retire = type == "VkDevice" ? "st.Retire.TryDeferDevice(" + id + "u, p" + forgetIdx + ")"
-                    : type == "VkInstance" ? "st.Retire.TryDeferInstance(" + id + "u, p" + forgetIdx + ")"
+                    : type == "VkInstance" ? "st.Retire.TryDeferInstance(st, " + id + "u, p" + forgetIdx + ", p" + forgetIdx + "Id)"
                     : parent >= 0 && c.Params[parent].Type == "VkDevice"
                         ? "st.Retire.TryDefer(" + id + "u, \"" + type + "\", p" + parent + ", p" + forgetIdx + ")"
                     : type == "VkSurfaceKHR" && parent >= 0
@@ -2879,9 +2879,15 @@ namespace Brovan.Generators
                 return false;
             }
 
-            if (name == "vkDestroyDevice" || name == "vkDestroyInstance")
+            if (name == "vkDestroyDevice" && device != null)
             {
-                b.Append("                VulkanStandIns.ReleaseDevice(st, ").Append(name == "vkDestroyDevice" && device != null ? device : "System.IntPtr.Zero").Append(");\n");
+                b.Append("                VulkanStandIns.ReleaseDevice(st, ").Append(device).Append(");\n");
+                return false;
+            }
+
+            if (name == "vkDestroyInstance")
+            {
+                b.Append("                VulkanStandIns.ReleaseInstance(st, p0Id);\n");
                 return false;
             }
 

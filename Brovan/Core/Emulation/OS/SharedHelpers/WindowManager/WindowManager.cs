@@ -1239,6 +1239,11 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         void SetLayeredAttributes(uint colorKey, byte alpha, uint flags);
 
         void UpdateLayered(LayeredUpdate update);
+
+        // The window keeps its own pixels off NativeHandle until EndPresentation.
+        void BeginPresentation();
+
+        void EndPresentation();
     }
 
     public interface ITopLevelWindowHost

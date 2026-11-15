@@ -873,6 +873,9 @@ brov_jmp_entry *brov_jmp_ensure(struct uc_struct *uc)
     if (!uc->brov_jmp) {
         uc->brov_jmp_off = 1;
     }
+    uc->brov_lookup.flags = BROV_LOOKUP_NO_FLAGS;
+    uc->brov_lookup.key = 0;
+    uc->brov_lookup.table = uc->brov_jmp;
     return uc->brov_jmp;
 }
 

@@ -3927,7 +3927,56 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void RemoveMapping(uint id) => _mappings.Remove(id);
 
-        public void ClearMappings() => _mappings.Clear();
+        // A device memory object is three steps below its instance.
+        private const int InstanceDepth = 3;
+
+        private bool MadeFrom(uint id, uint ancestor)
+        {
+            for (int depth = 0; depth <= InstanceDepth && id != 0; depth++)
+            {
+                if (id == ancestor)
+                    return true;
+                id = _handles.TryGetValue(id, out HandleEntry e) ? e.Parent : 0;
+            }
+
+            return false;
+        }
+
+        public List<MapEntry>? TakeMappings(uint owner)
+        {
+            List<MapEntry>? taken = null;
+            foreach (KeyValuePair<uint, MapEntry> mapping in _mappings)
+            {
+                if (MadeFrom(mapping.Key, owner))
+                {
+                    _mappings.Remove(mapping.Key);
+                    (taken ??= new List<MapEntry>()).Add(mapping.Value);
+                }
+            }
+
+            return taken;
+        }
+
+        public IntPtr[] DevicesOf(uint instance)
+        {
+            List<IntPtr>? devices = null;
+            if (_children.TryGetValue(instance, out HashSet<uint>? physicalDevices))
+            {
+                foreach (uint physicalDevice in physicalDevices)
+                {
+                    if (!_children.TryGetValue(physicalDevice, out HashSet<uint>? made))
+                        continue;
+
+                    foreach (uint id in made)
+                    {
+                        if (_handles.TryGetValue(id, out HandleEntry e) && e.Type == "VkDevice")
+                            (devices ??= new List<IntPtr>()).Add(e.Ptr);
+                    }
+                }
+            }
+
+            return devices?.ToArray() ?? Array.Empty<IntPtr>();
+        }
 
         public Dictionary<uint, MapEntry>.ValueCollection Mappings => _mappings.Values;
 

@@ -2638,6 +2638,14 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
             public IntPtr NativeHandle => _window;
 
+            public void BeginPresentation()
+            {
+            }
+
+            public void EndPresentation()
+            {
+            }
+
             public void SetFrame(uint style, uint exStyle)
             {
                 _style = style;

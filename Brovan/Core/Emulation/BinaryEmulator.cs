@@ -1826,7 +1826,7 @@ namespace Brovan.Core.Emulation
 
         private const string ProcessorBrandString = "Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz";
 
-        private static void ReadProcessorBrandLeaf(uint Leaf, out uint Eax, out uint Ebx, out uint Ecx, out uint Edx)
+        private static (uint Eax, uint Ebx, uint Ecx, uint Edx) ReadProcessorBrandLeaf(uint Leaf)
         {
             Span<byte> Chunk = stackalloc byte[16];
             int BaseOffset = (int)(Leaf - 0x80000002u) * 16;
@@ -1836,18 +1836,121 @@ namespace Brovan.Core.Emulation
                 Chunk[Index] = StringIndex < ProcessorBrandString.Length ? (byte)ProcessorBrandString[StringIndex] : (byte)0;
             }
 
-            Eax = BinaryPrimitives.ReadUInt32LittleEndian(Chunk);
-            Ebx = BinaryPrimitives.ReadUInt32LittleEndian(Chunk.Slice(4));
-            Ecx = BinaryPrimitives.ReadUInt32LittleEndian(Chunk.Slice(8));
-            Edx = BinaryPrimitives.ReadUInt32LittleEndian(Chunk.Slice(12));
+            return (BinaryPrimitives.ReadUInt32LittleEndian(Chunk), BinaryPrimitives.ReadUInt32LittleEndian(Chunk.Slice(4)),
+                BinaryPrimitives.ReadUInt32LittleEndian(Chunk.Slice(8)), BinaryPrimitives.ReadUInt32LittleEndian(Chunk.Slice(12)));
+        }
+
+        // Instruction sets that the Unicorn processor model translates and that need no OS enable.
+        private const uint TranslatedLeaf1Ecx = (1u << 0) | (1u << 1) | (1u << 9) | (1u << 13) | (1u << 19) | (1u << 20) | (1u << 22) | (1u << 23) | (1u << 25) | (1u << 30);
+        private const uint TranslatedLeaf1Edx = (1u << 0) | (1u << 4) | (1u << 5) | (1u << 8) | (1u << 15) | (1u << 19) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
+        private const uint TranslatedLeaf7Ebx = (1u << 3) | (1u << 8) | (1u << 9);
+        private const uint TranslatedExtendedEcx = (1u << 0) | (1u << 5) | (1u << 8);
+        private const uint LongModeBit = 1u << 29;
+        private const uint TranslatedExtendedEdx = (1u << 11) | (1u << 20) | (1u << 27) | LongModeBit;
+
+        private const uint ExtendedLeafBase = 0x80000000;
+        private const uint ExtendedFeatureLeaf = 0x80000001;
+        private const uint LastHostExtendedLeaf = 0x80000006;
+        private const uint CacheLeaf = 4;
+        private const uint StructuredFeatureLeaf = 7;
+        private const uint MaxCacheSubLeaves = 16;
+
+        private static readonly Dictionary<ulong, (uint Eax, uint Ebx, uint Ecx, uint Edx)> ProcessorLeaves = BuildProcessorLeaves();
+
+        private static ulong ProcessorLeafKey(uint Leaf, uint SubLeaf) => ((ulong)Leaf << 32) | SubLeaf;
+
+        private static Dictionary<ulong, (uint Eax, uint Ebx, uint Ecx, uint Edx)> BuildProcessorLeaves()
+        {
+            var Leaves = System.Runtime.Intrinsics.X86.X86Base.IsSupported ? ReadHostProcessorLeaves() : FixedProcessorLeaves();
+            Leaves[ProcessorLeafKey(0x80000007, 0)] = (0, 0, 0, 1u << 8);
+            Leaves[ProcessorLeafKey(0x80000008, 0)] = (0x00003030, 0, 0, 0);
+            return Leaves;
+        }
+
+        private static Dictionary<ulong, (uint Eax, uint Ebx, uint Ecx, uint Edx)> ReadHostProcessorLeaves()
+        {
+            static (uint Eax, uint Ebx, uint Ecx, uint Edx) Read(uint Leaf, uint SubLeaf)
+            {
+                (int Eax, int Ebx, int Ecx, int Edx) = System.Runtime.Intrinsics.X86.X86Base.CpuId(unchecked((int)Leaf), unchecked((int)SubLeaf));
+                return ((uint)Eax, (uint)Ebx, (uint)Ecx, (uint)Edx);
+            }
+
+            var Leaves = new Dictionary<ulong, (uint Eax, uint Ebx, uint Ecx, uint Edx)>();
+            var Basic = Read(0, 0);
+            var Extended = Read(ExtendedLeafBase, 0);
+            Leaves[ProcessorLeafKey(0, 0)] = Basic;
+            Leaves[ProcessorLeafKey(ExtendedLeafBase, 0)] = (Math.Max(Extended.Eax, 0x80000008), Extended.Ebx, Extended.Ecx, Extended.Edx);
+
+            var Features = Read(1, 0);
+            Leaves[ProcessorLeafKey(1, 0)] = (Features.Eax, (Features.Ebx & 0xFF00) | (1u << 16), Features.Ecx & TranslatedLeaf1Ecx, Features.Edx & TranslatedLeaf1Edx);
+
+            if (Basic.Eax >= 2)
+                Leaves[ProcessorLeafKey(2, 0)] = Read(2, 0);
+
+            if (Basic.Eax >= CacheLeaf)
+            {
+                for (uint SubLeaf = 0; SubLeaf < MaxCacheSubLeaves; SubLeaf++)
+                {
+                    var Cache = Read(CacheLeaf, SubLeaf);
+                    if ((Cache.Eax & 0x1F) == 0)
+                        break;
+
+                    // EAX[31:14] count the processors and cores that share the cache, and the guest has one processor.
+                    Leaves[ProcessorLeafKey(CacheLeaf, SubLeaf)] = (Cache.Eax & 0x3FFF, Cache.Ebx, Cache.Ecx, Cache.Edx);
+                }
+            }
+
+            if (Basic.Eax >= StructuredFeatureLeaf)
+                Leaves[ProcessorLeafKey(StructuredFeatureLeaf, 0)] = (0, Read(StructuredFeatureLeaf, 0).Ebx & TranslatedLeaf7Ebx, 0, 0);
+
+            if (Extended.Eax >= ExtendedFeatureLeaf)
+            {
+                var ExtendedFeatures = Read(ExtendedFeatureLeaf, 0);
+                Leaves[ProcessorLeafKey(ExtendedFeatureLeaf, 0)] = (ExtendedFeatures.Eax, ExtendedFeatures.Ebx, ExtendedFeatures.Ecx & TranslatedExtendedEcx, ExtendedFeatures.Edx & TranslatedExtendedEdx);
+            }
+
+            for (uint Leaf = ExtendedFeatureLeaf + 1; Leaf <= LastHostExtendedLeaf && Leaf <= Extended.Eax; Leaf++)
+                Leaves[ProcessorLeafKey(Leaf, 0)] = Read(Leaf, 0);
+
+            return Leaves;
+        }
+
+        private static Dictionary<ulong, (uint Eax, uint Ebx, uint Ecx, uint Edx)> FixedProcessorLeaves()
+        {
+            var Leaves = new Dictionary<ulong, (uint Eax, uint Ebx, uint Ecx, uint Edx)>
+            {
+                [ProcessorLeafKey(0, 0)] = (0x00000019, 0x756E6547, 0x6C65746E, 0x49656E69),
+                [ProcessorLeafKey(1, 0)] = (0x000106A5, (8u << 8) | (1u << 16), (1u << 0) | (1u << 9) | (1u << 13) | (1u << 19) | (1u << 20) | (1u << 23), TranslatedLeaf1Edx),
+                [ProcessorLeafKey(StructuredFeatureLeaf, 0)] = (0, 1u << 9, 0, 0),
+                [ProcessorLeafKey(ExtendedLeafBase, 0)] = (0x80000008, 0, 0, 0),
+                [ProcessorLeafKey(ExtendedFeatureLeaf, 0)] = (0, 0, 1u << 0, TranslatedExtendedEdx),
+            };
+
+            for (uint Leaf = 0x80000002; Leaf <= 0x80000004; Leaf++)
+                Leaves[ProcessorLeafKey(Leaf, 0)] = ReadProcessorBrandLeaf(Leaf);
+
+            return Leaves;
+        }
+
+        private static (uint Eax, uint Ebx, uint Ecx, uint Edx) ReadProcessorLeaf(uint Leaf, uint SubLeaf, bool LongMode)
+        {
+            bool HasSubLeaves = Leaf == CacheLeaf || Leaf == StructuredFeatureLeaf;
+            ProcessorLeaves.TryGetValue(ProcessorLeafKey(Leaf, HasSubLeaves ? SubLeaf : 0), out var Values);
+            if (Leaf == ExtendedFeatureLeaf && !LongMode)
+                Values.Edx &= ~LongModeBit;
+
+            return Values;
         }
 
         private bool CPUID_Handler()
         {
+            // A hypervisor backend runs CPUID on the processor.
+            if (Settings.BackendKind != EmulationBackendKind.Unicorn)
+                return false;
+
             bool Is64BitGuest = _binary.Architecture == BinaryArchitecture.x64;
             uint Leaf = Is64BitGuest ? (uint)ReadRegister(Registers.UC_X86_REG_RAX) : ReadRegister32(Registers.UC_X86_REG_EAX);
             uint SubLeaf = Is64BitGuest ? (uint)ReadRegister(Registers.UC_X86_REG_RCX) : ReadRegister32(Registers.UC_X86_REG_ECX);
-            ulong IP = ReadRegister(IPRegister);
 
             void WriteCpuidOutputs(uint Eax, uint Ebx, uint Ecx, uint Edx)
             {
@@ -1866,120 +1969,17 @@ namespace Brovan.Core.Emulation
                 WriteRegister32(Registers.UC_X86_REG_EDX, Edx);
             }
 
-            uint ReadVisibleEax()
-            {
-                return Is64BitGuest ? (uint)ReadRegister(Registers.UC_X86_REG_RAX) : ReadRegister32(Registers.UC_X86_REG_EAX);
-            }
-
-            uint ReadVisibleEbx()
-            {
-                return Is64BitGuest ? (uint)ReadRegister(Registers.UC_X86_REG_RBX) : ReadRegister32(Registers.UC_X86_REG_EBX);
-            }
-
-            uint ReadVisibleEcx()
-            {
-                return Is64BitGuest ? (uint)ReadRegister(Registers.UC_X86_REG_RCX) : ReadRegister32(Registers.UC_X86_REG_ECX);
-            }
-
-            uint ReadVisibleEdx()
-            {
-                return Is64BitGuest ? (uint)ReadRegister(Registers.UC_X86_REG_RDX) : ReadRegister32(Registers.UC_X86_REG_EDX);
-            }
-
             try
             {
-                uint out_eax = 0;
-                uint out_ebx = 0;
-                uint out_ecx = 0;
-                uint out_edx = 0;
-                switch (Leaf)
-                {
-                    case 0:
-                        out_eax = 0x00000019;
-                        out_ebx = 0x756E6547;
-                        out_edx = 0x49656E69;
-                        out_ecx = 0x6C65746E;
-                        break;
-
-                    case 1:
-                        out_eax = 0x000106A5;
-                        out_ebx = (8u << 8) | (1u << 16);
-                        out_ecx =
-                            (1u << 0) |
-                            (1u << 9) |
-                            (1u << 13) |
-                            (1u << 19) |
-                            (1u << 20) |
-                            (1u << 23);
-                        out_edx =
-                            (1u << 0) |
-                            (1u << 4) |
-                            (1u << 5) |
-                            (1u << 8) |
-                            (1u << 15) |
-                            (1u << 19) |
-                            (1u << 23) |
-                            (1u << 24) |
-                            (1u << 25) |
-                            (1u << 26);
-                        break;
-
-                    case 7:
-                        if (SubLeaf == 0)
-                            out_eax = 0;
-                        break;
-
-                    case 0xD:
-                        break;
-
-                    case 0x14:
-                        break;
-
-                    case 0x19:
-                        break;
-
-                    case 0x80000000:
-                        out_eax = 0x80000008;
-                        break;
-
-                    case 0x80000001:
-                        out_ecx = 1u << 0;
-                        out_edx = (1u << 11) | (1u << 20) | (1u << 27);
-                        if (Is64BitGuest)
-                            out_edx |= 1u << 29;
-                        break;
-
-                    case 0x80000002:
-                    case 0x80000003:
-                    case 0x80000004:
-                        ReadProcessorBrandLeaf(Leaf, out out_eax, out out_ebx, out out_ecx, out out_edx);
-                        break;
-
-                    case 0x80000007:
-                        out_edx = 1u << 8;
-                        break;
-
-                    case 0x80000008:
-                        out_eax = 0x00003030;
-                        break;
-                }
-
+                var (out_eax, out_ebx, out_ecx, out_edx) = ReadProcessorLeaf(Leaf, SubLeaf, Is64BitGuest);
                 WriteCpuidOutputs(out_eax, out_ebx, out_ecx, out_edx);
-                uint visibleEax = ReadVisibleEax();
-                uint visibleEbx = ReadVisibleEbx();
-                uint visibleEcx = ReadVisibleEcx();
-                uint visibleEdx = ReadVisibleEdx();
                 if ((Settings.Flags & LogFlags.CPUID) != 0)
-                    TriggerEventMessage($"[+] CPUID instruction was executed with the leaf 0x{Leaf:X}, subleaf 0x{SubLeaf:X} at 0x{IP:X}. => EAX=0x{visibleEax:X} EBX=0x{visibleEbx:X} ECX=0x{visibleEcx:X} EDX=0x{visibleEdx:X}", LogFlags.CPUID);
+                    TriggerEventMessage($"[+] CPUID instruction was executed with the leaf 0x{Leaf:X}, subleaf 0x{SubLeaf:X} at 0x{ReadRegister(IPRegister):X}. => EAX=0x{out_eax:X} EBX=0x{out_ebx:X} ECX=0x{out_ecx:X} EDX=0x{out_edx:X}", LogFlags.CPUID);
                 return true;
             }
             catch
             {
                 WriteCpuidOutputs(0, 0, 0, 0);
-                uint visibleEax = ReadVisibleEax();
-                uint visibleEbx = ReadVisibleEbx();
-                uint visibleEcx = ReadVisibleEcx();
-                uint visibleEdx = ReadVisibleEdx();
                 return true;
             }
         }

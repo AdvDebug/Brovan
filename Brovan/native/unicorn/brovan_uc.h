@@ -24,6 +24,9 @@
  * which is about a hundred pauses. */
 #define BROV_PAUSE_BUDGET_COST 512
 
+/* A 16 byte access for the TLB probe. MO_SIZE stops at 8 bytes, so no MemOp value uses this bit. */
+#define BROV_MO_V128 0x100
+
 /* The reservation is laid out [slot table][arena][code gen buffer]. Replaying a
  * single base address therefore pins every object whose address gets baked into
  * generated code. */
@@ -237,6 +240,16 @@ typedef struct brov_flagset {
     uint32_t cf_mask;
 } brov_flagset;
 
+/* The last flag set that the lookup helper keyed, and its shifted id. The lookup stub loads
+ * these fields by offset. */
+typedef struct brov_lookup_state {
+    uint64_t flags;
+    uint64_t key;
+    struct brov_jmp_entry *table;
+} brov_lookup_state;
+
+#define BROV_LOOKUP_NO_FLAGS UINT64_MAX
+
 /* See brovan_notdirty.inc.h. */
 typedef struct brov_alias_range {
     uint64_t guest;
@@ -266,6 +279,7 @@ static inline uint64_t brov_jmp_key(uint64_t pc, unsigned id)
     brov_flagset brov_flagsets[BROV_JMP_FLAGSETS];                             \
     unsigned brov_flagset_n;                                                   \
     brov_jmp_entry *brov_jmp;                                                  \
+    brov_lookup_state brov_lookup;                                             \
     unsigned brov_jmp_flush;                                                   \
     unsigned char brov_jmp_off;                                                \
     unsigned char brov_jmp_dirty;                                              \
@@ -274,6 +288,9 @@ static inline uint64_t brov_jmp_key(uint64_t pc, unsigned id)
     uint32_t brov_alias_cap;                                                   \
     bool brov_protect_batch;                                                   \
     struct brov_ops brov;
+
+#define BROV_PIN_MAX 16
+#define BROV_XMM_MAX 16
 
 #define BROVAN_TCG_FIELDS                                                      \
     void **brov_slots;                                                         \
@@ -292,7 +309,19 @@ static inline uint64_t brov_jmp_key(uint64_t pc, unsigned id)
     uint64_t brov_pending_count;                                               \
     uint64_t brov_pending_flush;                                               \
     struct TCGLabel *brov_exitreq_label;                                       \
-    struct TCGOp *brov_budget_insns;
+    struct TCGOp *brov_budget_insns;                                           \
+    void *brov_lookup_stub;                                                    \
+    void *brov_pin_spill_stub;                                                 \
+    void *brov_pin_reload_stub;                                                \
+    int32_t brov_pin_ofs[BROV_PIN_MAX];                                        \
+    uint8_t brov_pin_reg[BROV_PIN_MAX];                                        \
+    uint8_t brov_pin_count;                                                    \
+    uint8_t brov_pin_sync;                                                     \
+    TCGRegSet brov_ldst_kept;                                                  \
+    TCGRegSet brov_ldst_live;                                                  \
+    TCGv_vec brov_xmm[BROV_XMM_MAX];                                           \
+    uint16_t brov_xmm_first;                                                   \
+    uint8_t brov_xmm_count;
 
 /* The slot table is interned during code generation (inside the tcg.c
  * translation unit) and rebuilt after a load (inside translate-all.c). Both

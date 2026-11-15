@@ -11,7 +11,11 @@
  * translated under other flags.
  *
  * TCG_TARGET_HAS_brov_inlinejmp marks a host where dropping the call is worth
- * the probe. A backend that does not answer keeps the helper.
+ * the probe. TCG_TARGET_HAS_brov_jmpstub marks a host with the probe in one
+ * shared stub. A backend that answers neither keeps the helper.
+ *
+ * A block that ends in an indirect jump still runs under the flags it was
+ * translated for, because every instruction that changes them ends its block.
  *
  * BROVAN_NO_JMP_INLINE=1 is the kill switch. */
 #ifndef TCG_TARGET_HAS_brov_inlinejmp
@@ -40,6 +44,16 @@ static void brov_gen_lookup_inline(DisasContext *s)
     TCGLabel *miss;
     uint32_t cf_mask;
     unsigned id;
+
+    if (TCG_TARGET_HAS_brov_jmpstub && tcg_ctx->brov_lookup_stub) {
+        TCGv_ptr target = tcg_temp_new_ptr(tcg_ctx);
+
+        tcg_gen_op2(tcg_ctx, INDEX_op_lookup_tb_stub, tcgv_ptr_arg(tcg_ctx, target),
+                    s->base.tb->flags);
+        tcg_gen_op1i(tcg_ctx, INDEX_op_goto_ptr, tcgv_ptr_arg(tcg_ctx, target));
+        tcg_temp_free_ptr(tcg_ctx, target);
+        return;
+    }
 
     if (!TCG_TARGET_HAS_brov_inlinejmp || brov_jmp_inline_off()) {
         tcg_gen_lookup_and_goto_ptr(tcg_ctx);
