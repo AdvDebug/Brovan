@@ -591,6 +591,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint SwpNothingChanged = 0x1807;
         private const uint SwpChangeMask = 0x18E7;
         private const int WindowPosStructSize = 0x28;
+        private const int WindowPosStructSize32 = 0x1C;
 
         // True while a window procedure runs. ContinueWindowPos then finishes the change.
         internal static bool SendWindowPos(BinaryEmulator Instance, WinWindow Window, in Win32kDeferredWindowPos Position)
@@ -642,16 +643,20 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static void ReadWindowPos(BinaryEmulator Instance, ulong Address, ref Win32kDeferredWindowPos Position)
         {
+            uint PointerSize = (uint)Instance.WinHelper.PointerSize;
+            int Size = PointerSize == 8 ? WindowPosStructSize : WindowPosStructSize32;
             Span<byte> Data = stackalloc byte[WindowPosStructSize];
-            if (!Instance.ReadMemory(Address, Data, (uint)WindowPosStructSize))
+            Data = Data.Slice(0, Size);
+            if (!Instance.ReadMemory(Address, Data, (uint)Size))
                 return;
 
-            Position.InsertAfter = BinaryPrimitives.ReadUInt64LittleEndian(Data.Slice(0x08));
-            Position.X = BinaryPrimitives.ReadInt32LittleEndian(Data.Slice(0x10));
-            Position.Y = BinaryPrimitives.ReadInt32LittleEndian(Data.Slice(0x14));
-            Position.Width = BinaryPrimitives.ReadInt32LittleEndian(Data.Slice(0x18));
-            Position.Height = BinaryPrimitives.ReadInt32LittleEndian(Data.Slice(0x1C));
-            Position.Flags = BinaryPrimitives.ReadUInt32LittleEndian(Data.Slice(0x20));
+            Position.InsertAfter = WinSysHelper.ReadPointerField(Data, 1, PointerSize);
+            Span<byte> Geometry = Data.Slice(2 * (int)PointerSize);
+            Position.X = BinaryPrimitives.ReadInt32LittleEndian(Geometry.Slice(0x00));
+            Position.Y = BinaryPrimitives.ReadInt32LittleEndian(Geometry.Slice(0x04));
+            Position.Width = BinaryPrimitives.ReadInt32LittleEndian(Geometry.Slice(0x08));
+            Position.Height = BinaryPrimitives.ReadInt32LittleEndian(Geometry.Slice(0x0C));
+            Position.Flags = BinaryPrimitives.ReadUInt32LittleEndian(Geometry.Slice(0x10));
         }
 
         // NT: xxxCalcValidRects and xxxSendChangedMsgs skip what did not change.
@@ -711,9 +716,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!TryBeginWindowProcCallback(Instance, Window.WndProc, out ulong Callback, out ulong ArgumentBuffer))
                 return false;
 
+            bool Wide = Is64(Instance);
             Span<byte> Data = stackalloc byte[WindowPosStructSize];
+            Data = Data.Slice(0, Wide ? WindowPosStructSize : WindowPosStructSize32);
             Data.Clear();
-            WinSysHelper.WriteWindowPos(Data, true, Position);
+            WinSysHelper.WriteWindowPos(Data, Wide, Position);
 
             ulong WindowPos = ArgumentBuffer + WindowProcArgumentHeaderSize;
             if (!Instance._emulator.WriteMemory(WindowPos, Data))
@@ -3585,16 +3592,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             Win32kMessage Notification = new Win32kMessage(Hwnd, Message, WParam, LParam, unchecked((uint)Instance.EmulatedTickCount64), State.CursorScreenX, State.CursorScreenY, 0, true);
 
-            if (Instance.WinHelper.SupportsUserCallbacks)
-            {
-                EmulatedThread Thread = Instance.CurrentThread;
-                uint Sender = WithoutSender ? 0 : Thread?.ThreadId ?? 0;
-                State.SentNotifications.Add(new Win32kSentNotification(Notification, Sender, GetCallbackDepth(Thread)));
-            }
-            else
-            {
-                QueueNotificationMessage(State, Notification);
-            }
+            EmulatedThread Thread = Instance.CurrentThread;
+            uint Sender = WithoutSender ? 0 : Thread?.ThreadId ?? 0;
+            State.SentNotifications.Add(new Win32kSentNotification(Notification, Sender, GetCallbackDepth(Thread)));
         }
 
         private static void QueueNotificationMessage(Win32kState State, in Win32kMessage Notification)
@@ -4056,7 +4056,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static bool IsSentWhenRemoved(BinaryEmulator Instance, in Win32kMessage Message, out WinWindow Window)
         {
             Window = null;
-            if (Message.Message != Win32kQueuePort.DispatchMessage || Message.Notification || !Instance.WinHelper.SupportsUserCallbacks)
+            if (Message.Message != Win32kQueuePort.DispatchMessage || Message.Notification)
                 return false;
 
             Window = Instance.WinHelper.GetWindow(Message.Hwnd);
@@ -4710,7 +4710,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Present = true;
 
                     // NT delivers WM_SIZE and WM_MOVE from DefWindowProc's answer to WM_WINDOWPOSCHANGED.
-                    if (Changed && Instance.WinHelper.SupportsUserCallbacks)
+                    if (Changed)
                         continue;
                 }
 
@@ -6993,6 +6993,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const int WindowProcArgumentHeaderSize = 0x30;
         private const int WindowProcArgumentBlockSize = 0x40;
         private const int CreateStructSize = 0x50;
+        private const int CreateStructSize32 = 0x30;
         private const int CreateStructNameChars = 96;
 
         // The syscall in progress does not answer. The procedure's result becomes its return value.
@@ -7042,18 +7043,37 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Span<byte> Data = Instance.WinHelper.Shared.GetSpan(CreateStructSize).Slice(0, CreateStructSize);
             Data.Clear();
 
-            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Window.CreateParam);
-            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x08, 8), Window.InstanceHandle);
-            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x10, 8), Window.MenuHandle);
-            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x18, 8), Window.ParentHwnd);
-            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x20, 4), Window.Height);
-            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x24, 4), Window.Width);
-            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x28, 4), (uint)Window.Y);
-            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x2C, 4), (uint)Window.X);
-            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x30, 4), Window.Style);
-            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x38, 8), NameAddress);
-            BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x40, 8), ClassAddress);
-            BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x48, 4), Window.ExStyle);
+            if (Is64(Instance))
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x00, 8), Window.CreateParam);
+                BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x08, 8), Window.InstanceHandle);
+                BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x10, 8), Window.MenuHandle);
+                BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x18, 8), Window.ParentHwnd);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x20, 4), Window.Height);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x24, 4), Window.Width);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x28, 4), (uint)Window.Y);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x2C, 4), (uint)Window.X);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x30, 4), Window.Style);
+                BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x38, 8), NameAddress);
+                BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(0x40, 8), ClassAddress);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x48, 4), Window.ExStyle);
+            }
+            else
+            {
+                Data = Data.Slice(0, CreateStructSize32);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x00, 4), (uint)Window.CreateParam);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x04, 4), (uint)Window.InstanceHandle);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x08, 4), (uint)Window.MenuHandle);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x0C, 4), (uint)Window.ParentHwnd);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x10, 4), Window.Height);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x14, 4), Window.Width);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x18, 4), (uint)Window.Y);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x1C, 4), (uint)Window.X);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x20, 4), Window.Style);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x24, 4), (uint)NameAddress);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x28, 4), (uint)ClassAddress);
+                BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(0x2C, 4), Window.ExStyle);
+            }
 
             if (!Instance.WriteMemory(CreateStruct, Data))
                 return false;
@@ -7076,15 +7096,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Callback = 0;
             ArgumentBuffer = 0;
 
-            if (WndProc == 0 || !Instance.WinHelper.SupportsUserCallbacks)
+            if (WndProc == 0)
                 return false;
 
             Callback = Instance.WinHelper.GetKernelCallbackEntry(WindowProcCallbackIndex);
             if (Callback == 0)
                 return false;
 
-            ulong CurrentRsp = Instance.ReadRegister(Registers.UC_X86_REG_RSP);
-            if (!Instance.IsRegionMapped(CurrentRsp, 8))
+            ulong CurrentRsp = Instance.WinHelper.ReadStackPointer();
+            if (!Instance.IsRegionMapped(CurrentRsp, (ulong)Instance.WinHelper.PointerSize))
                 return false;
 
             ArgumentBuffer = (CurrentRsp - WindowProcArgumentReserve) & ~0xFUL;
@@ -7096,9 +7116,23 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return true;
         }
 
+        // The 32-bit __fnDWORD calls the procedure at +0x18 with the six DWORDs before it.
         private static void WriteWindowProcCallbackArguments(BinaryEmulator Instance, ulong ArgumentBuffer,
             ulong Hwnd, ulong WndProc, uint Message, ulong WParam, ulong LParam)
         {
+            if (!Is64(Instance))
+            {
+                Span<byte> Header = stackalloc byte[0x1C];
+                Header.Clear();
+                BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x00), (uint)Hwnd);
+                BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x04), Message);
+                BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x08), (uint)WParam);
+                BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x0C), (uint)LParam);
+                BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x18), (uint)WndProc);
+                Instance._emulator.WriteMemory(ArgumentBuffer, Header);
+                return;
+            }
+
             Instance._emulator.WriteMemory(ArgumentBuffer + 0x00, Hwnd, 8);
             Instance._emulator.WriteMemory(ArgumentBuffer + 0x08, (ulong)Message, 8);
             Instance._emulator.WriteMemory(ArgumentBuffer + 0x10, WParam, 8);

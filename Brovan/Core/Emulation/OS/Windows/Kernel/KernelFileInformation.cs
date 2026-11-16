@@ -12,7 +12,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int ClassArg = 4;
         private const int FilePositionInformation = 14;
         private const int PositionSize = 8;
-        private const int IoStatusBlockSize = 16;
         private const int PositionCallsBeforeCell = 4;
         private const int StandardQueriesBeforeLease = 32;
         private const int StandardQueriesAfterFailure = 256;
@@ -65,7 +64,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             a.jb(Builder.Abort);
             a.test(r8b, sizeof(long) - 1);
             a.jnz(Builder.Abort);
-            Builder.CheckUserRange(rdx, IoStatusBlockSize, rax);
+            Builder.CheckUserRange(rdx, Builder.IoStatusBlockSize, rax);
             Builder.CheckUserRange(r8, r9, r11, rax);
             Table.EmitLookup(Builder, 0);
         }
@@ -92,7 +91,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             a.ja(Builder.Abort);
             EmitBufferChecks(Builder);
             Builder.BeginUserAccess();
-            Builder.ProbeForWrite(rdx, IoStatusBlockSize);
+            Builder.ProbeForWrite(rdx, Builder.IoStatusBlockSize);
             Builder.ProbeForWrite(r8, r11, rax, rcx);
             Builder.EndUserAccess();
             a.mov(rbp, rdx);
@@ -138,8 +137,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             a.mov(__qword_ptr[r8 + 8], r13);
             a.mov(__qword_ptr[r8 + 16], r14);
             a.Label(ref OutputDone);
-            a.mov(__qword_ptr[rbp], 0);
-            a.mov(__qword_ptr[rbp + 8], r15);
+            Builder.WriteIoStatus(rbp, r15);
             Builder.EndUserAccess();
         }
 
@@ -175,7 +173,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             a.mov(r15d, PositionSize);
             EmitBufferChecks(Builder);
             Builder.BeginUserAccess();
-            Builder.ProbeForWrite(rdx, IoStatusBlockSize);
+            Builder.ProbeForWrite(rdx, Builder.IoStatusBlockSize);
             a.mov(rcx, __qword_ptr[r8]);
             Builder.EndUserAccess();
             a.test(rcx, rcx);
@@ -186,8 +184,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             KernelFileTable.EmitCommitOffset(Builder, rcx, Retry);
 
             Builder.BeginUserAccess();
-            a.mov(__qword_ptr[rdx], 0);
-            a.mov(__qword_ptr[rdx + 8], 0);
+            Builder.WriteIoStatus(rdx, null);
             Builder.EndUserAccess();
         }
 

@@ -2222,7 +2222,8 @@ namespace Brovan.Core.Emulation.Guests
                 EnsureDirectBlobStandardHandles();
 
             WinSyscallTable = HelperFunctions.BuildWinSyscallTable(Instance._binary.Architecture);
-            WinHelper.KernelFiles = KernelFileTable.TryCreate(Instance);
+            // The guest kernel reads x86 arguments only where the WOW64 gate puts them.
+            WinHelper.KernelFiles = Instance.IsX86Guest && !WinHelper.X86GateArgs ? null : KernelFileTable.TryCreate(Instance);
             WinHelper.KernelFileReads = KernelFileReads.TryCreate(Instance, this, WinHelper.KernelFiles);
             WinHelper.KernelFileInformation = KernelFileInformation.TryCreate(Instance, this, WinHelper.KernelFiles);
             WinHelper.KernelFileVolumeInformation = KernelFileVolumeInformation.TryCreate(Instance, this, WinHelper.KernelFiles);

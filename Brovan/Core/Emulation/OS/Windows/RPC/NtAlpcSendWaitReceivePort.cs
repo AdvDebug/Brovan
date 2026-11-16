@@ -291,7 +291,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Span<byte> Attribute = stackalloc byte[HandleAttributeSize];
-            if (!Instance.ReadMemory(AttributesPtr + AttributeOffset(AllocatedAttributes, HandleAttribute), Attribute))
+            if (!Instance.ReadMemory(AttributesPtr + AttributeOffset(Instance, AllocatedAttributes, HandleAttribute), Attribute))
                 return null;
 
             if ((ReadU32(Attribute, 0) & IndirectHandleFlag) != 0)

@@ -186,6 +186,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong SavedArg2;
         public ulong SavedArg3;
 
+        // WOW64 restores the whole x86 context and the exception list after a callback.
+        public ulong[] SavedRegisters32;
+        public uint SavedExceptionList;
+
         public WinCallbackContinuation Continuation;
         public ulong? DeferredSyscallResult;
     }

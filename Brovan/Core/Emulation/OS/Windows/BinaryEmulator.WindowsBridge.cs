@@ -1202,7 +1202,7 @@ namespace Brovan.Core.Emulation
             if (State != null && State.GetMessageWaitActive)
             {
                 Win32kHelper.DrainHostEvents(this);
-                if (WinHelper.SupportsUserCallbacks && Win32kHelper.HasSentMessageFor(this, Thread.ThreadId))
+                if (Win32kHelper.HasSentMessageFor(this, Thread.ThreadId))
                 {
                     State.GetMessageWaitActive = false;
                     State.RetrySyscallActive = true;

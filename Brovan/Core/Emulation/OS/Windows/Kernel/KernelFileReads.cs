@@ -19,10 +19,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int LengthArg = 6;
         private const int ByteOffsetArg = 7;
         private const int KeyArg = 8;
-        private const int StackArgsStart = 0x28;
-        private const int StackArgsEnd = 0x50;
-
-        private const int IoStatusBlockSize = 16;
 
         private const int SavedIoStatusBlock = 0;
         private const int SavedLength = 1;
@@ -74,11 +70,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Table.EmitLookup(Builder, KernelFileTable.ReadRight);
             Builder.CheckUserRange(r11, r9, r8, rax);
-            Builder.CheckUserRange(rdx, IoStatusBlockSize, rax);
+            Builder.CheckUserRange(rdx, Builder.IoStatusBlockSize, rax);
 
-            // An abort makes the host read arguments 5 to 9 again, so no output may overlap them.
-            a.lea(rax, __[rsp + StackArgsEnd]);
-            a.lea(rcx, __[rsp + StackArgsStart]);
+            // An abort makes the host read the arguments in memory again, so no output may overlap them.
+            Builder.LoadMemoryArgumentRange(rcx, rax, ArgumentCount);
             a.cmp(r11, rax);
             a.jae(BufferClear);
             a.cmp(r8, rcx);
@@ -86,13 +81,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             a.Label(ref BufferClear);
             a.cmp(rdx, rax);
             a.jae(StatusClear);
-            a.lea(rsi, __[rdx + IoStatusBlockSize]);
+            a.lea(rsi, __[rdx + Builder.IoStatusBlockSize]);
             a.cmp(rsi, rcx);
             a.ja(Abort);
             a.Label(ref StatusClear);
 
             Builder.BeginUserAccess();
-            Builder.ProbeForWrite(rdx, IoStatusBlockSize);
+            Builder.ProbeForWrite(rdx, Builder.IoStatusBlockSize);
             Builder.ProbeForWrite(r11, r8, rax, rcx);
             Builder.EndUserAccess();
             Builder.Save(SavedIoStatusBlock, rdx);
@@ -113,8 +108,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             KernelFileTable.EmitCommitOffset(Builder, r8, Retry);
 
             Builder.BeginUserAccess();
-            a.mov(__qword_ptr[rdx], 0);
-            a.mov(__qword_ptr[rdx + 8], r9);
+            Builder.WriteIoStatus(rdx, r9);
             Builder.EndUserAccess();
         }
 

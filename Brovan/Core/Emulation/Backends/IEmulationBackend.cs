@@ -130,6 +130,14 @@ namespace Brovan.Core.Emulation
             Unsafe.WriteUnaligned(idt + vector * GateSize + 8, (uint)(handler >> 32));
         }
 
+        public static unsafe void SetGateHandler(byte* idt, uint vector, ulong handler)
+        {
+            byte* gate = idt + vector * GateSize;
+            Unsafe.WriteUnaligned(gate, (ushort)handler);
+            Unsafe.WriteUnaligned(gate + 6, (ushort)(handler >> 16));
+            Unsafe.WriteUnaligned(gate + 8, (uint)(handler >> 32));
+        }
+
         public static unsafe void SetUserGates(byte* idt, uint vectorCount, Func<uint, bool> raisableFromUserMode)
         {
             for (uint vector = 0; vector < vectorCount; vector++)
@@ -142,6 +150,36 @@ namespace Brovan.Core.Emulation
         private static int TssIstOffset(byte ist) => 0x1C + ist * 8;
 
         public static ulong DebugStackTop(ulong stackTop) => stackTop - DebugStackOffset;
+
+        private const ulong InterruptFrameBytes = 5 * sizeof(ulong);
+
+        public static ulong InterruptFrame(ulong stackTop) => stackTop - InterruptFrameBytes;
+
+        public static ulong DebugFrame(ulong stackTop) => DebugStackTop(stackTop) - InterruptFrameBytes;
+
+        public static ulong FrameForVector(ulong stackTop, uint vector)
+            => IstFor(vector) == DebugIst ? DebugFrame(stackTop) : InterruptFrame(stackTop);
+
+        // After the stub's hlt, add rsp, 8 drops the error code and iretq returns through the CPU's frame.
+        public static unsafe void WriteReturnTail(byte* stubs, uint vector, ulong stride, bool hasErrorCode)
+        {
+            byte* tail = stubs + vector * stride + 1;
+            if (hasErrorCode)
+            {
+                *tail++ = 0x48;
+                *tail++ = 0x83;
+                *tail++ = 0xC4;
+                *tail++ = 0x08;
+            }
+            *tail++ = 0x48;
+            *tail = 0xCF;
+        }
+
+        public static bool IsReturnTail(ulong rip, ulong stubPage, uint vectorCount, ulong stride)
+        {
+            ulong offset = rip - stubPage;
+            return rip > stubPage && offset < vectorCount * stride && offset % stride != 0;
+        }
 
         public static unsafe void WriteTss(byte* tss, ulong stackTop)
         {
@@ -338,18 +376,29 @@ namespace Brovan.Core.Emulation
         Declined,
     }
 
+    internal enum GuestSyscallEntry
+    {
+        Syscall,
+        InterruptGate,
+    }
+
     // A kernel call starts with every register saved and only RCX and R11 changed. It must not change RSP.
+    // Arguments 0 to 3 are in R10, RDX, R8 and R9 for both entries.
     public sealed class GuestKernelCallBuilder
     {
         // NT passes the arguments after the fourth on the user stack, above the return address and shadow space.
         private const int StackArgumentsOffset = 0x28;
+        // The x86 ntdll stub's return address and its caller's come before the arguments.
+        internal const int GateArgumentsOffset = 8;
         private const int GuestPageMask = 0xFFF;
 
         private readonly ulong _spillAddress;
         private readonly bool _smap;
+        private readonly bool _gate;
         private bool _userAccess;
 
-        internal GuestKernelCallBuilder(Assembler asm, Label abort, Label decline, ulong spillAddress, ulong userEnd, bool smap)
+        internal GuestKernelCallBuilder(Assembler asm, Label abort, Label decline, ulong spillAddress, ulong userEnd, bool smap,
+            GuestSyscallEntry entry)
         {
             Asm = asm;
             Abort = abort;
@@ -357,6 +406,7 @@ namespace Brovan.Core.Emulation
             _spillAddress = spillAddress;
             UserEnd = userEnd;
             _smap = smap;
+            _gate = entry == GuestSyscallEntry.InterruptGate;
         }
 
         public Assembler Asm { get; }
@@ -367,24 +417,87 @@ namespace Brovan.Core.Emulation
 
         public ulong UserEnd { get; }
 
+        public int IoStatusBlockSize => _gate ? 2 * sizeof(uint) : 2 * sizeof(ulong);
+
         public void CheckStackArguments(int count, AssemblerRegister64 scratch)
         {
-            Asm.mov(scratch, (long)(UserEnd - (ulong)(StackArgumentsOffset + (count - 4) * 8)));
-            Asm.cmp(rsp, scratch);
+            if (_gate)
+            {
+                Asm.mov(scratch, (long)(UserEnd - (ulong)(GateArgumentsOffset + count * sizeof(uint))));
+                Asm.AddInstruction(Instruction.Create(Code.Cmp_rm64_r64, GuestSyscallStub.FrameRspOperand(_spillAddress), scratch.Value));
+            }
+            else
+            {
+                Asm.mov(scratch, (long)(UserEnd - (ulong)(StackArgumentsOffset + (count - 4) * 8)));
+                Asm.cmp(rsp, scratch);
+            }
             Asm.ja(Abort);
         }
 
-        // Arguments count from 0, and CheckStackArguments must cover the index first.
+        // Arguments count from 0, and CheckStackArguments must cover the index first. An x86 argument is zero-extended.
         public void LoadStackArgument(AssemblerRegister64 target, int index)
         {
             RequireUserAccess();
-            Asm.mov(target, __qword_ptr[rsp + StackArgumentsOffset + (index - 4) * 8]);
+            if (_gate)
+                LoadGateArgument(target, index);
+            else
+                Asm.mov(target, __qword_ptr[rsp + StackArgumentsOffset + (index - 4) * 8]);
         }
 
         public void LoadStackArgument(AssemblerRegister32 target, int index)
         {
             RequireUserAccess();
-            Asm.mov(target, __dword_ptr[rsp + StackArgumentsOffset + (index - 4) * 8]);
+            if (_gate)
+                LoadGateArgument(new AssemblerRegister64(target.Value.GetFullRegister()), index);
+            else
+                Asm.mov(target, __dword_ptr[rsp + StackArgumentsOffset + (index - 4) * 8]);
+        }
+
+        private void LoadGateArgument(AssemblerRegister64 target, int index)
+        {
+            LoadGateUserStack(target);
+            Asm.mov(new AssemblerRegister32(target.Value.GetFullRegister32()), __dword_ptr[target + GateArgumentsOffset + index * sizeof(uint)]);
+        }
+
+        // Read from the spill page copy, because a fault inside the call reuses the IST stack.
+        private void LoadGateUserStack(AssemblerRegister64 target)
+        {
+            Asm.AddInstruction(Instruction.Create(Code.Mov_r64_rm64, target.Value, GuestSyscallStub.FrameRspOperand(_spillAddress)));
+        }
+
+        public void LoadMemoryArgumentRange(AssemblerRegister64 start, AssemblerRegister64 end, int count)
+        {
+            if (_gate)
+            {
+                LoadGateUserStack(start);
+                Asm.lea(end, __[start + GateArgumentsOffset + count * sizeof(uint)]);
+                Asm.add(start, GateArgumentsOffset);
+            }
+            else
+            {
+                Asm.lea(start, __[rsp + StackArgumentsOffset]);
+                Asm.lea(end, __[rsp + StackArgumentsOffset + (count - 4) * 8]);
+            }
+        }
+
+        public void WriteIoStatus(AssemblerRegister64 block, AssemblerRegister64? information)
+        {
+            RequireUserAccess();
+            if (_gate)
+            {
+                Asm.mov(__dword_ptr[block], 0);
+                if (information is AssemblerRegister64 info)
+                    Asm.mov(__dword_ptr[block + sizeof(uint)], new AssemblerRegister32(info.Value.GetFullRegister32()));
+                else
+                    Asm.mov(__dword_ptr[block + sizeof(uint)], 0);
+                return;
+            }
+
+            Asm.mov(__qword_ptr[block], 0);
+            if (information is AssemblerRegister64 value)
+                Asm.mov(__qword_ptr[block + sizeof(ulong)], value);
+            else
+                Asm.mov(__qword_ptr[block + sizeof(ulong)], 0);
         }
 
         // Leaves start + length in end.
@@ -523,6 +636,8 @@ namespace Brovan.Core.Emulation
         private const ulong ZeroFlag = 1UL << 6;
         private const ulong TrapFlag = 1UL << 8;
 
+        private const int FrameEntrySize = sizeof(ulong);
+
         // Same order as the WHV and KVM general register blocks.
         private static readonly AssemblerRegister64[] SlotRegisters =
             { rax, rbx, rcx, rdx, rsi, rdi, rsp, rbp, r8, r9, r10, r11, r12, r13, r14, r15 };
@@ -556,9 +671,15 @@ namespace Brovan.Core.Emulation
 
         public ushort EntryOffset(int call) => (ushort)_calls[call].Body;
 
+        // A WOW64 service number carries the thunk index in its high word.
+        public static uint TableIndex(uint number, GuestSyscallEntry entry)
+            => entry == GuestSyscallEntry.InterruptGate ? number & 0xFFFF : number;
+
         public static GuestSyscallStub Build(ulong codeAddress, ulong spillAddress, ulong tableAddress,
-            IReadOnlyList<GuestKernelCall> calls, ulong userEnd, bool smap, bool alwaysSpill, out ArraySegment<byte> code)
+            IReadOnlyList<GuestKernelCall> calls, ulong userEnd, bool smap, bool alwaysSpill, GuestSyscallEntry entry,
+            out ArraySegment<byte> code)
         {
+            bool gate = entry == GuestSyscallEntry.InterruptGate;
             Assembler a = new Assembler(64);
             Label start = a.CreateLabel();
             Label dispatch = a.CreateLabel();
@@ -575,15 +696,35 @@ namespace Brovan.Core.Emulation
                 a.Label(ref start);
                 for (int slot = 0; slot < RegisterSlots; slot++)
                     Store(a, spillAddress, slot, SlotRegisters[slot]);
+
+                // A fault inside a kernel call reuses the IST stack, so the gate frame is copied first. The copy goes
+                // memory to memory, so a stop here still finds the caller's registers.
+                if (gate)
+                {
+                    for (int item = 0; item < FrameSlots; item++)
+                    {
+                        a.push(__qword_ptr[rsp + item * FrameEntrySize]);
+                        a.AddInstruction(Instruction.Create(Code.Pop_rm64, At(SlotAddress(spillAddress, FrameSlot + item))));
+                    }
+                }
             }
 
             if (calls.Count != 0)
             {
                 // A set TF goes to the host, because NT raises the single step before the next user instruction.
                 a.Label(ref dispatch);
-                a.test(r11d, (int)TrapFlag);
-                a.jnz(halt);
-                a.mov(r11d, eax);
+                if (gate)
+                {
+                    a.AddInstruction(Instruction.Create(Code.Test_rm32_imm32, At(SlotAddress(spillAddress, FrameRflagsSlot)), (int)TrapFlag));
+                    a.jnz(halt);
+                    a.movzx(r11d, ax);
+                }
+                else
+                {
+                    a.test(r11d, (int)TrapFlag);
+                    a.jnz(halt);
+                    a.mov(r11d, eax);
+                }
                 a.cmp(r11d, (int)MaxNumber);
                 a.jae(reload);
                 Lea(a, rcx, tableAddress);
@@ -617,22 +758,33 @@ namespace Brovan.Core.Emulation
             if (calls.Count != 0)
             {
                 a.Label(ref fastReturn);
-                Load(a, spillAddress, RcxSlot, rcx);
-                Store(a, spillAddress, FrameSlot, rcx);
-                Load(a, spillAddress, R11Slot, r11);
-                a.mov(rax, r11);
-                a.and(rax, (int)UserModeFlags.ClampKeep);
-                a.or(rax, (int)UserModeFlags.ClampSet);
-                Store(a, spillAddress, FrameRflagsSlot, rax);
-                a.mov(r8, rsp);
-                Store(a, spillAddress, FrameRspSlot, r8);
-                Lea(a, rsp, SlotAddress(spillAddress, FrameSlot));
-                LoadSlotsExcept(a, spillAddress, FastReturnSlots);
-                a.xor(edx, edx);
-                a.xor(r9d, r9d);
-                a.xor(r10d, r10d);
-                a.xor(eax, eax);
-                a.iretq();
+                if (gate)
+                {
+                    // A WOW64 system call changes only EAX.
+                    Lea(a, rsp, SlotAddress(spillAddress, FrameSlot));
+                    LoadSlotsExcept(a, spillAddress, 1 << RaxSlot | 1 << RspSlot);
+                    a.xor(eax, eax);
+                    a.iretq();
+                }
+                else
+                {
+                    Load(a, spillAddress, RcxSlot, rcx);
+                    Store(a, spillAddress, FrameSlot, rcx);
+                    Load(a, spillAddress, R11Slot, r11);
+                    a.mov(rax, r11);
+                    a.and(rax, (int)UserModeFlags.ClampKeep);
+                    a.or(rax, (int)UserModeFlags.ClampSet);
+                    Store(a, spillAddress, FrameRflagsSlot, rax);
+                    a.mov(r8, rsp);
+                    Store(a, spillAddress, FrameRspSlot, r8);
+                    Lea(a, rsp, SlotAddress(spillAddress, FrameSlot));
+                    LoadSlotsExcept(a, spillAddress, FastReturnSlots);
+                    a.xor(edx, edx);
+                    a.xor(r9d, r9d);
+                    a.xor(r10d, r10d);
+                    a.xor(eax, eax);
+                    a.iretq();
+                }
 
                 a.Label(ref commonAbort);
                 if (smap)
@@ -648,7 +800,9 @@ namespace Brovan.Core.Emulation
                     bodies[i] = a.CreateLabel();
 
                     a.Label(ref bodies[i]);
-                    GuestKernelCallBuilder builder = new GuestKernelCallBuilder(a, aborts[i], declines[i], spillAddress, userEnd, smap);
+                    GuestKernelCallBuilder builder = new GuestKernelCallBuilder(a, aborts[i], declines[i], spillAddress, userEnd, smap, entry);
+                    if (gate)
+                        EmitGateRegisterArguments(a, spillAddress, aborts[i], userEnd, smap);
                     calls[i].Emit(builder);
                     commits[i] = builder.CommitLabel ?? throw new InvalidOperationException($"Kernel call {calls[i].Name} never commits.");
                     commitChecksZero[i] = builder.CommitChecksZero;
@@ -754,6 +908,25 @@ namespace Brovan.Core.Emulation
             return GuestKernelCallState.None;
         }
 
+        private static void EmitGateRegisterArguments(Assembler a, ulong spillAddress, Label abort, ulong userEnd, bool smap)
+        {
+            const int RegisterArguments = 4;
+            a.AddInstruction(Instruction.Create(Code.Mov_r64_rm64, Register.R11, FrameRspOperand(spillAddress)));
+            a.mov(rcx, (long)(userEnd - (ulong)(GuestKernelCallBuilder.GateArgumentsOffset + RegisterArguments * sizeof(uint))));
+            a.cmp(r11, rcx);
+            a.ja(abort);
+            if (smap)
+                a.stac();
+            a.mov(r10d, __dword_ptr[r11 + GuestKernelCallBuilder.GateArgumentsOffset]);
+            a.mov(edx, __dword_ptr[r11 + GuestKernelCallBuilder.GateArgumentsOffset + 4]);
+            a.mov(r8d, __dword_ptr[r11 + GuestKernelCallBuilder.GateArgumentsOffset + 8]);
+            a.mov(r9d, __dword_ptr[r11 + GuestKernelCallBuilder.GateArgumentsOffset + 12]);
+            if (smap)
+                a.clac();
+        }
+
+        internal static MemoryOperand FrameRspOperand(ulong spillAddress) => At(SlotAddress(spillAddress, FrameRspSlot));
+
         private static MemoryOperand At(ulong address) => new MemoryOperand(Register.RIP, (long)address, 8);
 
         private static ulong SlotAddress(ulong spillAddress, int slot) => spillAddress + (ulong)slot * 8;
@@ -816,6 +989,7 @@ namespace Brovan.Core.Emulation
         private readonly ushort _userDataSelector;
         private readonly bool _smap;
         private readonly bool _alwaysSpill;
+        private readonly GuestSyscallEntry _entry;
         private readonly List<GuestKernelCall> _calls = new();
         private bool[] _viewChunksUsed;
         private readonly Dictionary<ulong, ulong> _views = new();
@@ -826,7 +1000,7 @@ namespace Brovan.Core.Emulation
         private bool _enabled = true;
 
         public GuestKernelHost(IGuestKernelBackend backend, ulong internalBase, ushort userCodeSelector, ushort userDataSelector,
-            bool smap, bool alwaysSpill)
+            bool smap, bool alwaysSpill, GuestSyscallEntry entry = GuestSyscallEntry.Syscall)
         {
             _backend = backend;
             _internalBase = internalBase;
@@ -834,6 +1008,7 @@ namespace Brovan.Core.Emulation
             _userDataSelector = userDataSelector;
             _smap = smap;
             _alwaysSpill = alwaysSpill;
+            _entry = entry;
         }
 
         public GuestSyscallStub Layout { get; private set; }
@@ -854,6 +1029,7 @@ namespace Brovan.Core.Emulation
 
         public bool RegisterSyscall(uint number, string name, Action<GuestKernelCallBuilder> emit, GuestKernelFinish finish)
         {
+            number = GuestSyscallStub.TableIndex(number, _entry);
             if (_backend.DisposedCheck() || _sealed || emit == null || number >= GuestSyscallStub.MaxNumber
                 || _calls.Count >= GuestSyscallStub.MaxCalls || IsCallNumber(number))
                 return false;
@@ -909,7 +1085,7 @@ namespace Brovan.Core.Emulation
         private unsafe void WriteStub(StubPages stub)
         {
             GuestSyscallStub layout = GuestSyscallStub.Build(stub.Code, stub.Spill, _tableAddress, _calls, _internalBase, _smap,
-                _alwaysSpill, out ArraySegment<byte> code);
+                _alwaysSpill, _entry, out ArraySegment<byte> code);
             if ((ulong)code.Count > PageSize)
                 throw new InvalidOperationException("The syscall stub does not fit in its page.");
 

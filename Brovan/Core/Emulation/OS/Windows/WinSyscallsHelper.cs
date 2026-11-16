@@ -900,8 +900,26 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public int PointerSize => Emulator._binary.Architecture == BinaryArchitecture.x64 ? 8 : 4;
 
-        // The user callback path is x64 only.
-        public bool SupportsUserCallbacks => PointerSize == 8;
+        internal ulong ReadStackPointer()
+        {
+            return PointerSize == 8
+                ? Emulator.ReadRegister(Registers.UC_X86_REG_RSP)
+                : Emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
+        }
+
+        private void WriteStackPointer(ulong Value)
+        {
+            if (PointerSize == 8)
+                Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Value);
+            else
+                Emulator.WriteRegister32(Registers.UC_X86_REG_ESP, (uint)Value);
+        }
+
+        // The syscall hook skips the 2-byte syscall after the handler, and int 2E has already moved EIP past itself.
+        private void ResumeAt(ulong Address)
+        {
+            Emulator.WriteRegister(Emulator.IPRegister, PointerSize == 8 ? Address - 2 : Address);
+        }
 
         private const uint ObjectAttributes32Size = 0x18;
 
@@ -2730,7 +2748,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Emulator._binary.Architecture == BinaryArchitecture.x86)
                 {
                     uint ESP = Emulator._emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
-                    _argCache.ArgBase = X86GateArgs ? ESP + 8u : ESP + 4u;
+                    _argCache.ArgBase = X86GateArgs ? ESP + (uint)GuestKernelCallBuilder.GateArgumentsOffset : ESP + 4u;
                     RefreshWow64FileRedirect();
                 }
                 return;
@@ -4064,16 +4082,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (WinEmulatedThread.GetState(Thread).ApcFunc != 0)
                 return WinEmulatedThread.GetState(Thread).ApcFunc;
 
-            WinModule ntdll = WinModules.FirstOrDefault(m => m.Name != null && m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase));
-            if (ntdll == null)
-                return 0;
-
-            ulong Dispatcher = GetExportAddress(ntdll, "KiUserApcDispatcher");
-            if (Dispatcher == 0 && ntdll.ExportsByName != null && ntdll.ExportsByName.TryGetValue("KiUserApcDispatcher", out ulong OriginalVa))
-                Dispatcher = Emulator.TranslateVirtualAddress(OriginalVa, "ntdll.dll");
-
+            ulong Dispatcher = ResolveNtdllExport("KiUserApcDispatcher");
             WinEmulatedThread.GetState(Thread).ApcFunc = Dispatcher;
             return Dispatcher;
+        }
+
+        private ulong ResolveNtdllExport(string Name)
+        {
+            WinModule Ntdll = WinModules.FirstOrDefault(m => m != null && m.Name != null && m.Name.Equals("ntdll.dll", StringComparison.OrdinalIgnoreCase));
+            if (Ntdll == null)
+                return 0;
+
+            ulong Address = GetExportAddress(Ntdll, Name);
+            if (Address == 0 && Ntdll.ExportsByName != null && Ntdll.ExportsByName.TryGetValue(Name, out ulong OriginalVa))
+                Address = Emulator.TranslateVirtualAddress(OriginalVa, "ntdll.dll");
+            return Address;
         }
 
         private void InterruptAlertableWaitWithUserApc(EmulatedThread Thread)
@@ -4623,37 +4646,60 @@ namespace Brovan.Core.Emulation.OS.Windows
                 : Emulator.ReadMemoryUInt(Table + (ulong)Index * 4);
         }
 
-        private static ulong UserCallbackDispatcherRsp(ulong ArgumentBuffer) => (ArgumentBuffer - 0x80) & ~0xFUL;
+        // Wow64KiUserCallbackDispatcher builds this frame. It holds the interrupted EIP, the API index, the buffer, its
+        // length, a registration record and the old ESP.
+        private const int UserCallbackFrameSize32 = 0x1C;
+
+        private static readonly int[] CallbackRegisters32 =
+        {
+            (int)Registers.UC_X86_REG_EAX, (int)Registers.UC_X86_REG_EBX, (int)Registers.UC_X86_REG_ECX, (int)Registers.UC_X86_REG_EDX,
+            (int)Registers.UC_X86_REG_ESI, (int)Registers.UC_X86_REG_EDI, (int)Registers.UC_X86_REG_EBP, (int)Registers.UC_X86_REG_EFLAGS,
+            (int)Registers.UC_X86_REG_ESP, (int)Registers.UC_X86_REG_EIP,
+        };
+
+        private const int SavedCallbackRegisters32 = 8;
+
+        private ulong UserCallbackDispatcher;
+
+        private ulong GetUserCallbackDispatcher()
+        {
+            if (UserCallbackDispatcher == 0)
+                UserCallbackDispatcher = ResolveNtdllExport("KiUserCallbackDispatcher");
+            return UserCallbackDispatcher;
+        }
+
+        private ulong UserCallbackDispatcherSp(ulong ArgumentBuffer)
+        {
+            return PointerSize == 8
+                ? (ArgumentBuffer - 0x80) & ~0xFUL
+                : (ArgumentBuffer - UserCallbackFrameSize32) & ~0x7UL;
+        }
 
         // NT probes the whole callback frame before it writes anything (KeUserModeCallback).
         internal bool TryMapUserCallbackFrame(ulong ArgumentBuffer, ulong StackPointer)
         {
-            ulong FrameBase = UserCallbackDispatcherRsp(ArgumentBuffer) - 8;
+            ulong FrameBase = UserCallbackDispatcherSp(ArgumentBuffer) - (PointerSize == 8 ? 8UL : 0UL);
             return FrameBase < StackPointer && TryMapUserFrame(FrameBase, StackPointer - FrameBase, out _);
         }
 
-        /// <param name="ArgumentBuffer">Must lie in a frame that <see cref="TryMapUserCallbackFrame"/> accepted.</param>
-        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinCallbackContinuation Continuation = null,
-            ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, ulong? DeferredSyscallResult = null)
+        private WinUserCallbackFrame SaveUserCallbackFrame(EmulatedThread Thread, ulong StackPointer, ulong SyscallRetryRip)
         {
-            EmulatedThread Thread = Emulator.CurrentThread;
-            if (Thread == null || Callback == 0 || !SupportsUserCallbacks)
-                return false;
-
-            ulong CurrentRsp = Emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-            if (!Emulator.IsRegionMapped(CurrentRsp, 8))
-                return false;
-
             WinUserCallbackFrame Frame = new WinUserCallbackFrame
             {
-                SavedRsp = CurrentRsp,
-                SavedReturnAddress = Emulator.ReadMemoryULong(CurrentRsp),
+                SavedRsp = StackPointer,
                 SyscallRetryRip = SyscallRetryRip,
-                PaintRetryHwnd = PaintRetryHwnd,
-                Continuation = Continuation,
-                DeferredSyscallResult = DeferredSyscallResult,
             };
 
+            if (PointerSize == 4)
+            {
+                Frame.SavedReturnAddress = Emulator.ReadRegister32(Registers.UC_X86_REG_EIP);
+                Frame.SavedRegisters32 = new ulong[SavedCallbackRegisters32];
+                Emulator._emulator.ReadRegisterBatch(CallbackRegisters32, Frame.SavedRegisters32, SavedCallbackRegisters32);
+                TryReadUInt32(WinEmulatedThread.GetState(Thread).Teb, out Frame.SavedExceptionList);
+                return Frame;
+            }
+
+            Frame.SavedReturnAddress = Emulator.ReadMemoryULong(StackPointer);
             if (SyscallRetryRip != 0)
             {
                 Frame.SavedSyscallNumber = Emulator.ReadRegister(Registers.UC_X86_REG_RAX);
@@ -4663,20 +4709,74 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Frame.SavedArg3 = Emulator.ReadRegister(Registers.UC_X86_REG_R9);
             }
 
-            WinEmulatedThread.GetState(Thread).UserCallbackFrames.Push(Frame);
+            return Frame;
+        }
 
-            ulong DispatcherRsp = UserCallbackDispatcherRsp(ArgumentBuffer);
-            if (DispatcherRsp < ArgumentBuffer)
+        private void RestoreUserCallbackContext32(EmulatedThread Thread, WinUserCallbackFrame Frame)
+        {
+            ulong[] Values = Emulator.RegisterScratch;
+            Frame.SavedRegisters32.AsSpan().CopyTo(Values);
+            Values[SavedCallbackRegisters32] = Frame.SavedRsp;
+            Values[SavedCallbackRegisters32 + 1] = Frame.SavedReturnAddress;
+            Emulator._emulator.WriteRegisterBatch(CallbackRegisters32, Values, CallbackRegisters32.Length);
+            Emulator._emulator.WriteMemory(WinEmulatedThread.GetState(Thread).Teb, Frame.SavedExceptionList, 4);
+        }
+
+        /// <param name="ArgumentBuffer">Must lie in a frame that <see cref="TryMapUserCallbackFrame"/> accepted.</param>
+        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinCallbackContinuation Continuation = null,
+            ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, ulong? DeferredSyscallResult = null)
+        {
+            EmulatedThread Thread = Emulator.CurrentThread;
+            if (Thread == null || Callback == 0)
+                return false;
+
+            ulong CurrentSp = ReadStackPointer();
+            if (!Emulator.IsRegionMapped(CurrentSp, (ulong)PointerSize))
+                return false;
+
+            // The x86 KiUserCallbackDispatcher calls the table entry itself.
+            if (PointerSize == 4)
             {
-                Span<byte> DispatcherFrame = stackalloc byte[(int)((ArgumentBuffer - DispatcherRsp + 7) & ~7UL)];
-                BinaryPrimitives.WriteUInt64LittleEndian(DispatcherFrame.Slice(0x20), ArgumentBuffer);
-                BinaryPrimitives.WriteUInt32LittleEndian(DispatcherFrame.Slice(0x2C), CallbackIndex);
-                Emulator._emulator.WriteMemory(DispatcherRsp, DispatcherFrame);
+                Callback = GetUserCallbackDispatcher();
+                if (Callback == 0)
+                    return false;
             }
 
-            Emulator.WriteRegister(Registers.UC_X86_REG_RCX, ArgumentBuffer);
-            Emulator.WriteRegister(Registers.UC_X86_REG_RSP, DispatcherRsp - 8);
-            Emulator.WriteRegister(Emulator.IPRegister, Callback - 2);
+            WinUserCallbackFrame Frame = SaveUserCallbackFrame(Thread, CurrentSp, SyscallRetryRip);
+            Frame.PaintRetryHwnd = PaintRetryHwnd;
+            Frame.Continuation = Continuation;
+            Frame.DeferredSyscallResult = DeferredSyscallResult;
+
+            ulong DispatcherSp = UserCallbackDispatcherSp(ArgumentBuffer);
+            if (PointerSize == 4)
+            {
+                Span<byte> DispatcherFrame = stackalloc byte[UserCallbackFrameSize32];
+                DispatcherFrame.Clear();
+                BinaryPrimitives.WriteUInt32LittleEndian(DispatcherFrame.Slice(0x00), (uint)Frame.SavedReturnAddress);
+                BinaryPrimitives.WriteUInt32LittleEndian(DispatcherFrame.Slice(0x04), CallbackIndex);
+                BinaryPrimitives.WriteUInt32LittleEndian(DispatcherFrame.Slice(0x08), (uint)ArgumentBuffer);
+                BinaryPrimitives.WriteUInt32LittleEndian(DispatcherFrame.Slice(0x18), (uint)CurrentSp);
+                if (!Emulator._emulator.WriteMemory(DispatcherSp, DispatcherFrame))
+                    return false;
+
+                WriteStackPointer(DispatcherSp);
+            }
+            else
+            {
+                if (DispatcherSp < ArgumentBuffer)
+                {
+                    Span<byte> DispatcherFrame = stackalloc byte[(int)((ArgumentBuffer - DispatcherSp + 7) & ~7UL)];
+                    BinaryPrimitives.WriteUInt64LittleEndian(DispatcherFrame.Slice(0x20), ArgumentBuffer);
+                    BinaryPrimitives.WriteUInt32LittleEndian(DispatcherFrame.Slice(0x2C), CallbackIndex);
+                    Emulator._emulator.WriteMemory(DispatcherSp, DispatcherFrame);
+                }
+
+                Emulator.WriteRegister(Registers.UC_X86_REG_RCX, ArgumentBuffer);
+                WriteStackPointer(DispatcherSp - 8);
+            }
+
+            WinEmulatedThread.GetState(Thread).UserCallbackFrames.Push(Frame);
+            ResumeAt(Callback);
             Emulator.SuppressSyscallStatusWrite = true;
             return true;
         }
@@ -4695,9 +4795,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // Windows has csrss fetch the client procedure tables. Brovan has no csrss, so the first thread that
         // needs them makes the call and repeats its own syscall. True means return at once and run again.
+        // The tables hold 64-bit user32 procedures, which a 32-bit guest does not have.
         public bool BeginClientPfnFetch()
         {
-            if (ClientPfnFetched || !SupportsUserCallbacks)
+            if (ClientPfnFetched || PointerSize != 8)
                 return false;
 
             if (ClientPfnScratch != 0)
@@ -4780,6 +4881,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int GuestCallResultOffset = 0x00;
         private const int GuestCallScratchOffset = 0x08;
         private const int GuestCallCodeOffset = 0x20;
+        private const int GuestCallFrameSize32 = 5 * sizeof(uint);
 
         /// <summary>
         /// Builds the page a guest callback returns to. Its code calls NtCallbackReturn, which unwinds the
@@ -4790,8 +4892,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (GuestCallTrampoline != 0 && Emulator.IsRegionMapped(GuestCallTrampoline, GuestCallTrampolineSize))
                 return GuestCallTrampoline;
 
-            if (!Emulator.IsX64Guest || Emulator.WindowsGuest is not WindowsGuest Guest
-                || !Guest.TryGetSyscallNumber(nameof(NtCallbackReturn), out uint CallbackReturn))
+            if (Emulator.WindowsGuest is not WindowsGuest Guest || !Guest.TryGetSyscallNumber(nameof(NtCallbackReturn), out uint CallbackReturn))
                 return 0;
 
             ulong Page = Emulator.MapUniqueAddress(GuestCallTrampolineSize, MemoryProtection.All);
@@ -4799,6 +4900,44 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return 0;
 
             Span<byte> Code = stackalloc byte[26];
+            int At = PointerSize == 8
+                ? WriteGuestCallReturn64(Code, CallbackReturn)
+                : WriteGuestCallReturn32(Code, Page, CallbackReturn);
+
+            if (!Emulator._emulator.WriteMemory(Page + GuestCallCodeOffset, Code.Slice(0, At)))
+                return 0;
+
+            GuestCallTrampoline = Page;
+            return GuestCallTrampoline;
+        }
+
+        private int WriteGuestCallReturn32(Span<byte> Code, ulong Page, uint CallbackReturn)
+        {
+            int At = 0;
+            Code[At++] = 0x6A; Code[At++] = 0x00;
+            Code[At++] = 0x6A; Code[At++] = 0x04;
+            Code[At++] = 0x68;
+            BinaryPrimitives.WriteUInt32LittleEndian(Code.Slice(At, 4), (uint)(Page + GuestCallResultOffset));
+            At += 4;
+
+            // Stand-ins for the return addresses the gate skips before the arguments.
+            int GateSlots = X86GateArgs ? 2 : 1;
+            for (int i = 0; i < GateSlots; i++)
+            {
+                Code[At++] = 0x6A; Code[At++] = 0x00;
+            }
+
+            Code[At++] = 0xB8;
+            BinaryPrimitives.WriteUInt32LittleEndian(Code.Slice(At, 4), CallbackReturn);
+            At += 4;
+
+            Code[At++] = 0xCD; Code[At++] = 0x2E;
+            Code[At++] = 0xCC;
+            return At;
+        }
+
+        private static int WriteGuestCallReturn64(Span<byte> Code, uint CallbackReturn)
+        {
             int At = 0;
 
             Code[At++] = 0x48; Code[At++] = 0x8D; Code[At++] = 0x0D;
@@ -4818,12 +4957,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Code[At++] = 0x0F; Code[At++] = 0x05;
             Code[At++] = 0xCC;
-
-            if (!Emulator._emulator.WriteMemory(Page + GuestCallCodeOffset, Code.Slice(0, At)))
-                return 0;
-
-            GuestCallTrampoline = Page;
-            return GuestCallTrampoline;
+            return At;
         }
 
         public ulong EnsureGuestCallScratch()
@@ -4834,11 +4968,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         /// <summary>
         /// Calls a guest function from inside a syscall and resumes the syscall's caller afterwards with
-        /// ResultValue in RAX. Used for Win32 APIs whose kernel side calls back into user code.
+        /// ResultValue as its return value. Used for Win32 APIs whose kernel side calls back into user code.
         /// </summary>
         public bool BeginGuestCall(ulong Function, ulong Arg0, ulong Arg1, ulong Arg2, ulong Arg3, ulong ResultValue, ulong SyscallRetryRip = 0)
         {
-            if (!SupportsUserCallbacks || Function == 0 || !Emulator.IsRegionMapped(Function, 1))
+            if (Function == 0 || !Emulator.IsRegionMapped(Function, 1))
                 return false;
 
             EmulatedThread Thread = Emulator.CurrentThread;
@@ -4849,38 +4983,39 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Page == 0)
                 return false;
 
-            ulong CurrentRsp = Emulator.ReadRegister(Registers.UC_X86_REG_RSP);
-            ulong CallRsp = ((CurrentRsp - 0x200) & ~0xFUL) - 8;
-            if (CallRsp >= CurrentRsp || !TryMapUserFrame(CallRsp, CurrentRsp - CallRsp, out _))
+            ulong CurrentSp = ReadStackPointer();
+            ulong CallBase = (CurrentSp - 0x200) & ~0xFUL;
+            ulong CallSp = CallBase - (PointerSize == 8 ? 8UL : GuestCallFrameSize32);
+            if (CallSp >= CurrentSp || !TryMapUserFrame(CallSp, CurrentSp - CallSp, out _))
                 return false;
 
-            WinUserCallbackFrame Frame = new WinUserCallbackFrame
-            {
-                SavedRsp = CurrentRsp,
-                SavedReturnAddress = Emulator.ReadMemoryULong(CurrentRsp),
-                SyscallRetryRip = SyscallRetryRip,
-                DeferredSyscallResult = ResultValue,
-            };
+            WinUserCallbackFrame Frame = SaveUserCallbackFrame(Thread, CurrentSp, SyscallRetryRip);
+            Frame.DeferredSyscallResult = ResultValue;
 
-            if (SyscallRetryRip != 0)
+            if (PointerSize == 4)
             {
-                Frame.SavedSyscallNumber = Emulator.ReadRegister(Registers.UC_X86_REG_RAX);
-                Frame.SavedArg0 = Emulator.ReadRegister(Registers.UC_X86_REG_R10);
-                Frame.SavedArg1 = Emulator.ReadRegister(Registers.UC_X86_REG_RDX);
-                Frame.SavedArg2 = Emulator.ReadRegister(Registers.UC_X86_REG_R8);
-                Frame.SavedArg3 = Emulator.ReadRegister(Registers.UC_X86_REG_R9);
+                Span<byte> CallFrame = stackalloc byte[GuestCallFrameSize32];
+                BinaryPrimitives.WriteUInt32LittleEndian(CallFrame.Slice(0x00), (uint)(Page + GuestCallCodeOffset));
+                BinaryPrimitives.WriteUInt32LittleEndian(CallFrame.Slice(0x04), (uint)Arg0);
+                BinaryPrimitives.WriteUInt32LittleEndian(CallFrame.Slice(0x08), (uint)Arg1);
+                BinaryPrimitives.WriteUInt32LittleEndian(CallFrame.Slice(0x0C), (uint)Arg2);
+                BinaryPrimitives.WriteUInt32LittleEndian(CallFrame.Slice(0x10), (uint)Arg3);
+                if (!Emulator._emulator.WriteMemory(CallSp, CallFrame))
+                    return false;
+            }
+            else
+            {
+                Emulator._emulator.WriteMemory(CallSp, Page + GuestCallCodeOffset, 8);
+
+                Emulator.WriteRegister(Registers.UC_X86_REG_RCX, Arg0);
+                Emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arg1);
+                Emulator.WriteRegister(Registers.UC_X86_REG_R8, Arg2);
+                Emulator.WriteRegister(Registers.UC_X86_REG_R9, Arg3);
             }
 
             WinEmulatedThread.GetState(Thread).UserCallbackFrames.Push(Frame);
-
-            Emulator._emulator.WriteMemory(CallRsp, Page + GuestCallCodeOffset, 8);
-
-            Emulator.WriteRegister(Registers.UC_X86_REG_RCX, Arg0);
-            Emulator.WriteRegister(Registers.UC_X86_REG_RDX, Arg1);
-            Emulator.WriteRegister(Registers.UC_X86_REG_R8, Arg2);
-            Emulator.WriteRegister(Registers.UC_X86_REG_R9, Arg3);
-            Emulator.WriteRegister(Registers.UC_X86_REG_RSP, CallRsp);
-            Emulator.WriteRegister(Emulator.IPRegister, Function - 2);
+            WriteStackPointer(CallSp);
+            ResumeAt(Function);
             Emulator.SuppressSyscallStatusWrite = true;
             return true;
         }
@@ -5033,24 +5168,33 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinUserCallbackFrame Frame = Frames.Pop();
 
             ulong ResultValue = 0;
-            if (ResultAddress != 0 && ResultLength >= 8 && Emulator.IsRegionMapped(ResultAddress, 8))
-                ResultValue = Emulator.ReadMemoryULong(ResultAddress);
+            if (ResultAddress != 0 && ResultLength >= (uint)PointerSize)
+                TryReadPointer(ResultAddress, out ResultValue);
+
+            if (PointerSize == 4)
+                RestoreUserCallbackContext32(Thread, Frame);
 
             if (Frame.SyscallRetryRip != 0)
             {
                 WinEmulatedThread.GetState(Thread).PendingPaintRetryHwnd = Frame.PaintRetryHwnd;
-                Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
-                Emulator.WriteRegister(Registers.UC_X86_REG_RAX, Frame.SavedSyscallNumber);
-                Emulator.WriteRegister(Registers.UC_X86_REG_R10, Frame.SavedArg0);
-                Emulator.WriteRegister(Registers.UC_X86_REG_RDX, Frame.SavedArg1);
-                Emulator.WriteRegister(Registers.UC_X86_REG_R8, Frame.SavedArg2);
-                Emulator.WriteRegister(Registers.UC_X86_REG_R9, Frame.SavedArg3);
-                Emulator.WriteRegister(Emulator.IPRegister, Frame.SyscallRetryRip - 2);
+                if (PointerSize == 8)
+                {
+                    Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
+                    Emulator.WriteRegister(Registers.UC_X86_REG_RAX, Frame.SavedSyscallNumber);
+                    Emulator.WriteRegister(Registers.UC_X86_REG_R10, Frame.SavedArg0);
+                    Emulator.WriteRegister(Registers.UC_X86_REG_RDX, Frame.SavedArg1);
+                    Emulator.WriteRegister(Registers.UC_X86_REG_R8, Frame.SavedArg2);
+                    Emulator.WriteRegister(Registers.UC_X86_REG_R9, Frame.SavedArg3);
+                }
+
+                ResumeAt(Frame.SyscallRetryRip);
                 Emulator.SuppressSyscallStatusWrite = true;
                 return true;
             }
 
-            Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
+            if (PointerSize == 8)
+                Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp);
+
             if (Frame.Continuation != null && Frame.Continuation.Resume(Emulator, ref ResultValue))
                 return true;
 
@@ -5064,9 +5208,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void ReturnFromUserCallback(WinUserCallbackFrame Frame, ulong ResultValue)
         {
-            Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp + 8);
-            Emulator.WriteRegister(Emulator.IPRegister, Frame.SavedReturnAddress - 2);
-            Emulator.WriteRegister(Registers.UC_X86_REG_RAX, ResultValue);
+            if (PointerSize == 8)
+            {
+                Emulator.WriteRegister(Registers.UC_X86_REG_RSP, Frame.SavedRsp + 8);
+                Emulator.WriteRegister(Emulator.IPRegister, Frame.SavedReturnAddress - 2);
+                Emulator.WriteRegister(Registers.UC_X86_REG_RAX, ResultValue);
+            }
+            else
+            {
+                Emulator.WriteRegister32(Registers.UC_X86_REG_EAX, (uint)ResultValue);
+            }
+
             Emulator.SuppressSyscallStatusWrite = true;
         }
 
@@ -5078,10 +5230,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinWindow Window = GetWindow(Creation.Hwnd);
 
+            // WOW64 sign-extends an x86 -1 before xxxCreateWindowEx compares it (whcbfnINLPCREATESTRUCT).
             bool Refused = Creation.Step switch
             {
                 WinWindowCreationStep.NonClientCreate => Answer == 0,
-                WinWindowCreationStep.Create => (long)Answer == -1,
+                WinWindowCreationStep.Create => (long)Answer == -1 || (PointerSize == 4 && Answer == uint.MaxValue),
                 _ => false,
             };
 

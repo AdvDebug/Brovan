@@ -9,7 +9,6 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const int EntryBytes = sizeof(ulong) + NtQueryVolumeInformationFile.MaximumInformationBytes;
         private const int EntryCount = NtQueryVolumeInformationFile.MaximumInformationClass + 1;
-        private const int IoStatusBlockSize = 16;
         private const int SavedIoStatusBlock = 0;
         private const int SavedBuffer = 1;
         private const int SavedClass = 2;
@@ -71,12 +70,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             a.ja(Builder.Abort);
             a.test(r8b, 7);
             a.jnz(Builder.Abort);
-            Builder.CheckUserRange(rdx, IoStatusBlockSize, rax);
+            Builder.CheckUserRange(rdx, Builder.IoStatusBlockSize, rax);
             Builder.CheckUserRange(r8, r9, r11, rax);
             Table.EmitLookup(Builder, 0);
 
             Builder.BeginUserAccess();
-            Builder.ProbeForWrite(rdx, IoStatusBlockSize);
+            Builder.ProbeForWrite(rdx, Builder.IoStatusBlockSize);
             Builder.ProbeForWrite(r8, r11, rax, rcx);
             Builder.EndUserAccess();
             Builder.Save(SavedIoStatusBlock, rdx);
@@ -92,8 +91,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             a.mov(rcx, r13);
             Builder.BeginUserAccess();
             a.rep.movsb();
-            a.mov(__qword_ptr[rdx], 0);
-            a.mov(__qword_ptr[rdx + 8], r13);
+            Builder.WriteIoStatus(rdx, r13);
             Builder.EndUserAccess();
         }
 

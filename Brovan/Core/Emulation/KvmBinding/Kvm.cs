@@ -104,7 +104,6 @@ namespace Brovan.Core.Emulation
         private ulong _exceptionIdtPageGpa;
         private ulong _gdtPageGpa;
         private const ulong ExceptionStackPages = 2;
-        private const ulong InterruptFrameBytes = 5 * sizeof(ulong);
 
         private readonly object _vcpuLock = new();
 
@@ -2610,9 +2609,9 @@ namespace Brovan.Core.Emulation
             ulong stackSize = ExceptionStackPages * KvmConstants.PageSize;
             ulong stackBase = AllocateInternalRange(stackSize, KvmMemoryPermission.ReadWrite, out IntPtr stackHost);
             ulong stackTop = stackBase + stackSize;
-            vp.InterruptFrameGpa = stackTop - InterruptFrameBytes;
+            vp.InterruptFrameGpa = GuestInterruptGates.InterruptFrame(stackTop);
             vp.InterruptFrameHost = stackHost + (nint)(vp.InterruptFrameGpa - stackBase);
-            vp.DebugFrameGpa = GuestInterruptGates.DebugStackTop(stackTop) - InterruptFrameBytes;
+            vp.DebugFrameGpa = GuestInterruptGates.DebugFrame(stackTop);
             vp.DebugFrameHost = stackHost + (nint)(vp.DebugFrameGpa - stackBase);
 
             if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage template)
