@@ -130,21 +130,32 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Path.Length == 3 && char.IsLetter(Path[0]) && Path[1] == ':' && Path[2] == '\\';
         }
 
+        /// <summary>Opens without the device's access check, for a handle whose rights were granted before.</summary>
         /// <returns>True if the path matched a registered device.</returns>
         public bool TryCreateDevice(string Path, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler, out NTSTATUS Status)
         {
-            return TryCreateDevice(Path, EaBuffer, out InternalPath, out Handler, out _, out Status, out _);
+            uint Access = 0;
+            return TryCreateDevice(Path, EaBuffer, ref Access, false, out InternalPath, out Handler, out _, out Status, out _, out _);
         }
 
+        /// <param name="Access">The desired access in, the granted access out.</param>
         /// <param name="Pipe">The pipe endpoint when the path named one, null for every other device.</param>
-        internal bool TryCreateDevice(string Path, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler, out GuestNamedPipe Pipe, out NTSTATUS Status,
-            out ulong Information)
+        /// <param name="Refused">The device's access check failed. NT then leaves the IO_STATUS_BLOCK unwritten.</param>
+        internal bool TryCreateDevice(string Path, byte[] EaBuffer, ref uint Access, out string InternalPath, out WinDeviceDelegate Handler, out GuestNamedPipe Pipe,
+            out NTSTATUS Status, out ulong Information, out bool Refused)
+        {
+            return TryCreateDevice(Path, EaBuffer, ref Access, true, out InternalPath, out Handler, out Pipe, out Status, out Information, out Refused);
+        }
+
+        private bool TryCreateDevice(string Path, byte[] EaBuffer, ref uint Access, bool CheckAccess, out string InternalPath, out WinDeviceDelegate Handler,
+            out GuestNamedPipe Pipe, out NTSTATUS Status, out ulong Information, out bool Refused)
         {
             InternalPath = null;
             Handler = null;
             Pipe = null;
             Status = NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             Information = NtCreateFile.FILE_OPENED_INFORMATION;
+            Refused = false;
 
             string DevicePath = TranslatePipeAlias(NormalizeDevicePath(Path, SyntheticVolumeGuid));
             if (!DeviceRegistry.Value.TryGetValue(DevicePath, out IWinDevice Device))
@@ -152,6 +163,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 // Each pipe is a separate object under one device, so the registry cannot hold the name.
                 if (!GuestNamedPipe.IsPipePath(DevicePath) || !DeviceRegistry.Value.TryGetValue(GuestNamedPipe.DeviceName, out Device))
                     return false;
+            }
+
+            if (CheckAccess && Device.SecurityDescriptor is byte[] Descriptor)
+            {
+                Status = CheckDeviceAccess(Descriptor, ref Access);
+                Refused = Status != NTSTATUS.STATUS_SUCCESS;
+                if (Refused)
+                    return true;
             }
 
             Status = Device is NamedPipeDevice PipeDevice
@@ -162,6 +181,22 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Status = NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
 
             return true;
+        }
+
+        // NT checks the device object with the generic mapping of the File type (IopParseDevice).
+        private NTSTATUS CheckDeviceAccess(byte[] Descriptor, ref uint Access)
+        {
+            WinToken Token = NtQueryInformationToken.EffectiveToken(Emulator);
+            if (Token == null)
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+
+            GENERIC_MAPPING Mapping = NtCreateFile.FileGenericMapping;
+            uint Desired = NtAccessCheck.ApplyGenericMapping(Access, Mapping.GenericRead, Mapping.GenericWrite, Mapping.GenericExecute, Mapping.GenericAll);
+            NTSTATUS Status = NtAccessCheck.CheckHost(Descriptor, Token, ReadOnlySpan<byte>.Empty, Desired, Mapping, out uint Granted);
+            if (Status == NTSTATUS.STATUS_SUCCESS)
+                Access = Granted;
+
+            return Status;
         }
 
         public bool IsCurrentProcessHandle(ulong ProcessHandle, AccessMask RequiredAccess)
@@ -255,6 +290,28 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             return TryParkForSyscallRetry(-1, HostWork, SyncIo);
         }
+
+        // Call it before any output, because a parked call starts again from the top.
+        internal bool TryGetNetwork(out GuestNetworkSnapshot Snapshot, out NTSTATUS Parked)
+        {
+            Parked = NTSTATUS.STATUS_SUCCESS;
+            NetworkInterfaces ??= new GuestNetworkInterfaces(Emulator.Settings.GetNetworkPolicy(),
+                Emulator.GetEmulatedSystemTimeFileTimeUtc() - Emulator.EmulatedTickCount64 * 10000, () => Emulator.WakeSignal.Bump());
+            Snapshot = NetworkInterfaces.TryGetSnapshot(out Task Pending);
+            if (Snapshot != null)
+                return true;
+
+            if (TryRetrySyscallWhenDone(Pending))
+            {
+                Parked = NTSTATUS.STATUS_PENDING;
+                return false;
+            }
+
+            Snapshot = NetworkInterfaces.WithoutHostAddresses();
+            return true;
+        }
+
+        internal void EndNetworkProbe() => NetworkInterfaces?.End();
 
         internal T TakeRetriedHostWork<T>() where T : Task
         {
@@ -2582,6 +2639,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal readonly DxgkProcess DxgkProcess = new();
         internal readonly DeviceNodes DeviceNodes = new();
         internal readonly CompositionProcess Composition = new();
+        private GuestNetworkInterfaces NetworkInterfaces;
         private readonly WinObjectDirectory[] NamedObjectRoots;
         private BinaryEmulator Emulator;
 

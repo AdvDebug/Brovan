@@ -73,6 +73,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static readonly byte[] AnonymousLogonSid = BuildSid(5, 7);
         internal static readonly byte[] PrincipalSelfSid = BuildSid(5, 10);
         internal static readonly byte[] AuthenticatedUsersSid = BuildSid(5, 11);
+        internal static readonly byte[] RestrictedCodeSid = BuildSid(5, 12);
         internal static readonly byte[] ThisOrganizationSid = BuildSid(5, 15);
         internal static readonly byte[] LocalSystemSid = BuildSid(5, 18);
         internal static readonly byte[] LocalAccountSid = BuildSid(5, 113);

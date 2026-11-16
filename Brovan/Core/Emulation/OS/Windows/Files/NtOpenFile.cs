@@ -39,16 +39,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (TryGetDosVolumeDevicePath(Instance, Normalized, out string VolumeDevicePath))
             {
-                if (Instance.WinHelper.TryCreateDevice(VolumeDevicePath, Array.Empty<byte>(), out string VolumeInternalPath, out WinDeviceDelegate VolumeHandler, out NTSTATUS VolumeStatus))
-                {
-                    if (VolumeStatus != NTSTATUS.STATUS_SUCCESS)
-                    {
-                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, VolumeStatus, 0);
-                        return VolumeStatus;
-                    }
-
-                    return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeInternalPath, VolumeHandler);
-                }
+                if (NtCreateFile.TryOpenDevice(Instance, VolumeDevicePath, Array.Empty<byte>(), (uint)DesiredAccess, FileHandlePtr, IoStatusBlockPtr, CreateOptions: 0, Inherit: false,
+                    out NTSTATUS VolumeStatus))
+                    return VolumeStatus;
 
                 return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeDevicePath, null);
             }
@@ -58,16 +51,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return DirectoryStatus;
 
             if (!NtCreateFile.IsRootRelativeName(FullName, AttributesRoot) &&
-                Instance.WinHelper.TryCreateDevice(Normalized, Array.Empty<byte>(), out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus, out ulong DeviceInformation))
-            {
-                if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
-                {
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, DeviceStatus, 0);
-                    return DeviceStatus;
-                }
-
-                return NtCreateFile.CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler, DevicePipe, OpenOptions, Inherit, DeviceInformation);
-            }
+                NtCreateFile.TryOpenDevice(Instance, Normalized, Array.Empty<byte>(), (uint)DesiredAccess, FileHandlePtr, IoStatusBlockPtr, OpenOptions, Inherit, out NTSTATUS DeviceStatus))
+                return DeviceStatus;
 
             string Path = ResolveNtPath(Instance, FullName, AttributesRoot);
             if (string.IsNullOrEmpty(Path))

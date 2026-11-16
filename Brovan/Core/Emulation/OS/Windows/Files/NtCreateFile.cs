@@ -21,6 +21,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint FILE_CREATED_INFORMATION = 2;
         private const uint FILE_OVERWRITTEN_INFORMATION = 3;
 
+        internal static readonly GENERIC_MAPPING FileGenericMapping = new GENERIC_MAPPING
+        {
+            GenericRead = 0x120089, GenericWrite = 0x120116, GenericExecute = 0x1200A0, GenericAll = 0x1F01FF
+        };
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
@@ -78,16 +83,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (TryGetDosVolumeDevicePath(Instance, Normalized, out string VolumeDevicePath))
             {
-                if (Instance.WinHelper.TryCreateDevice(VolumeDevicePath, Ea, out string VolumeInternalPath, out WinDeviceDelegate VolumeHandler, out NTSTATUS VolumeStatus))
-                {
-                    if (VolumeStatus != NTSTATUS.STATUS_SUCCESS)
-                    {
-                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, VolumeStatus, 0);
-                        return VolumeStatus;
-                    }
-
-                    return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeInternalPath, VolumeHandler);
-                }
+                if (TryOpenDevice(Instance, VolumeDevicePath, Ea, (uint)DesiredAccess, FileHandlePtr, IoStatusBlockPtr, CreateOptions: 0, Inherit: false, out NTSTATUS VolumeStatus))
+                    return VolumeStatus;
 
                 return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, VolumeDevicePath, null);
             }
@@ -97,16 +94,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return DirectoryStatus;
 
             if (!IsRootRelativeName(RawPath, RootDirectoryHandle) &&
-                Instance.WinHelper.TryCreateDevice(Normalized, Ea, out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus, out ulong DeviceInformation))
-            {
-                if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
-                {
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, DeviceStatus, 0);
-                    return DeviceStatus;
-                }
-
-                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, DevicePath, DeviceHandler, DevicePipe, CreateOptions, Inherit, DeviceInformation);
-            }
+                TryOpenDevice(Instance, Normalized, Ea, (uint)DesiredAccess, FileHandlePtr, IoStatusBlockPtr, CreateOptions, Inherit, out NTSTATUS DeviceStatus))
+                return DeviceStatus;
 
             string Path = ResolveNtPath(Instance, RawPath, RootDirectoryHandle);
             if (string.IsNullOrEmpty(Path))
@@ -166,16 +155,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (TryGetDosVolumeDevicePath(Instance, Normalized, out string VolumeDevicePath))
             {
-                if (Instance.WinHelper.TryCreateDevice(VolumeDevicePath, Ea, out string VolumeInternalPath, out WinDeviceDelegate VolumeHandler, out NTSTATUS VolumeStatus))
-                {
-                    if (VolumeStatus != NTSTATUS.STATUS_SUCCESS)
-                    {
-                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, VolumeStatus, 0);
-                        return VolumeStatus;
-                    }
-
-                    return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, VolumeInternalPath, VolumeHandler);
-                }
+                if (TryOpenDevice(Instance, VolumeDevicePath, Ea, (uint)DesiredAccess, FileHandlePtr, IoStatusBlockPtr, CreateOptions: 0, Inherit: false, out NTSTATUS VolumeStatus))
+                    return VolumeStatus;
 
                 return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, VolumeDevicePath, null);
             }
@@ -185,16 +166,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return DirectoryStatus;
 
             if (!IsRootRelativeName(RawPath, RootDirectoryHandle) &&
-                Instance.WinHelper.TryCreateDevice(Normalized, Ea, out string DevicePath, out WinDeviceDelegate DeviceHandler, out GuestNamedPipe DevicePipe, out NTSTATUS DeviceStatus, out ulong DeviceInformation))
-            {
-                if (DeviceStatus != NTSTATUS.STATUS_SUCCESS)
-                {
-                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, DeviceStatus, 0);
-                    return DeviceStatus;
-                }
-
-                return CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, DevicePath, DeviceHandler, DevicePipe, CreateOptions, Inherit, DeviceInformation);
-            }
+                TryOpenDevice(Instance, Normalized, Ea, (uint)DesiredAccess, FileHandlePtr, IoStatusBlockPtr, CreateOptions, Inherit, out NTSTATUS DeviceStatus))
+                return DeviceStatus;
 
             string Path = ResolveNtPath(Instance, RawPath, RootDirectoryHandle);
             if (string.IsNullOrEmpty(Path))
@@ -595,6 +568,26 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             return RootDirectoryHandle != 0 && !string.IsNullOrEmpty(RawPath) &&
                    !RawPath.StartsWith("\\", StringComparison.Ordinal);
+        }
+
+        /// <returns>False when no device has the name.</returns>
+        internal static bool TryOpenDevice(BinaryEmulator Instance, string DevicePath, byte[] Ea, uint DesiredAccess, ulong FileHandlePtr, ulong IoStatusBlockPtr,
+            uint CreateOptions, bool Inherit, out NTSTATUS Status)
+        {
+            uint Access = DesiredAccess;
+            if (!Instance.WinHelper.TryCreateDevice(DevicePath, Ea, ref Access, out string InternalPath, out WinDeviceDelegate Handler, out GuestNamedPipe Pipe, out Status,
+                out ulong Information, out bool Refused))
+                return false;
+
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+            {
+                if (!Refused)
+                    Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
+                return true;
+            }
+
+            Status = CreateDeviceHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)Access, InternalPath, Handler, Pipe, CreateOptions, Inherit, Information);
+            return true;
         }
 
         internal static NTSTATUS CreateDeviceHandle(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string InternalPath, WinDeviceDelegate Handler, GuestNamedPipe Pipe = null, uint CreateOptions = 0, bool Inherit = false,

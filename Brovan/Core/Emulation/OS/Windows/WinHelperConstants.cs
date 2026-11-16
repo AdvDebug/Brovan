@@ -380,6 +380,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_CONNECTION_ACTIVE = 0xC000023B,
         STATUS_INVALID_CONNECTION = 0xC0000140,
         STATUS_INVALID_ADDRESS_COMPONENT = 0xC0000207,
+        STATUS_INVALID_BUFFER_SIZE = 0xC0000206,
         STATUS_HOST_DOWN = 0xC0000350,
         STATUS_CANCELLED = 0xC0000120,
         STATUS_HANDLE_NOT_CLOSABLE = 0xC0000235,
@@ -1458,6 +1459,9 @@ namespace Brovan.Core.Emulation.OS.Windows
     public interface IWinDevice
     {
         string DeviceName { get; }
+
+        // A self-relative descriptor with generic rights already mapped. Null lets every caller open the device.
+        byte[] SecurityDescriptor => null;
 
         NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler);
 

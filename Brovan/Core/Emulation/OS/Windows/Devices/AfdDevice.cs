@@ -7,6 +7,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using Brovan.Core.Emulation;
+using Brovan.Core.Emulation.OS.SharedHelpers;
 using Brovan.Core.Helpers;
 using Brovan.Core.Settings;
 using static Brovan.Core.Helpers.BinaryHelpers;
@@ -1388,6 +1389,148 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        // NT still counts and sizes the entries that do not fit (AfdAddressListQuery).
+        private NTSTATUS IoctlAddressListQuery(ref DeviceData Data, BinaryEmulator Instance)
+        {
+            if (GuestInputLength(in Data) < 2 || Data.OutputLength < sizeof(uint))
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            if ((Data.InputPointer & 1) != 0 || (Data.UserBuffer & 3) != 0)
+                return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
+
+            NTSTATUS Status = Instance.WinHelper.ProbeForWrite(Data.UserBuffer, Data.OutputLength);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+            if (!Instance.WinHelper.TryGetNetwork(out GuestNetworkSnapshot Network, out NTSTATUS Parked))
+                return Parked;
+
+            // The IOCTL is METHOD_NEITHER, so AFD writes the caller's buffer directly.
+            Data.OutputBuffer = Array.Empty<byte>();
+
+            ushort Family = BinaryPrimitives.ReadUInt16LittleEndian(Data.InputBuffer);
+            Status = NTSTATUS.STATUS_SUCCESS;
+            uint Count = 0;
+            uint Used = sizeof(uint);
+            for (int Pass = 0; Pass < 2; Pass++)
+            {
+                bool Ipv6 = Pass == 1;
+                bool Mapped = !Ipv6 && Family == (ushort)AddressFamily.InterNetworkV6 && !_v6Only;
+                if (!Mapped && Family != (ushort)(Ipv6 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork))
+                    continue;
+
+                Guid Module = Ipv6 ? NsiDevice.Ipv6ModuleGuid : NsiDevice.Ipv4ModuleGuid;
+                foreach (NsiDevice.NsiRow Unicast in NsiDevice.RowsOf(Instance, Network, Module, NsiDevice.ObjectUnicastAddress))
+                {
+                    GuestNetworkInterface Interface = NsiDevice.FindInterface(Network, BinaryPrimitives.ReadUInt64LittleEndian(Unicast.Key));
+                    ReadOnlySpan<byte> Address = Unicast.Key.AsSpan(sizeof(ulong), Ipv6 ? 16 : 4);
+                    if (Interface == null || (Interface.IsLoopback && NsiDevice.IsBelowSubnetScope(Address)))
+                        continue;
+
+                    // A TA_ADDRESS is its length, then the sockaddr from its family on.
+                    IPAddress Local = Ipv6 ? new IPAddress(Address, BinaryPrimitives.ReadUInt32LittleEndian(Unicast.Dynamic)) : new IPAddress(Address);
+                    byte[] Sockaddr = BuildSockaddr(new IPEndPoint(Mapped ? Local.MapToIPv6() : Local, 0));
+                    byte[] Entry = new byte[sizeof(ushort) + Sockaddr.Length];
+                    BinaryPrimitives.WriteUInt16LittleEndian(Entry, (ushort)(Sockaddr.Length - sizeof(ushort)));
+                    Sockaddr.CopyTo(Entry, sizeof(ushort));
+                    if (Status == NTSTATUS.STATUS_SUCCESS)
+                    {
+                        if (Used + (uint)Entry.Length > Data.OutputLength)
+                            Status = NTSTATUS.STATUS_BUFFER_OVERFLOW;
+                        else if (!Instance.WriteMemory(Data.UserBuffer + Used, Entry))
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                    }
+
+                    Count++;
+                    Used += (uint)Entry.Length;
+                }
+            }
+
+            if (!Instance.WinHelper.WriteUInt32(Data.UserBuffer, Count))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            Data.Information = Used;
+            return Status;
+        }
+
+        private static NTSTATUS IoctlRoutingInterfaceQuery(ref DeviceData Data, BinaryEmulator Instance)
+        {
+            const int MinInput = 0xC;
+            const int AddressOffset = 4;
+            const int Ipv4AddressLength = 14;
+            const int Ipv6AddressLength = 26;
+
+            uint InputLength = GuestInputLength(in Data);
+            if (InputLength < MinInput)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            ReadOnlySpan<byte> Input = Data.InputBuffer.AsSpan(0, (int)InputLength);
+            ushort Length = BinaryPrimitives.ReadUInt16LittleEndian(Input.Slice(AddressOffset));
+            if (BinaryPrimitives.ReadInt32LittleEndian(Input) != 1 || InputLength < Length + 8u)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            // The TA_ADDRESS body from its type on is a sockaddr.
+            ReadOnlySpan<byte> Target = Input.Slice(AddressOffset + 2);
+            ushort Family = BinaryPrimitives.ReadUInt16LittleEndian(Target);
+            if (Family != (ushort)AddressFamily.InterNetwork && Family != (ushort)AddressFamily.InterNetworkV6)
+                return NTSTATUS.STATUS_NOT_SUPPORTED;
+            bool Ipv6 = Family == (ushort)AddressFamily.InterNetworkV6;
+            if (Length < (Ipv6 ? Ipv6AddressLength : Ipv4AddressLength))
+                return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
+
+            if (!Instance.WinHelper.TryGetNetwork(out GuestNetworkSnapshot Network, out NTSTATUS Parked))
+                return Parked;
+
+            Data.OutputBuffer = Array.Empty<byte>();
+            ReadOnlySpan<byte> Destination = Target.Slice(Ipv6 ? 8 : 4, Ipv6 ? 16 : 4);
+            bool Mapped = Ipv6 && Destination.Slice(0, 10).IndexOfAnyExcept((byte)0) < 0 && Destination[10] == 0xFF && Destination[11] == 0xFF;
+            bool Route6 = Ipv6 && !Mapped;
+            byte[] Key = new byte[Route6 ? NsiDevice.BestRouteKeySize6 : NsiDevice.BestRouteKeySize4];
+            BinaryPrimitives.WriteUInt32LittleEndian(Key, NsiDevice.DefaultCompartmentId);
+            if (Mapped)
+            {
+                Destination.Slice(12).CopyTo(Key.AsSpan(4));
+                Target.Slice(24, sizeof(uint)).CopyTo(Key.AsSpan(8));
+            }
+            else
+            {
+                Destination.CopyTo(Key.AsSpan(4));
+                if (Ipv6)
+                    Target.Slice(24, sizeof(uint)).CopyTo(Key.AsSpan(20));
+            }
+
+            Guid Module = Route6 ? NsiDevice.Ipv6ModuleGuid : NsiDevice.Ipv4ModuleGuid;
+            NTSTATUS Status = NsiDevice.GetAllOf(Instance, Network, Module, NsiDevice.ObjectBestRoute, Key, out NsiDevice.NsiRow Route);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
+
+            // The best route row ends with the scope of the source address, then the address.
+            int SourceOffset = Route6 ? NsiDevice.BestRouteSourceOffset6 : NsiDevice.BestRouteSourceOffset4;
+            uint Scope = BinaryPrimitives.ReadUInt32LittleEndian(Route.Dynamic.AsSpan(SourceOffset - sizeof(uint)));
+            IPAddress Source = Route6
+                ? new IPAddress(Route.Dynamic.AsSpan(SourceOffset, 16), Scope)
+                : new IPAddress(Route.Dynamic.AsSpan(SourceOffset, 4));
+            if (Mapped)
+            {
+                Source = Source.MapToIPv6();
+                Source.ScopeId = Scope;
+            }
+
+            byte[] Output = BuildSockaddr(new IPEndPoint(Source, 0));
+            if (Output.Length > Data.OutputLength)
+            {
+                Data.Information = (ulong)Output.Length;
+                return NTSTATUS.STATUS_BUFFER_OVERFLOW;
+            }
+
+            NTSTATUS Probed = Instance.WinHelper.ProbeForWrite(Data.UserBuffer, Data.OutputLength);
+            if (Probed != NTSTATUS.STATUS_SUCCESS)
+                return Probed;
+            if (!Instance.WriteMemory(Data.UserBuffer, Output))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            Data.Information = (ulong)Output.Length;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
         private static NTSTATUS ReplyZeroed(ref DeviceData Data)
         {
             uint OutputLength = GuestOutputLength(in Data);
@@ -1607,7 +1750,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     AFD_RECEIVE_DATAGRAM => Policy.Mode == NetworkAccessMode.Full ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_NETWORK_UNREACHABLE,
                     AFD_SEND_DATAGRAM => Policy.Mode == NetworkAccessMode.Full ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_NETWORK_UNREACHABLE,
                     AFD_TRANSPORT_IOCTL => IoctlTransport(ref Data, Instance),
-                    AFD_ROUTING_INTERFACE_QUERY or AFD_ADDRESS_LIST_QUERY => ReplyZeroed(ref Data),
+                    AFD_ROUTING_INTERFACE_QUERY => IoctlRoutingInterfaceQuery(ref Data, Instance),
+                    AFD_ADDRESS_LIST_QUERY => IoctlAddressListQuery(ref Data, Instance),
                     _ => ReportUnmodeled(Instance, Request)
                 };
             }

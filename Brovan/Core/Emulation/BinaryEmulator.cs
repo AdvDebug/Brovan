@@ -96,6 +96,20 @@ namespace Brovan.Core.Emulation
             return Mode != NetworkAccessMode.None || AllowedAddresses.Count != 0;
         }
 
+        public bool ReachesBeyondLoopback()
+        {
+            if (Mode == NetworkAccessMode.Full)
+                return true;
+
+            foreach (IPAddress Allowed in AllowedAddresses)
+            {
+                if (!IPAddress.IsLoopback(Allowed))
+                    return true;
+            }
+
+            return false;
+        }
+
         public bool IsAddressAllowed(IPAddress Address)
         {
             if (Address == null)

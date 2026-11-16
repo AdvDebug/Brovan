@@ -317,6 +317,7 @@ namespace Brovan.Core.Emulation.Guests
                 return;
 
             OS.Windows.Win32k.Win32kDxgk.EndDisplayProbe();
+            WinHelper.EndNetworkProbe();
             WinHelper.Composition.Compositor.End();
             OS.Windows.RPC.Ports.RpcssLaunch.Shutdown();
 
