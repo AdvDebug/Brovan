@@ -32,12 +32,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (InformationPtr != 0 && Length != 0 && !Instance.IsRegionMapped(InformationPtr, Length))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Wide && Port.Handler != null)
-            {
-                Brovan.Core.Helpers.Utils.LogError($"[-] ALPC: \"{Port.Name}\" answers after the syscall to x64 guests only, so an STA call to it fails.");
-                return NTSTATUS.STATUS_NOT_SUPPORTED;
-            }
-
             if (InformationClass == NtAlpcQueryInformation.AlpcRegisterCompletionListInformation)
             {
                 Brovan.Core.Helpers.Utils.LogError($"[-] ALPC: \"{Port.Name}\" asks for a completion list, which ports of this process do not fill.");

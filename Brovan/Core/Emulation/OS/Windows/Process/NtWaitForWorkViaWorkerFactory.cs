@@ -12,6 +12,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const ulong DeferredWorkAlignment = 8;
         private const uint DeferredAlpcSend = 0x1;
 
+        // WOW64 reads x86 deferred work as four ULONGs and sign-extends the port handle (whNtWaitForWorkViaWorkerFactory).
+        private const int DeferredWorkSize32 = 0x10;
+
         // FILE_IO_COMPLETION_INFORMATION.
         internal static bool WritePacket(BinaryEmulator Instance, ulong MiniPackets, uint Index, WinIoCompletionEntry Entry)
         {
@@ -54,7 +57,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong DeferredMessage = 0;
             ulong DeferredPort = 0;
             uint DeferredFlags = 0;
-            if (DeferredWork != 0 && AlpcMessaging.Supported(Instance))
+            if (DeferredWork != 0 && Instance.WinHelper.PointerSize == 8)
             {
                 if ((DeferredWork & (DeferredWorkAlignment - 1)) != 0)
                     return NTSTATUS.STATUS_DATATYPE_MISALIGNMENT;
@@ -68,6 +71,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                     DeferredMessage = BinaryPrimitives.ReadUInt64LittleEndian(Work.Slice(0x00, 8));
                     DeferredPort = BinaryPrimitives.ReadUInt64LittleEndian(Work.Slice(0x08, 8));
                     DeferredFlags = BinaryPrimitives.ReadUInt32LittleEndian(Work.Slice(0x10, 4));
+                }
+            }
+            else if (DeferredWork != 0)
+            {
+                Span<byte> Work = stackalloc byte[DeferredWorkSize32];
+                if (!Instance.ReadMemory(DeferredWork, Work))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                if ((BinaryPrimitives.ReadUInt32LittleEndian(Work.Slice(0x0C, 4)) & DeferredAlpcSend) != 0)
+                {
+                    DeferredMessage = BinaryPrimitives.ReadUInt32LittleEndian(Work.Slice(0x00, 4));
+                    DeferredPort = (ulong)(long)BinaryPrimitives.ReadInt32LittleEndian(Work.Slice(0x04, 4));
+                    DeferredFlags = BinaryPrimitives.ReadUInt32LittleEndian(Work.Slice(0x08, 4));
                 }
             }
 

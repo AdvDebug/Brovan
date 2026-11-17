@@ -31,6 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int ScopeShift = 6;
         private const int SequenceShift = 11;
         private const ulong SequenceLimit = 1UL << 53;
+        private const ulong PermanentDataFlag = 1UL << 10;
 
         private const string SoftwareHive = "\\Registry\\Machine\\SOFTWARE";
         private const string StoreKey = "\\Microsoft\\Windows NT\\CurrentVersion\\Notifications";
@@ -55,6 +56,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             ulong Raw = Sequence << SequenceShift | (ulong)Scope << ScopeShift | (ulong)Lifetime << LifetimeShift | NameVersion;
             return Raw ^ NameXorKey;
+        }
+
+        internal static DataScope GetScope(ulong StateName) => (DataScope)((uint)((StateName ^ NameXorKey) >> ScopeShift) & 0xF);
+
+        internal static bool IsValidName(ulong StateName)
+        {
+            ulong Raw = StateName ^ NameXorKey;
+            DataScope Scope = GetScope(StateName);
+            if ((Raw & 0xF) != NameVersion || Scope > DataScope.PhysicalMachine)
+                return false;
+
+            // NT keeps data across boots only for system, user and machine names (NtQueryWnfStateData).
+            return (Raw & PermanentDataFlag) == 0 || Scope is DataScope.System or DataScope.User or DataScope.Machine;
         }
 
         internal static Hive GetStoreHive(WinSysHelper Helper) => Helper.RegManager.GetHiveByNtPath(SoftwareHive);

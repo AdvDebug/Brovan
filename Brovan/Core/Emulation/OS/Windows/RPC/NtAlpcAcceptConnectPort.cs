@@ -6,6 +6,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             ulong PortHandlePtr = Instance.WinHelper.GetArg(0);
             ulong ConnectionPortHandle = Instance.WinHelper.GetArg(1);
+            uint Flags = (uint)Instance.WinHelper.GetArg(2);
             ulong PortAttributesPtr = Instance.WinHelper.GetArg(4);
             ulong PortContext = Instance.WinHelper.GetArg(5);
             ulong ConnectionRequestPtr = Instance.WinHelper.GetArg(6);
@@ -18,7 +19,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!ConnectionPort.IsServer)
                 return NTSTATUS.STATUS_INVALID_PORT_HANDLE;
 
-            return AlpcMessaging.Accept(Instance, ConnectionPort, PortHandlePtr, PortAttributesPtr, PortContext, ConnectionRequestPtr, AcceptConnection);
+            return AlpcMessaging.Accept(Instance, ConnectionPort, PortHandlePtr, Flags, PortAttributesPtr, PortContext, ConnectionRequestPtr, AcceptConnection);
         }
     }
 }

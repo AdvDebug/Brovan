@@ -270,12 +270,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
             return LrpcPacket.BuildResponse(Message, Stub);
         }
 
-        public NTSTATUS Handle(WinPort Port, byte[] SendData, PortReply Reply, BinaryEmulator Instance)
-        {
-            Reply.Data = Serve(SendData, Reply.Client.Bindings, Instance, FromOtherProcess: false);
-            return Reply.Data == null ? NTSTATUS.STATUS_INVALID_PARAMETER : NTSTATUS.STATUS_SUCCESS;
-        }
-
         internal byte[] Serve(byte[] SendData, LrpcBindingTable Bindings, BinaryEmulator Instance, bool FromOtherProcess)
         {
             if (!LrpcPacket.TryParse(SendData, out LrpcMessage Message))

@@ -183,6 +183,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal ulong BufferLengthPtr;
         internal ulong AttributesPtr;
 
+        // The waiting call uses the x86 message header.
+        internal bool Narrow;
+
         internal override WinFile File => null;
 
         internal override string WaitLabel => Kind switch
@@ -200,6 +203,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const int OffDataLength = 0x00;
         internal const int OffTotalLength = 0x02;
         private const int OffType = 0x04;
+        private const int OffDataInfoOffset = 0x06;
         private const int OffProcessId = 0x08;
         private const int OffThreadId = 0x10;
         internal const int OffMessageId = 0x18;
@@ -233,6 +237,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint CarriedAttributes = ViewAttribute | HandleAttribute;
         internal const int AttributeHeaderSize = 8;
         internal const int HandleAttributeSize = 0x18;
+
+        // ALPC_HANDLE_ATTR32 is Flags, Handle, ObjectType and DesiredAccess as ULONGs (AlpcpCaptureHandleAttribute32).
+        internal const int HandleAttributeSize32 = 0x10;
         internal const uint IndirectHandleFlag = 0x40000;
         private const int SecurityAttributeSize = 0x18;
         private const int SecurityAttributeSize32 = 0x0C;
@@ -245,7 +252,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // The x86 sizes come from AlpcGetHeaderSize in the x86 ntdll.
         private static readonly (uint Flag, int Size)[] AttributeSizes32 =
         {
-            (SecurityAttribute, SecurityAttributeSize32), (ViewAttribute, 0x10), (ContextAttribute, 0x14), (HandleAttribute, 0x10),
+            (SecurityAttribute, SecurityAttributeSize32), (ViewAttribute, 0x10), (ContextAttribute, 0x14), (HandleAttribute, HandleAttributeSize32),
             (TokenAttribute, 0x18), (DirectAttribute, 0x04), (WorkOnBehalfAttribute, 0x08),
         };
 
@@ -295,21 +302,98 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static bool HasDeferredAnswers => DeferredAnswers.Count != 0;
 
-        internal static bool Supported(BinaryEmulator Instance) => Supported(Instance.WinHelper);
-
-        internal static bool Supported(WinSysHelper Helper) => Helper.PointerSize == 8;
+        internal static bool Supported(BinaryEmulator Instance) => !Is32(Instance);
 
         internal static bool Owns(WinPort Port) => Port.Queue != null || Port.Connection != null;
 
         private static bool Is32(BinaryEmulator Instance) => Instance.WinHelper.PointerSize == 4;
 
-        private static int GuestHeaderSize(BinaryEmulator Instance) => Is32(Instance) ? HeaderSize32 : HeaderSize;
+        // NT gives a WOW64 call that sets this flag the x64 message header (AlpcpProbeAndCaptureMessageHeader).
+        // Its message attributes keep the x86 layout (AlpcpCaptureAttributes).
+        private const uint Wow64WideLayoutFlag = 0x40000000;
+
+        internal static bool NarrowCall(BinaryEmulator Instance, uint Flags) => Is32(Instance) && (Flags & Wow64WideLayoutFlag) == 0;
+
+        internal static int GuestHeaderSize(bool Narrow) => Narrow ? HeaderSize32 : HeaderSize;
+
+        // Handler ports take the x64 message, so an x86 header is widened the way NT widens it.
+        internal static NTSTATUS TryReadSentMessage(BinaryEmulator Instance, ulong MessagePtr, bool Narrow, out byte[] Message)
+        {
+            Message = null;
+            if (!Narrow)
+            {
+                Span<byte> Header = stackalloc byte[HeaderSize];
+                if (!Instance.ReadMemory(MessagePtr, Header))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                ushort TotalLength = BinaryPrimitives.ReadUInt16LittleEndian(Header.Slice(OffTotalLength));
+                if (TotalLength < HeaderSize)
+                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                if (!Instance.IsRegionMapped(MessagePtr, TotalLength))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                Message = Instance.ReadMemory(MessagePtr, TotalLength);
+                return Message != null ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
+
+            Span<byte> Small = stackalloc byte[HeaderSize32];
+            if (!Instance.ReadMemory(MessagePtr, Small))
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+            ushort DataLength = BinaryPrimitives.ReadUInt16LittleEndian(Small.Slice(OffDataLength));
+            if (DataLength > MaxDataLength)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+            Message = new byte[HeaderSize + DataLength];
+            Span<byte> Wide = Message;
+            BinaryPrimitives.WriteUInt16LittleEndian(Wide.Slice(OffDataLength), DataLength);
+            BinaryPrimitives.WriteUInt16LittleEndian(Wide.Slice(OffTotalLength), (ushort)(HeaderSize + DataLength));
+            Small.Slice(OffType, 4).CopyTo(Wide.Slice(OffType));
+            BinaryPrimitives.WriteUInt64LittleEndian(Wide.Slice(OffProcessId), BinaryPrimitives.ReadUInt32LittleEndian(Small.Slice(OffProcessId32)));
+            BinaryPrimitives.WriteUInt64LittleEndian(Wide.Slice(OffThreadId), BinaryPrimitives.ReadUInt32LittleEndian(Small.Slice(OffThreadId32)));
+            BinaryPrimitives.WriteUInt32LittleEndian(Wide.Slice(OffMessageId), BinaryPrimitives.ReadUInt32LittleEndian(Small.Slice(OffMessageId32)));
+            BinaryPrimitives.WriteUInt64LittleEndian(Wide.Slice(OffCallbackId), BinaryPrimitives.ReadUInt32LittleEndian(Small.Slice(OffCallbackId32)));
+
+            if (DataLength != 0 && !Instance.ReadMemory(MessagePtr + HeaderSize32, Wide.Slice(HeaderSize)))
+            {
+                Message = null;
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
+
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // NT narrows the x64 header for a WOW64 receiver (AlpcpReceiveMessage).
+        internal static bool WriteReceivedForm(BinaryEmulator Instance, ulong MessagePtr, ReadOnlySpan<byte> Message, bool Narrow)
+        {
+            if (!Narrow || Message.Length < HeaderSize)
+                return Instance.WriteMemory(MessagePtr, Message);
+
+            ushort DataInfoOffset = BinaryPrimitives.ReadUInt16LittleEndian(Message.Slice(OffDataInfoOffset));
+            Span<byte> Small = stackalloc byte[HeaderSize32];
+            BinaryPrimitives.WriteUInt16LittleEndian(Small.Slice(OffDataLength), (ushort)(Message.Length - HeaderSize));
+            BinaryPrimitives.WriteUInt16LittleEndian(Small.Slice(OffTotalLength), (ushort)(Message.Length - HeaderSize + HeaderSize32));
+            BinaryPrimitives.WriteUInt16LittleEndian(Small.Slice(OffType), (ushort)(BinaryPrimitives.ReadUInt16LittleEndian(Message.Slice(OffType)) | ThirtyTwoBitMessage));
+            BinaryPrimitives.WriteUInt16LittleEndian(Small.Slice(OffDataInfoOffset), DataInfoOffset != 0 ? (ushort)(DataInfoOffset - (HeaderSize - HeaderSize32)) : (ushort)0);
+            BinaryPrimitives.WriteUInt32LittleEndian(Small.Slice(OffProcessId32), (uint)BinaryPrimitives.ReadUInt64LittleEndian(Message.Slice(OffProcessId)));
+            BinaryPrimitives.WriteUInt32LittleEndian(Small.Slice(OffThreadId32), (uint)BinaryPrimitives.ReadUInt64LittleEndian(Message.Slice(OffThreadId)));
+            BinaryPrimitives.WriteUInt32LittleEndian(Small.Slice(OffMessageId32), BinaryPrimitives.ReadUInt32LittleEndian(Message.Slice(OffMessageId)));
+            BinaryPrimitives.WriteUInt32LittleEndian(Small.Slice(OffCallbackId32), BinaryPrimitives.ReadUInt32LittleEndian(Message.Slice(OffCallbackId)));
+
+            return Instance.WriteMemory(MessagePtr, Small)
+                && (Message.Length == HeaderSize || Instance.WriteMemory(MessagePtr + HeaderSize32, Message.Slice(HeaderSize)));
+        }
+
+        internal static ulong ReceivedLength(int Length, bool Narrow)
+            => (ulong)(Narrow && Length >= HeaderSize ? Length - HeaderSize + HeaderSize32 : Length);
 
         internal static NTSTATUS SendWaitReceive(BinaryEmulator Instance, WinPort Port, uint Flags, ulong SendMessagePtr, ulong SendAttributesPtr, ulong ReceiveMessagePtr, ulong BufferLengthPtr, ulong ReceiveAttributesPtr, ulong TimeoutPtr)
         {
+            bool Narrow = NarrowCall(Instance, Flags);
             return Port.IsClientEnd
-                ? SendGuest(Instance, Port, SendMessagePtr, SendAttributesPtr, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr)
-                : ServerSendWaitReceive(Instance, Port, Flags, SendMessagePtr, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr);
+                ? SendGuest(Instance, Port, SendMessagePtr, SendAttributesPtr, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr, Narrow)
+                : ServerSendWaitReceive(Instance, Port, Flags, SendMessagePtr, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr, Narrow);
         }
 
         // NT: NtWaitForWorkViaWorkerFactory sends the message a thread pool callback left, and ignores the result.
@@ -376,13 +460,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS ConnectGuest(BinaryEmulator Instance, WinPort ConnectionPort, ulong PortHandlePtr, ulong PortAttributesPtr, uint Flags, ulong MessagePtr, ulong BufferLengthPtr, ulong TimeoutPtr)
         {
-            // CoreMessaging turns access denied from its registrar into an error and every other failure into a fail-fast.
-            if (!Supported(Instance) && ConnectionPort.HostServer != null)
-            {
-                Utils.LogError($"[-] ALPC: \"{ConnectionPort.Name}\" is served to x64 guests only.");
-                return NTSTATUS.STATUS_ACCESS_DENIED;
-            }
-
             NTSTATUS CaptureStatus = CaptureConnectingClient(Instance, PortAttributesPtr, out AlpcSecurityContext Client, out bool AllowImpersonation, out uint PortFlags);
             if (CaptureStatus != NTSTATUS.STATUS_SUCCESS)
                 return CaptureStatus;
@@ -391,10 +468,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (BufferLengthPtr != 0 && !Instance.WinHelper.TryReadPointer(BufferLengthPtr, out BufferLength))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
+            bool Narrow = NarrowCall(Instance, Flags);
             byte[] Data = Array.Empty<byte>();
             if (MessagePtr != 0)
             {
-                NTSTATUS ReadStatus = TryReadMessage(Instance, MessagePtr, out Data, out _);
+                NTSTATUS ReadStatus = TryReadMessage(Instance, MessagePtr, Narrow, out Data, out _);
                 if (ReadStatus != NTSTATUS.STATUS_SUCCESS)
                     return ReadStatus;
             }
@@ -423,6 +501,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 MessagePtr = MessagePtr,
                 BufferLength = BufferLength,
                 BufferLengthPtr = BufferLengthPtr,
+                Narrow = Narrow,
             };
 
             AlpcMessage Request = NewMessage(Instance, Connection, LpcConnectionRequest, Data);
@@ -699,16 +778,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Handles is not { Count: > 0 })
                 return;
 
-            bool X64 = Supported(Instance);
-            if (!X64)
-                ReportDroppedThirtyTwoBitHandles();
-
             uint MessageId = 0;
             uint CallbackId = 0;
             if (Delivered.Length >= HeaderSize)
                 ReadMessageIds(Delivered, out MessageId, out CallbackId);
 
-            if (!Written || !X64 || Reply.Client == null || MessageId == 0 || AttributesPtr == 0 || (AllocatedAttributes & HandleAttribute) == 0
+            if (!Written || Reply.Client == null || MessageId == 0 || AttributesPtr == 0 || (AllocatedAttributes & HandleAttribute) == 0
                 || !CanKeepHandleBlob(Reply.Port, MessageId, Reply.Client) || !TryPublishHandleAttribute(Instance, AttributesPtr, AllocatedAttributes, Handles.Count))
             {
                 CloseAttachedHandles(Instance, Reply);
@@ -752,9 +827,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         // An ALPC_HANDLE_ATTR with no handle of its own, only the number of handles to query.
         private static bool TryPublishHandleAttribute(BinaryEmulator Instance, ulong AttributesPtr, uint AllocatedAttributes, int HandleCount)
         {
+            bool Narrow = Is32(Instance);
             Span<byte> Attribute = stackalloc byte[HandleAttributeSize];
+            Attribute = Attribute.Slice(0, Narrow ? HandleAttributeSize32 : HandleAttributeSize);
             Attribute.Clear();
-            BinaryPrimitives.WriteUInt32LittleEndian(Attribute.Slice(0x10), (uint)HandleCount);
+            BinaryPrimitives.WriteUInt32LittleEndian(Attribute.Slice(Narrow ? 0x08 : 0x10), (uint)HandleCount);
             return Instance.WriteMemory(AttributesPtr + AttributeOffset(Instance, AllocatedAttributes, HandleAttribute), Attribute)
                 && Instance.WinHelper.WriteUInt32(AttributesPtr + 4, HandleAttribute);
         }
@@ -807,15 +884,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Port.HandleBlobs.Remove(MessageId);
             CloseOwnedHandles(Instance, Blob);
             return true;
-        }
-
-        private static bool ThirtyTwoBitHandlesLogged;
-
-        internal static void ReportDroppedThirtyTwoBitHandles()
-        {
-            if (!ThirtyTwoBitHandlesLogged)
-                Utils.LogError("[-] ALPC: an x86 guest sends or receives handles through a handler port; Brovan reads the x64 handle attribute only, so they are dropped.");
-            ThirtyTwoBitHandlesLogged = true;
         }
 
         internal static void CloseAttachedHandles(BinaryEmulator Instance, PortReply Reply)
@@ -963,7 +1031,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        internal static NTSTATUS Accept(BinaryEmulator Instance, WinPort ConnectionPort, ulong PortHandlePtr, ulong PortAttributesPtr, ulong PortContext, ulong MessagePtr, bool AcceptConnection)
+        internal static NTSTATUS Accept(BinaryEmulator Instance, WinPort ConnectionPort, ulong PortHandlePtr, uint Flags, ulong PortAttributesPtr, ulong PortContext, ulong MessagePtr, bool AcceptConnection)
         {
             if (MessagePtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -972,7 +1040,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (FlagsStatus != NTSTATUS.STATUS_SUCCESS)
                 return FlagsStatus;
 
-            NTSTATUS ReadStatus = TryReadAnswer(Instance, MessagePtr, out uint MessageId, out Span<byte> Data);
+            NTSTATUS ReadStatus = TryReadAnswer(Instance, MessagePtr, NarrowCall(Instance, Flags), out uint MessageId, out Span<byte> Data);
             if (ReadStatus != NTSTATUS.STATUS_SUCCESS)
                 return ReadStatus;
 
@@ -1122,11 +1190,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_NOT_SUPPORTED;
         }
 
-        private static NTSTATUS SendGuest(BinaryEmulator Instance, WinPort ClientPort, ulong SendMessagePtr, ulong SendAttributesPtr, ulong ReceiveMessagePtr, ulong BufferLengthPtr, ulong ReceiveAttributesPtr, ulong TimeoutPtr)
+        private static NTSTATUS SendGuest(BinaryEmulator Instance, WinPort ClientPort, ulong SendMessagePtr, ulong SendAttributesPtr, ulong ReceiveMessagePtr, ulong BufferLengthPtr, ulong ReceiveAttributesPtr, ulong TimeoutPtr,
+            bool Narrow)
         {
             AlpcConnection Connection = ClientPort.Connection;
             if (SendMessagePtr == 0)
-                return ReceiveMessagePtr == 0 ? NTSTATUS.STATUS_SUCCESS : ReceivePort(Instance, ClientPort, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr);
+                return ReceiveMessagePtr == 0 ? NTSTATUS.STATUS_SUCCESS : ReceivePort(Instance, ClientPort, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr, Narrow);
 
             if (Connection.PendingConnectReply != null)
                 return NTSTATUS.STATUS_LPC_REQUESTS_NOT_ALLOWED;
@@ -1153,7 +1222,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     SecurityAttributePtr = SendAttributesPtr + AttributeOffset(Instance, (uint)SendHeader, SecurityAttribute);
             }
 
-            NTSTATUS ReadStatus = TryReadMessage(Instance, SendMessagePtr, out byte[] Data, out ushort TypeFlags);
+            NTSTATUS ReadStatus = TryReadMessage(Instance, SendMessagePtr, Narrow, out byte[] Data, out ushort TypeFlags);
             if (ReadStatus != NTSTATUS.STATUS_SUCCESS)
                 return ReadStatus;
 
@@ -1202,6 +1271,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     BufferLength = BufferLength,
                     BufferLengthPtr = BufferLengthPtr,
                     AttributesPtr = ReceiveAttributesPtr,
+                    Narrow = Narrow,
                 };
             }
 
@@ -1284,7 +1354,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             AlpcWait Wait = Answer.Wait;
             if (Wait != null && Wait.IsLive)
-                Wait.Complete(Instance, NtAlpcSendWaitReceivePort.WriteHandlerReply(Instance, Reply, Wait.MessagePtr, Wait.BufferLength, Wait.BufferLengthPtr));
+                Wait.Complete(Instance, NtAlpcSendWaitReceivePort.WriteHandlerReply(Instance, Reply, Wait.MessagePtr, Wait.BufferLength, Wait.BufferLengthPtr, Wait.Narrow));
         }
 
         internal static void AbandonDeferredAnswer(BinaryEmulator Instance, DeferredAnswer Answer, bool WakeSender)
@@ -1383,11 +1453,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS ServerSendWaitReceive(BinaryEmulator Instance, WinPort Port, uint Flags, ulong SendMessagePtr, ulong ReceiveMessagePtr, ulong BufferLengthPtr, ulong ReceiveAttributesPtr, ulong TimeoutPtr)
+        private static NTSTATUS ServerSendWaitReceive(BinaryEmulator Instance, WinPort Port, uint Flags, ulong SendMessagePtr, ulong ReceiveMessagePtr, ulong BufferLengthPtr, ulong ReceiveAttributesPtr, ulong TimeoutPtr,
+            bool Narrow)
         {
             if (SendMessagePtr != 0)
             {
-                NTSTATUS SendStatus = ServerSend(Instance, Port, Flags, SendMessagePtr, ReceiveMessagePtr != 0);
+                NTSTATUS SendStatus = ServerSend(Instance, Port, Flags, SendMessagePtr, ReceiveMessagePtr != 0, Narrow);
                 if (SendStatus != NTSTATUS.STATUS_SUCCESS)
                     return SendStatus;
             }
@@ -1398,13 +1469,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Port.IsServer)
                 return NTSTATUS.STATUS_NOT_SUPPORTED;
 
-            return ReceivePort(Instance, Port, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr);
+            return ReceivePort(Instance, Port, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr, Narrow);
         }
 
         // NT: a send replies to the request with the same message id, and a zero id sends the client a new message.
-        private static NTSTATUS ServerSend(BinaryEmulator Instance, WinPort Port, uint Flags, ulong MessagePtr, bool WaitsForReply)
+        private static NTSTATUS ServerSend(BinaryEmulator Instance, WinPort Port, uint Flags, ulong MessagePtr, bool WaitsForReply, bool Narrow)
         {
-            NTSTATUS ReadStatus = TryReadAnswer(Instance, MessagePtr, out uint MessageId, out Span<byte> Data);
+            NTSTATUS ReadStatus = TryReadAnswer(Instance, MessagePtr, Narrow, out uint MessageId, out Span<byte> Data);
             if (ReadStatus != NTSTATUS.STATUS_SUCCESS)
                 return ReadStatus;
 
@@ -1474,11 +1545,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS ReceivePort(BinaryEmulator Instance, WinPort Port, ulong ReceiveMessagePtr, ulong BufferLengthPtr, ulong ReceiveAttributesPtr, ulong TimeoutPtr) =>
-            ReceiveFrom(Instance, Port.Queue, Port.WaitSemaphore, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr);
+        private static NTSTATUS ReceivePort(BinaryEmulator Instance, WinPort Port, ulong ReceiveMessagePtr, ulong BufferLengthPtr, ulong ReceiveAttributesPtr, ulong TimeoutPtr,
+            bool Narrow) =>
+            ReceiveFrom(Instance, Port.Queue, Port.WaitSemaphore, ReceiveMessagePtr, BufferLengthPtr, ReceiveAttributesPtr, TimeoutPtr, Narrow);
 
         internal static NTSTATUS ReceiveFrom(BinaryEmulator Instance, AlpcReceiveQueue Queue, WinSemaphore WaitSemaphore, ulong ReceiveMessagePtr, ulong BufferLengthPtr,
-            ulong ReceiveAttributesPtr, ulong TimeoutPtr)
+            ulong ReceiveAttributesPtr, ulong TimeoutPtr, bool Narrow)
         {
             if (BufferLengthPtr == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -1492,7 +1564,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Queue.Pending.Count > 0)
             {
                 AlpcMessage Message = Queue.Pending.Peek();
-                NTSTATUS Status = WriteReceived(Instance, Queue, Message, ReceiveMessagePtr, BufferLength, BufferLengthPtr, ReceiveAttributesPtr);
+                NTSTATUS Status = WriteReceived(Instance, Queue, Message, ReceiveMessagePtr, BufferLength, BufferLengthPtr, ReceiveAttributesPtr, Narrow);
                 if (Status == NTSTATUS.STATUS_SUCCESS)
                     Queue.Pending.Dequeue();
                 return Status;
@@ -1517,6 +1589,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 BufferLength = BufferLength,
                 BufferLengthPtr = BufferLengthPtr,
                 AttributesPtr = ReceiveAttributesPtr,
+                Narrow = Narrow,
             };
 
             Queue.Receivers.Add(Wait);
@@ -1862,7 +1935,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Receiver.IsLive)
                     continue;
 
-                NTSTATUS Status = WriteReceived(Instance, Queue, Message, Receiver.MessagePtr, Receiver.BufferLength, Receiver.BufferLengthPtr, Receiver.AttributesPtr);
+                NTSTATUS Status = WriteReceived(Instance, Queue, Message, Receiver.MessagePtr, Receiver.BufferLength, Receiver.BufferLengthPtr, Receiver.AttributesPtr, Receiver.Narrow);
                 Receiver.Complete(Instance, Status);
                 if (Status == NTSTATUS.STATUS_SUCCESS)
                     return;
@@ -2086,11 +2159,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         // The reply and the connect answer write the length they produce.
         private static NTSTATUS WriteReply(BinaryEmulator Instance, AlpcWait Wait, ushort Type, ushort TypeFlags, AlpcMessage Request, ReadOnlySpan<byte> Data, ulong ProcessId, ulong ThreadId)
         {
-            ulong Total = (ulong)(GuestHeaderSize(Instance) + Data.Length);
+            ulong Total = (ulong)(GuestHeaderSize(Wait.Narrow) + Data.Length);
             if (Total > Wait.BufferLength)
                 return NTSTATUS.STATUS_BUFFER_TOO_SMALL;
 
-            NTSTATUS Status = WriteMessage(Instance, Wait.MessagePtr, Type, TypeFlags, Data, ProcessId, ThreadId, Request.MessageId, Request.CallbackId);
+            NTSTATUS Status = WriteMessage(Instance, Wait.MessagePtr, Type, TypeFlags, Data, ProcessId, ThreadId, Request.MessageId, Request.CallbackId, Wait.Narrow);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -2104,13 +2177,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT: a receive leaves the length alone unless the buffer is too small.
-        private static NTSTATUS WriteReceived(BinaryEmulator Instance, AlpcReceiveQueue ReceiveQueue, AlpcMessage Message, ulong MessagePtr, ulong BufferLength, ulong BufferLengthPtr, ulong AttributesPtr)
+        private static NTSTATUS WriteReceived(BinaryEmulator Instance, AlpcReceiveQueue ReceiveQueue, AlpcMessage Message, ulong MessagePtr, ulong BufferLength, ulong BufferLengthPtr, ulong AttributesPtr,
+            bool Narrow)
         {
-            ulong Total = (ulong)(GuestHeaderSize(Instance) + Message.Data.Length);
+            ulong Total = (ulong)(GuestHeaderSize(Narrow) + Message.Data.Length);
             if (Total > BufferLength)
                 return Instance.WinHelper.WritePointer(BufferLengthPtr, Total) ? NTSTATUS.STATUS_BUFFER_TOO_SMALL : NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            NTSTATUS Status = WriteMessage(Instance, MessagePtr, Message.Type, Message.TypeFlags, Message.Data, Message.ProcessId, Message.ThreadId, Message.MessageId, Message.CallbackId);
+            NTSTATUS Status = WriteMessage(Instance, MessagePtr, Message.Type, Message.TypeFlags, Message.Data, Message.ProcessId, Message.ThreadId, Message.MessageId, Message.CallbackId, Narrow);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -2177,15 +2251,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance.WinHelper.WriteUInt32(AttributesPtr + 4, Valid);
         }
 
-        private static NTSTATUS WriteMessage(BinaryEmulator Instance, ulong MessagePtr, ushort Type, ushort TypeFlags, ReadOnlySpan<byte> Data, ulong ProcessId, ulong ThreadId, uint MessageId, uint CallbackId)
+        private static NTSTATUS WriteMessage(BinaryEmulator Instance, ulong MessagePtr, ushort Type, ushort TypeFlags, ReadOnlySpan<byte> Data, ulong ProcessId, ulong ThreadId, uint MessageId, uint CallbackId,
+            bool Narrow)
         {
-            int Size = GuestHeaderSize(Instance);
+            int Size = GuestHeaderSize(Narrow);
             Span<byte> Header = stackalloc byte[HeaderSize];
             Header = Header.Slice(0, Size);
             Header.Clear();
             BinaryPrimitives.WriteUInt16LittleEndian(Header.Slice(OffDataLength), (ushort)Data.Length);
             BinaryPrimitives.WriteUInt16LittleEndian(Header.Slice(OffTotalLength), (ushort)(Size + Data.Length));
-            if (Is32(Instance))
+            if (Narrow)
             {
                 BinaryPrimitives.WriteUInt16LittleEndian(Header.Slice(OffType), (ushort)(Type | TypeFlags | ThirtyTwoBitMessage));
                 BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(OffProcessId32), (uint)ProcessId);
@@ -2208,13 +2283,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS TryReadHeader(BinaryEmulator Instance, ulong MessagePtr, out uint MessageId, out ushort DataLength, out ushort TypeFlags)
+        private static NTSTATUS TryReadHeader(BinaryEmulator Instance, ulong MessagePtr, bool Narrow, out uint MessageId, out ushort DataLength, out ushort TypeFlags)
         {
             MessageId = 0;
             DataLength = 0;
             TypeFlags = 0;
 
-            bool Narrow = Is32(Instance);
             Span<byte> Header = stackalloc byte[HeaderSize];
             Header = Header.Slice(0, Narrow ? HeaderSize32 : HeaderSize);
             if (!Instance.ReadMemory(MessagePtr, Header))
@@ -2232,27 +2306,27 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS TryReadMessage(BinaryEmulator Instance, ulong MessagePtr, out byte[] Data, out ushort TypeFlags)
+        private static NTSTATUS TryReadMessage(BinaryEmulator Instance, ulong MessagePtr, bool Narrow, out byte[] Data, out ushort TypeFlags)
         {
             Data = Array.Empty<byte>();
-            NTSTATUS Status = TryReadHeader(Instance, MessagePtr, out _, out ushort DataLength, out TypeFlags);
+            NTSTATUS Status = TryReadHeader(Instance, MessagePtr, Narrow, out _, out ushort DataLength, out TypeFlags);
             if (Status != NTSTATUS.STATUS_SUCCESS || DataLength == 0)
                 return Status;
 
             Data = new byte[DataLength];
-            return Instance.ReadMemory(MessagePtr + (ulong)GuestHeaderSize(Instance), Data) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
+            return Instance.ReadMemory(MessagePtr + (ulong)GuestHeaderSize(Narrow), Data) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }
 
         // Data points into the shared scratch buffer, so it is valid only until the syscall returns.
-        private static NTSTATUS TryReadAnswer(BinaryEmulator Instance, ulong MessagePtr, out uint MessageId, out Span<byte> Data)
+        private static NTSTATUS TryReadAnswer(BinaryEmulator Instance, ulong MessagePtr, bool Narrow, out uint MessageId, out Span<byte> Data)
         {
             Data = Span<byte>.Empty;
-            NTSTATUS Status = TryReadHeader(Instance, MessagePtr, out MessageId, out ushort DataLength, out _);
+            NTSTATUS Status = TryReadHeader(Instance, MessagePtr, Narrow, out MessageId, out ushort DataLength, out _);
             if (Status != NTSTATUS.STATUS_SUCCESS || DataLength == 0)
                 return Status;
 
             Data = Instance.WinHelper.Shared.GetSpan(DataLength);
-            return Instance.ReadMemory(MessagePtr + (ulong)GuestHeaderSize(Instance), Data) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
+            return Instance.ReadMemory(MessagePtr + (ulong)GuestHeaderSize(Narrow), Data) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
         }
 
         // The caller bumps WakeSignal once after all the waits it ends.

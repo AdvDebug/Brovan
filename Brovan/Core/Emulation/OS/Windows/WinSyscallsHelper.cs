@@ -2388,12 +2388,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void AddHostApartmentPort(RPC.HostApartment Apartment, bool SessionWide = false)
         {
-            if (!AlpcMessaging.Supported(this))
-            {
-                WinPorts.Add(new WinPort { Name = Apartment.PortName, Handler = Apartment.Handle });
-                return;
-            }
-
             WinPort Port = AlpcMessaging.CreateHostPort(Apartment.PortName, Apartment);
             WinPorts.Add(Port);
             if (SessionWide)
