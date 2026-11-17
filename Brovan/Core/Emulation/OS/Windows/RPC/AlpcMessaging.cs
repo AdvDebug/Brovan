@@ -302,11 +302,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static bool HasDeferredAnswers => DeferredAnswers.Count != 0;
 
-        internal static bool Supported(BinaryEmulator Instance) => !Is32(Instance);
-
         internal static bool Owns(WinPort Port) => Port.Queue != null || Port.Connection != null;
 
-        private static bool Is32(BinaryEmulator Instance) => Instance.WinHelper.PointerSize == 4;
+        internal static bool Is32(BinaryEmulator Instance) => Instance.WinHelper.PointerSize == 4;
 
         // NT gives a WOW64 call that sets this flag the x64 message header (AlpcpProbeAndCaptureMessageHeader).
         // Its message attributes keep the x86 layout (AlpcpCaptureAttributes).
@@ -581,9 +579,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static NTSTATUS ConnectHost(BinaryEmulator Instance, WinPort ConnectionPort, AlpcHost Host, AlpcSecurityContext Client, out AlpcConnection Connection)
         {
             Connection = null;
-            if (!Supported(Instance))
-                return Unsupported(ConnectionPort);
-
             if (ConnectionPort.HostServer != null)
             {
                 Utils.LogError($"[-] ALPC: Brovan's client cannot connect to \"{ConnectionPort.Name}\", which Brovan serves itself.");
@@ -1182,12 +1177,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return Offset;
-        }
-
-        private static NTSTATUS Unsupported(WinPort Port)
-        {
-            Utils.LogError($"[-] ALPC: \"{Port.Name}\" is a port of this process; Brovan's own client reaches x64 guest servers only.");
-            return NTSTATUS.STATUS_NOT_SUPPORTED;
         }
 
         private static NTSTATUS SendGuest(BinaryEmulator Instance, WinPort ClientPort, ulong SendMessagePtr, ulong SendAttributesPtr, ulong ReceiveMessagePtr, ulong BufferLengthPtr, ulong ReceiveAttributesPtr, ulong TimeoutPtr,

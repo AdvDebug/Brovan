@@ -242,7 +242,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     return BulkUpdateOIDs(Stub);
 
                 case ProcClientResolveOXID:
-                    return ClientResolveOXID(Stub, Instance);
+                    return ClientResolveOXID(Stub);
 
                 case ProcServerAllocateOXIDAndOIDs:
                     return ServerAllocateOXIDAndOIDs(Stub);
@@ -552,7 +552,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 {
                     Server = Servers[Next++];
                     Tried.Add((Server.ProcessId, Server.Key));
-                    if (!TryGetServerOxid(Instance, Server.Oxid, out ServerOxid Exporter))
+                    if (!TryGetServerOxid(Server.Oxid, out ServerOxid Exporter))
                         continue;
 
                     if (LrpcClient.Connect(Instance, LrpcClient.GetPortName(Exporter.Endpoint), ScmProcessId, ScmThreadId, Client,
@@ -571,7 +571,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             private void StartLaunch()
             {
-                WinToken Token = AlpcMessaging.Supported(Instance) && GuestSession.OwnSlot >= 0
+                WinToken Token = GuestSession.OwnSlot >= 0
                     ? RpcssLaunch.ServerToken(Instance, Launchable, Client, Key.PackageFullName)
                     : null;
                 if (Token == null)
@@ -582,7 +582,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 }
 
                 LaunchRequest Launched = new LaunchRequest(Launchable.ImagePath, Launchable.CommandLine, LaunchDirectory, false, Token,
-                    GuestProcessLauncher.EmulatorOptions(Instance), ScmProcessId, GuestProcessLauncher.MachineAmd64);
+                    GuestProcessLauncher.EmulatorOptions(Instance), ScmProcessId);
                 Launch = RpcssLaunch.Start(Key, Launched);
                 if (Launch == null)
                 {
@@ -674,7 +674,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                     return;
                 }
 
-                byte[] Forwarded = BuildForwardedReply(Instance, Response);
+                byte[] Forwarded = BuildForwardedReply(Response);
                 if (Forwarded == null)
                     Retry();
                 else
@@ -720,7 +720,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         }
 
         // Null for a server that is stopping, so the activation moves on to the next server.
-        private static byte[] BuildForwardedReply(BinaryEmulator Instance, ReadOnlySpan<byte> Response)
+        private static byte[] BuildForwardedReply(ReadOnlySpan<byte> Response)
         {
             if (!Orpc.TryGetResponseParameters(Response, out int Offset))
                 return Response.ToArray();
@@ -734,7 +734,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
             if (ObjRef.IsEmpty || !Orpc.TryGetCustomObjRefData(ObjRef, out ReadOnlySpan<byte> Blob) || Blob.Length < ActivationBlobPrefixSize + SerializationHeaderSize
                 || !TryFindProperty(Blob, ActivationPropertiesOut, out ReadOnlySpan<byte> PropsOut) || !TryFindReturnedOxid(PropsOut, out ulong Oxid)
-                || !TryGetServerOxid(Instance, Oxid, out ServerOxid Server))
+                || !TryGetServerOxid(Oxid, out ServerOxid Server))
                 return Response.ToArray();
 
             byte[] Properties = BuildPropertiesContainer(PropsOut, Serialize(BuildScmReplyInfo(Oxid, Server).Written));
@@ -1412,28 +1412,22 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 RpcssSessionTable.PublishOxid(Oxid, Server);
         }
 
-        internal static bool TryGetServerOxid(BinaryEmulator Instance, ulong Oxid, out ServerOxid Server)
+        internal static bool TryGetServerOxid(ulong Oxid, out ServerOxid Server)
         {
             if (ServerOxids.TryGetValue(Oxid, out Server))
                 return Server.Endpoint != null;
-
-            if (!AlpcMessaging.Supported(Instance))
-            {
-                Utils.LogError($"[-] RPCSS: OXID 0x{Oxid:X} is not this process's own, and an x86 process resolves no other.");
-                return false;
-            }
 
             return RpcssSessionTable.TryFindOxid(Oxid, out Server) && Server.Endpoint.Length != 0 && IsSecurityBindingList(Server.SecurityBindings);
         }
 
         // Every server of the session is on this machine, so the client's resolver bindings are not read.
-        private static byte[] ClientResolveOXID(ReadOnlySpan<byte> Stub, BinaryEmulator Instance)
+        private static byte[] ClientResolveOXID(ReadOnlySpan<byte> Stub)
         {
             Ndr20Reader Reader = new Ndr20Reader(Stub);
             if (!Reader.TryReadContextHandle(out _) || !Reader.TryReadUInt64(out ulong Oxid))
                 return null;
 
-            bool Found = TryGetServerOxid(Instance, Oxid, out ServerOxid Server);
+            bool Found = TryGetServerOxid(Oxid, out ServerOxid Server);
             Ndr20Writer Writer = new Ndr20Writer(0x200);
             if (Found)
             {

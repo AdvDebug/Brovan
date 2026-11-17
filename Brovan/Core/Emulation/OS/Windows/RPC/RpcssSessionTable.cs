@@ -373,13 +373,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        // Messages between guest ports are x64 only, so an x86 process keeps its RPCSS state to itself.
-        internal static void KeepLocal()
-        {
-            lock (Sync)
-                _ended = true;
-        }
-
         internal static void End()
         {
             lock (Sync)

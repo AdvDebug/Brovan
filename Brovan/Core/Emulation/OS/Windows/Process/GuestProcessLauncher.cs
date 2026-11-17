@@ -14,7 +14,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     internal delegate bool GuestHostLauncher(string HostImage, string GuestArguments, string GuestDirectory, string SessionId, uint SpawnToken, int Depth);
 
     internal readonly record struct LaunchRequest(string ImagePath, string CommandLine, string CurrentDirectory, bool StartSuspended, WinToken Token,
-        List<string> EmulatorOptions, uint ParentProcessId, ushort RequiredMachine = 0);
+        List<string> EmulatorOptions, uint ParentProcessId);
 
     // HostProcess is null when the host launcher starts the process.
     internal readonly record struct StartedProcess(Process HostProcess, uint SpawnToken, string HostImage, string InheritPath, byte[] Identity, int Depth,
@@ -608,7 +608,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private const int MaxSessionProcesses = 6;
 
-        internal const ushort MachineAmd64 = 0x8664;
+        private const ushort MachineAmd64 = 0x8664;
 
         private const int MaxCommandLineChars = 8000;
 
@@ -773,12 +773,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Utils.LogError($"[GuestProcessLauncher] Refusing to launch {HostImage}: not a PE image.");
                 Status = NTSTATUS.STATUS_INVALID_IMAGE_FORMAT;
-                return false;
-            }
-
-            if (Request.RequiredMachine != 0 && ImageInformation.Machine != Request.RequiredMachine)
-            {
-                Status = NTSTATUS.STATUS_IMAGE_MACHINE_TYPE_MISMATCH;
                 return false;
             }
 

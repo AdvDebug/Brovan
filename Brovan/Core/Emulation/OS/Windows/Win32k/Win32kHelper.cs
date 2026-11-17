@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Text;
 using Brovan.Core.Emulation.OS.SharedHelpers;
+using Brovan.Core.Helpers;
 using Brovan.Core.Settings;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -4089,7 +4090,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (CallbackEntered)
                 return true;
 
-            Brovan.Core.Helpers.Utils.LogError($"[-] win32k: the window procedure of 0x{Message.Hwnd:X} cannot run for a posted 0x{Message.Message:X}, so the reader gets it as posted.");
+            Utils.LogError($"[-] win32k: the window procedure of 0x{Message.Hwnd:X} cannot run for a posted 0x{Message.Message:X}, so the reader gets it as posted.");
             return WriteMessage(Instance, MessagePtr, Message, Reader);
         }
 

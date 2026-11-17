@@ -34,7 +34,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinPort Created = AlpcMessaging.CreateConnectionPort(PortName, PortFlags);
             if (PortName.Length != 0)
             {
-                NTSTATUS PublishStatus = AlpcMessaging.Publish(Instance, Created);
+                NTSTATUS PublishStatus = AlpcMessaging.Publish(Created);
                 if (PublishStatus != NTSTATUS.STATUS_SUCCESS)
                     return PublishStatus;
 

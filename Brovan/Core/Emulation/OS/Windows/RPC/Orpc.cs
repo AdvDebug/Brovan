@@ -48,7 +48,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public const ushort ComVersionMajor = 5;
         public const ushort ComVersionMinor = 7;
         public const uint UserMarshalMarker = 0x72657355;
-        private const uint WdtRemoteCall = 0x50746457;
+        // combase does not check this marker (HSTRING_UserUnmarshal), so x86 peers accept it and the reader skips it.
+        private const uint WdtInproc64Call = 0x50746457;
         public const uint SOk = 0;
         public const uint SFalse = 1;
         public const uint ENoInterface = 0x80004002;
@@ -243,7 +244,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         public static void WriteHstringBody(ref Ndr20Writer Writer, ReadOnlySpan<char> Value)
         {
             Writer.AlignTo(8);
-            Writer.WriteUInt32(WdtRemoteCall);
+            Writer.WriteUInt32(WdtInproc64Call);
             Writer.WriteUInt32((uint)(Value.Length * sizeof(char)));
             Writer.WriteUtf16(Value);
         }
@@ -258,7 +259,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         {
             Value = default;
             Reader.Align(8);
-            if (!Reader.TryReadUInt32(out uint Marker) || Marker != WdtRemoteCall || !Reader.TryReadUInt32(out uint Length) || (Length & 1) != 0
+            if (!Reader.TryReadUInt32(out _) || !Reader.TryReadUInt32(out uint Length) || (Length & 1) != 0
                 || !Reader.TryReadBytes((int)Math.Min(Length, int.MaxValue), out ReadOnlySpan<byte> Chars))
                 return false;
 

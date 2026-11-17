@@ -1,3 +1,4 @@
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
@@ -21,7 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (Instance.WinHelper.PointerSize != 8)
             {
-                Brovan.Core.Helpers.Utils.LogError("[-] win32k: the CoreMessaging queue port is served to x64 guests only.");
+                Utils.LogError("[-] win32k: the CoreMessaging queue port is served to x64 guests only.");
                 return Win32kHelper.FailWithError(Instance, Win32kHelper.ERROR_NOT_SUPPORTED);
             }
 

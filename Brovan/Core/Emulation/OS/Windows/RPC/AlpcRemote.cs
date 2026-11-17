@@ -491,7 +491,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static WinPort FindSessionPort(BinaryEmulator Instance, string Name)
         {
-            if (!Supported(Instance) || GuestSession.OwnSlot < 0)
+            if (GuestSession.OwnSlot < 0)
                 return null;
 
             AlpcSessionPort Record = AlpcSessionPort.TryOpenLive(Name);
@@ -507,16 +507,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT allows one port per name in a session. A port that cannot be published stays local, and its create succeeds.
-        internal static NTSTATUS Publish(BinaryEmulator Instance, WinPort Port)
+        internal static NTSTATUS Publish(WinPort Port)
         {
             if (string.IsNullOrEmpty(Port.Name))
                 return NTSTATUS.STATUS_SUCCESS;
-
-            if (!Supported(Instance))
-            {
-                Utils.LogError($"[-] ALPC: \"{Port.Name}\" stays local, because session ports serve x64 guests only.");
-                return NTSTATUS.STATUS_SUCCESS;
-            }
 
             int OwnSlot = GuestSession.OwnSlot;
             if (OwnSlot < 0)

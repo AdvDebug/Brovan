@@ -265,7 +265,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // NT finds an attribute by the attributes the buffer allocates, not the valid ones (AlpcGetMessageAttribute).
         private static List<ulong> ReadHandleAttribute(BinaryEmulator Instance, ulong AttributesPtr)
         {
-            bool Narrow = Instance.WinHelper.PointerSize == 4;
+            bool Narrow = Is32(Instance);
             Span<byte> Header = stackalloc byte[AttributeHeaderSize];
             if (AttributesPtr == 0 || !Instance.ReadMemory(AttributesPtr, Header))
                 return null;

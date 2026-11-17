@@ -310,8 +310,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
             LaunchRequest Starting = Request.ImagePath != null ? Request : Request with { ImagePath = FindImage(Request.CommandLine) };
             if (!GuestProcessLauncher.TryStart(Starting, (_, Identity) => ProcessInheritance.BuildWithoutHandles(Identity), out Started, out NTSTATUS Refused))
             {
-                if (Refused == NTSTATUS.STATUS_IMAGE_MACHINE_TYPE_MISMATCH)
-                    Utils.LogError($"[-] RPCSS: the server of {Key.Class} is 32-bit, and other processes do not see its class objects.");
                 Fail(LaunchFailure(Refused));
                 return;
             }

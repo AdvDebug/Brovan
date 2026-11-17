@@ -2128,9 +2128,6 @@ namespace Brovan.Core.Emulation.Guests
             if (string.IsNullOrEmpty(ImageName))
                 ImageName = GeneralHelper.IO.GetWindowsFileName(Instance.GuestImagePath ?? string.Empty);
 
-            if (!AlpcMessaging.Supported(Instance))
-                RpcssSessionTable.KeepLocal();
-
             GuestSession.Join(
                 Instance.WinHelper.PID,
                 (uint)Instance._binary.Architecture,

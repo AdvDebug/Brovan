@@ -256,7 +256,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC
         private void PublishToSession(BinaryEmulator Instance)
         {
             Published = true;
-            if (AlpcMessaging.Publish(Instance, SessionPort) != NTSTATUS.STATUS_SUCCESS)
+            if (AlpcMessaging.Publish(SessionPort) != NTSTATUS.STATUS_SUCCESS)
                 Utils.LogError($"[-] Host COM: the apartment of process {ProcessId} cannot take its port name in the session.");
             else if (SessionPort.SessionRecord != null)
                 RpcssPortHandler.PublishHostApartment(Instance, this);
