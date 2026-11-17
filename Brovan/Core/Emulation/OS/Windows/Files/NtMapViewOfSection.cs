@@ -24,7 +24,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static ReadOnlySpan<byte> CompatibleViewProtection => new byte[] { 0x01, 0x0B, 0x11, 0xBB, 0x0F, 0x0B, 0xFF, 0xBB };
 
         // NT: MiSectionMapping. Handle access still holds generic rights.
-        private static AccessMask MapSectionAccess(AccessMask Granted)
+        internal static AccessMask MapSectionAccess(AccessMask Granted)
         {
             if ((Granted & (AccessMask.GenericAll | AccessMask.MaximumAllowed)) != 0)
                 return AccessMask.SectionAllAccess;
@@ -41,7 +41,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Granted;
         }
 
-        private static NTSTATUS CheckDataViewProtection(uint SectionProtect, uint Win32Protect)
+        internal static NTSTATUS CheckDataViewProtection(uint SectionProtect, uint Win32Protect)
         {
             if ((Win32Protect & WinSysHelper.PageTargetsInvalid) != 0 && (Win32Protect & 0xF0) == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;

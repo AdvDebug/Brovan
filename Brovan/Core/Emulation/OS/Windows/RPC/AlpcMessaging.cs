@@ -84,15 +84,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal bool Disconnected;
     }
 
-    internal readonly record struct AlpcHeldHandle(ulong Handle, IHandleObject Object, AccessMask Access);
-
     internal sealed class AlpcHandleBlob
     {
         internal uint CallbackId;
         internal ServedClient Owner;
 
         // Handles in the receiving process that the blob owns. They hold the objects until the receiver releases the message.
-        internal AlpcHeldHandle[] Handles;
+        internal HeldHandle[] Handles;
     }
 
     // What a reply takes over from its request. An LRPC bind's type flags 0x4000 give reply type 0x4002.
@@ -785,11 +783,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
             }
 
-            AlpcHeldHandle[] Held = new AlpcHeldHandle[Handles.Count];
+            HeldHandle[] Held = new HeldHandle[Handles.Count];
             for (int Index = 0; Index < Held.Length; Index++)
             {
                 ulong Handle = Handles[Index];
-                Held[Index] = new AlpcHeldHandle(Handle, Instance.WinHelper.HandleManager.GetObjectByHandle(Handle),
+                Held[Index] = new HeldHandle(Handle, Instance.WinHelper.HandleManager.GetObjectByHandle(Handle),
                     Instance.WinHelper.HandleManager.GetPermissionsByHandle(Handle));
             }
 
@@ -860,10 +858,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT opens a new handle at each query.
-        internal static bool TryOpenHandle(BinaryEmulator Instance, in AlpcHeldHandle Held, out ulong Handle)
+        internal static bool TryOpenHandle(BinaryEmulator Instance, in HeldHandle Held, out ulong Handle)
         {
             Handle = 0;
-            if (!StillHolds(Instance, Held))
+            if (!Instance.WinHelper.StillHolds(Held))
                 return false;
 
             Handle = Instance.WinHelper.OpenObjectHandle(Held.Object, Held.Access).Handle;
@@ -893,16 +891,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static void CloseOwnedHandles(BinaryEmulator Instance, AlpcHandleBlob Blob)
         {
-            foreach (AlpcHeldHandle Held in Blob.Handles)
-            {
-                if (StillHolds(Instance, Held))
-                    Instance.WinHelper.CloseHandle(Held.Handle);
-            }
+            foreach (HeldHandle Held in Blob.Handles)
+                Instance.WinHelper.Release(Held);
         }
-
-        // A handle value the guest closed can name another object by now.
-        private static bool StillHolds(BinaryEmulator Instance, in AlpcHeldHandle Held)
-            => Held.Object != null && ReferenceEquals(Instance.WinHelper.HandleManager.GetObjectByHandle(Held.Handle), Held.Object);
 
         internal static AlpcReceiveQueue? ServedQueueOf(WinPort Port, ulong HandleKey) => Port.ServedClients?.GetValueOrDefault(HandleKey)?.Queue;
 

@@ -325,6 +325,7 @@ namespace Brovan.Core.Emulation.Guests
             {
                 OS.Windows.RPC.Ports.AudioSrvPortHandler.StopStreams(Instance);
                 AlpcMessaging.ReleaseRemote(Instance);
+                RemoteCalls.Release(Instance);
                 RpcssSessionTable.Close();
                 WinHelper.UnloadAppHives();
                 WinHelper.KernelFiles?.Dispose();
@@ -392,6 +393,9 @@ namespace Brovan.Core.Emulation.Guests
 
             SessionPump.Run(Instance);
 
+            if (RemoteCalls.HasPending)
+                RemoteCalls.Service(Instance);
+
             if (WinHelper.PipeRequests.Count != 0)
                 WinHelper.PipeRequests.Poll(Instance);
 
@@ -403,6 +407,7 @@ namespace Brovan.Core.Emulation.Guests
 
         public bool AwaitsHostWork(BinaryEmulator Instance)
             => WinHelper != null && (Instance.HasActiveGetMessageWait() || Instance.HasPendingHostIo() || AlpcMessaging.HasRemoteWork || AlpcMessaging.HasDeferredAnswers
+                || RemoteCalls.HasPending
                 || WinHelper.Composition.Compositor.AwaitsHostWork);
 
         public bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle)

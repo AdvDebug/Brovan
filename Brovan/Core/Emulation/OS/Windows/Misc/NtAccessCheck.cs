@@ -25,7 +25,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const byte SecurityDescriptorRevision = 1;
         private const int OffControl = 2;
         internal const ushort SeDaclPresent = 0x0004;
-        private const ushort SeSaclPresent = 0x0010;
+        internal const ushort SeSaclPresent = 0x0010;
+        internal const ushort SeSaclAutoInherited = 0x0800;
         private const ushort SeSelfRelative = 0x8000;
         internal const int SelfRelativeHeaderSize = 20;
 
@@ -62,7 +63,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint AceObjectTypePresent = 1;
         private const uint AceInheritedObjectTypePresent = 2;
 
-        private const uint MandatoryNoWriteUp = 1;
+        internal const uint MandatoryNoWriteUp = 1;
         internal const uint MandatoryNoReadUp = 2;
         private const uint MandatoryNoExecuteUp = 4;
 

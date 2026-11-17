@@ -2933,6 +2933,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Parent.ShadowPath + "\\" + LeafName;
         }
 
+        internal HeldHandle Hold(IHandleObject Object, AccessMask Access) => new HeldHandle(OpenObjectHandle(Object, Access).Handle, Object, Access);
+
+        // A handle value the guest closed can name another object by now.
+        internal bool StillHolds(in HeldHandle Held)
+            => Held.Object != null && ReferenceEquals(HandleManager.GetObjectByHandle(Held.Handle), Held.Object);
+
+        internal void Release(in HeldHandle Held)
+        {
+            if (StillHolds(Held))
+                CloseHandle(Held.Handle);
+        }
+
         public WinHandle OpenObjectHandle(IHandleObject Object, AccessMask Permissions, ObjectHandleFlags Flags = ObjectHandleFlags.None)
         {
             WinHandle Handle = HandleManager.AddHandle(Object, Permissions, Flags);
@@ -3715,7 +3727,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return null;
         }
 
-        private void ReleaseSectionIfUnreferenced(WinSection Section)
+        internal void ReleaseSectionIfUnreferenced(WinSection Section)
         {
             if (Section.MappedViewCount != 0)
                 return;
@@ -11265,20 +11277,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        // NT: an inherited handle keeps its value from the creator.
-        internal bool AddInheritedSection(ulong Handle, AccessMask Permissions, ObjectHandleFlags Flags, ulong Size, uint Protection, uint Attributes, string Path, IntPtr Storage, string SharedMemoryPath)
-        {
-            WinSection Section = CreateSection(null, Size, Protection, Attributes, string.IsNullOrEmpty(Path) ? null : Path, 0, Storage, SharedMemoryPath);
-            WinHandle Added = HandleManager.AddHandleAt(Handle, Section, Permissions, Flags);
-            if (Added == null)
-            {
-                ReleaseSectionIfUnreferenced(Section);
-                return false;
-            }
-
-            AddWinHandle(Added);
-            return true;
-        }
+        internal WinSection CreateTransferredSection(ulong Size, uint Protection, uint Attributes, string? Path, IntPtr Storage, string SharedMemoryPath)
+            => CreateSection(null, Size, Protection, Attributes, Path, 0, Storage, SharedMemoryPath);
 
         // The section has no handle, so unmapping the view frees it.
         public ulong MapUnnamedSectionView(ReadOnlySpan<byte> Data, MemoryProtection Protection)

@@ -98,6 +98,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         public uint BitsSize;
         public bool DibSection;
         public bool TopDown;
+        public ulong ViewBase;
+        public ulong SectionHandle;
+        public uint SectionOffset;
     }
 
     internal readonly ref struct CallBuffer
@@ -1935,26 +1938,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         internal static ulong CreateBitmap(BinaryEmulator Instance, int Width, int Height, ushort Planes, ushort BitsPerPixel, bool DibSection, bool TopDown, bool Stock = false)
         {
-            int Stride = GetBitmapStride(Width, Planes, BitsPerPixel, DibSection);
-            if (Width <= 0 || Height <= 0 || Planes == 0 || BitsPerPixel == 0 || Stride == 0)
+            if (!TryGetBitmapLayout(Width, Height, Planes, BitsPerPixel, DibSection, out int Stride, out uint BitsSize))
                 return 0;
 
-            long TotalBytes = (long)Stride * Height;
-            if (TotalBytes > MaxBitmapBytes)
-                return 0;
-
-            ulong Handle = Instance.WinHelper.AllocateGdiHandle(BitmapHandleType, Stock);
-            if (Handle == 0)
-                return 0;
-
-            ulong BitsAddress = Instance.MapUniqueAddress((ulong)TotalBytes, MemoryProtection.ReadWrite);
+            ulong BitsAddress = Instance.MapUniqueAddress(BitsSize, MemoryProtection.ReadWrite);
             if (BitsAddress == 0)
-            {
-                Instance.WinHelper.FreeGdiHandle(Handle);
                 return 0;
-            }
 
-            GetState(Instance).Bitmaps[Handle] = new Win32kBitmap
+            ulong Handle = AddBitmap(Instance, new Win32kBitmap
             {
                 Width = Width,
                 Height = Height,
@@ -1962,10 +1953,39 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 BitsPerPixel = BitsPerPixel,
                 Stride = Stride,
                 BitsAddress = BitsAddress,
-                BitsSize = (uint)TotalBytes,
+                BitsSize = BitsSize,
                 DibSection = DibSection,
                 TopDown = TopDown,
-            };
+            }, Stock);
+
+            if (Handle == 0)
+                Instance.UnmapMemoryRegion(BitsAddress);
+
+            return Handle;
+        }
+
+        internal static bool TryGetBitmapLayout(int Width, int Height, ushort Planes, ushort BitsPerPixel, bool DibSection, out int Stride, out uint BitsSize)
+        {
+            Stride = GetBitmapStride(Width, Planes, BitsPerPixel, DibSection);
+            BitsSize = 0;
+            if (Width <= 0 || Height <= 0 || Planes == 0 || BitsPerPixel == 0 || Stride == 0)
+                return false;
+
+            long TotalBytes = (long)Stride * Height;
+            if (TotalBytes > MaxBitmapBytes)
+                return false;
+
+            BitsSize = (uint)TotalBytes;
+            return true;
+        }
+
+        // The bitmap owns its bits from here on, and RemoveBitmap releases them.
+        internal static ulong AddBitmap(BinaryEmulator Instance, in Win32kBitmap Bitmap, bool Stock = false)
+        {
+            ulong Handle = Instance.WinHelper.AllocateGdiHandle(BitmapHandleType, Stock);
+            if (Handle != 0)
+                GetState(Instance).Bitmaps[Handle] = Bitmap;
+
             return Handle;
         }
 
@@ -3488,7 +3508,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!State.Bitmaps.Remove(Handle, out Win32kBitmap Bitmap))
                 return false;
 
-            Instance.UnmapMemoryRegion(Bitmap.BitsAddress);
+            if (Bitmap.ViewBase != 0)
+                Instance.WinHelper.UnmapViewOfSection(Bitmap.ViewBase);
+            else
+                Instance.UnmapMemoryRegion(Bitmap.BitsAddress);
+
             return true;
         }
 

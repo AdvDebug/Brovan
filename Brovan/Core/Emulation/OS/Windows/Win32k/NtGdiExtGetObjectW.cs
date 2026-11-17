@@ -125,6 +125,18 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             BinaryPrimitives.WriteUInt16LittleEndian(Header.Slice(0x0E, 2), Bitmap.BitsPerPixel);
             BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x10, 4), BiRgb);
             BinaryPrimitives.WriteUInt32LittleEndian(Header.Slice(0x14, 4), Bitmap.BitsSize);
+
+            // dsBitfields follows the header, then dshSection at pointer alignment and dsOffset.
+            if (Wide)
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(Buffer.Slice(0x58, 8), Bitmap.SectionHandle);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x60, 4), Bitmap.SectionOffset);
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x4C, 4), (uint)Bitmap.SectionHandle);
+                BinaryPrimitives.WriteUInt32LittleEndian(Buffer.Slice(0x50, 4), Bitmap.SectionOffset);
+            }
         }
 
         private static void WritePenBrush(Span<byte> Buffer, in Win32kPenBrush PenBrush)

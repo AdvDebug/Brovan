@@ -18,10 +18,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 NTSTATUS Status;
                 ulong Result = 0;
                 int OutputLength = 0;
+                Made Made = default;
 
                 try
                 {
-                    Status = Execute(Instance, Operation, Address, Argument, Length, Payload.Slice(0, Length), Payload, out Result, out OutputLength);
+                    Status = Execute(Instance, Operation, Address, Argument, Length, Payload.Slice(0, Length), Payload, out Result, out OutputLength, out Made);
                 }
                 catch (Exception Ex)
                 {
@@ -29,7 +30,53 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Status = NTSTATUS.STATUS_UNSUCCESSFUL;
                 }
 
-                GuestSessionMailbox.Complete(Status, Result, OutputLength);
+                if (GuestSessionMailbox.Complete(Status, Result, OutputLength) || Made.Kind == MadeKind.None)
+                    continue;
+
+                try
+                {
+                    Undo(Instance, Made);
+                }
+                catch (Exception Ex)
+                {
+                    Utils.LogError($"[RemoteProcessRequests] Undoing {Operation} failed: {Ex.Message}");
+                }
+            }
+        }
+
+        private enum MadeKind : byte
+        {
+            None,
+            Reservation,
+            Thread,
+            Handle,
+        }
+
+        private readonly record struct Made(MadeKind Kind, ulong Value);
+
+        private static void Undo(BinaryEmulator Instance, Made Made)
+        {
+            switch (Made.Kind)
+            {
+                // The thread has not run yet, because Execute, Complete and Undo run in one KernelLock hold.
+                case MadeKind.Thread:
+                    if (Instance.Threads.TryGetValue((uint)Made.Value, out EmulatedThread? Thread))
+                        NtTerminateThread.TerminateOther(Instance, Thread, (uint)NTSTATUS.STATUS_CANCELLED);
+                    return;
+
+                case MadeKind.Handle:
+                    Instance.WinHelper.CloseHandle(Made.Value);
+                    return;
+
+                case MadeKind.Reservation:
+                {
+                    ulong BaseAddress = Made.Value;
+                    ulong RegionSize = 0;
+                    NTSTATUS Status = NtFreeVirtualMemory.Free(Instance, ref BaseAddress, ref RegionSize, NtFreeVirtualMemory.MemRelease);
+                    if (Status != NTSTATUS.STATUS_SUCCESS)
+                        Utils.LogError($"[RemoteProcessRequests] Releasing a reservation at 0x{Made.Value:X} nobody took failed: {Status}.");
+                    return;
+                }
             }
         }
 
@@ -43,10 +90,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             ReadOnlySpan<byte> Input,
             Span<byte> Output,
             out ulong Result,
-            out int OutputLength)
+            out int OutputLength,
+            out Made Made)
         {
             Result = 0;
             OutputLength = 0;
+            Made = default;
 
             switch (Operation)
             {
@@ -118,6 +167,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (Status != NTSTATUS.STATUS_SUCCESS)
                         return Status;
 
+                    // A commit inside an older reservation cannot be undone without the commit state it replaced.
+                    if (NtAllocateVirtualMemory.MakesReservation(BinaryPrimitives.ReadUInt32LittleEndian(Input), Address))
+                        Made = new Made(MadeKind.Reservation, BaseAddress);
+
                     OutputLength = sizeof(ulong);
                     BinaryPrimitives.WriteUInt64LittleEndian(Output, RegionSize);
                     Result = BaseAddress;
@@ -174,7 +227,22 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_NO_MEMORY;
 
                     Instance.WinHelper?.ApplyThreadBasePriority(Thread);
+                    Made = new Made(MadeKind.Thread, Thread.ThreadId);
                     Result = Thread.ThreadId;
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
+
+                case SessionOperation.ReceiveHandle:
+                {
+                    if (Instance.WinHelper == null)
+                        return NTSTATUS.STATUS_NOT_SUPPORTED;
+
+                    NTSTATUS Applied = HandleTransfer.ApplyRecord(Instance, Input, HandleTransfer.Placement.NewValue, out ulong Handle);
+                    if (Applied != NTSTATUS.STATUS_SUCCESS)
+                        return Applied;
+
+                    Made = new Made(MadeKind.Handle, Handle);
+                    Result = Handle;
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 

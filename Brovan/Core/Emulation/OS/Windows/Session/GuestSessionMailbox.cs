@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.IO.MemoryMappedFiles;
 using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -15,6 +14,16 @@ namespace Brovan.Core.Emulation.OS.Windows
         QueryMemory = 6,
         FreeMemory = 7,
         ProtectMemory = 8,
+        ReceiveHandle = 9,
+    }
+
+    internal enum MailboxOutcome
+    {
+        Answered,
+        TooLarge,
+        Unavailable,
+        TimedOut,
+        TargetGone,
     }
 
     /// <summary>
@@ -46,102 +55,104 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const int AnswerTickOffset = 0x38;
         private const int LaneHeaderSize = 0x40;
 
-        private const int ResponseTimeoutMilliseconds = 5000;
-        private const int ResponsePollMilliseconds = 1;
+        internal const int ResponseTimeoutMilliseconds = 5000;
+        private const int SettleLockAttempts = 5;
 
-        // Answers often arrive well within one poll interval, so the sender spins first.
-        private static readonly long ResponseSpinTicks = Stopwatch.Frequency / 5000;
-
-        private static FileStream _stream;
-        private static MemoryMappedFile _map;
-        private static MemoryMappedViewAccessor _view;
-        private static unsafe byte* _viewBase;
+        private static SessionMapping? _mapping;
         private static bool _unavailable;
 
         private static readonly uint[] _handledSequences = new uint[LaneCount];
         private static int _nextLane;
         private static int _activeLane = -1;
 
-        private enum Claim
+        internal enum Claim
         {
             Claimed,
             Busy,
             Unavailable,
+            TooLarge,
         }
 
-        internal static NTSTATUS Send(
-            int Slot,
-            SessionOperation Operation,
-            ulong Address,
-            ulong Argument,
-            ReadOnlySpan<byte> Input,
-            Span<byte> Output,
-            out int OutputLength,
-            out ulong Result)
+        internal static Claim TryPost(int Slot, SessionOperation Operation, ulong Address, ulong Argument, ReadOnlySpan<byte> Input, int OutputLength,
+            out uint Sequence)
         {
+            Sequence = 0;
+            if (Input.Length > MaxPayloadBytes || OutputLength > MaxPayloadBytes)
+                return Claim.TooLarge;
+
+            return TryClaim(Slot, LaneOffset(TargetOffset(Slot), GuestSession.OwnSlot), Operation, Address, Argument, Input, OutputLength, out Sequence);
+        }
+
+        // True once the request ended, also when another sender took over the shared lane.
+        internal static bool TryTakeAnswer(int Slot, uint Sequence, Span<byte> Output, out MailboxOutcome Outcome, out NTSTATUS Status,
+            out int OutputLength, out ulong Result)
+        {
+            Outcome = MailboxOutcome.TimedOut;
+            Status = NTSTATUS.STATUS_SUCCESS;
             OutputLength = 0;
             Result = 0;
 
-            if (Input.Length > MaxPayloadBytes || Output.Length > MaxPayloadBytes)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-
-            long Target = TargetOffset(Slot);
-            long Lane = LaneOffset(Target, GuestSession.OwnSlot);
-            long Deadline = Environment.TickCount64 + ResponseTimeoutMilliseconds;
-            Backoff Wait = Backoff.Start();
-            uint Sequence;
-
-            while (true)
+            SessionMapping? Mapping = _mapping;
+            if (Mapping == null)
             {
-                Claim Claimed = TryClaim(Slot, Lane, Operation, Address, Argument, Input, Output.Length, out Sequence);
-                if (Claimed == Claim.Unavailable)
-                    return NTSTATUS.STATUS_NOT_SUPPORTED;
-                if (Claimed == Claim.Claimed)
-                    break;
-
-                // STATUS_TIMEOUT is a success code.
-                if (Environment.TickCount64 >= Deadline)
-                    return NTSTATUS.STATUS_IO_TIMEOUT;
-                Wait.Pause();
+                Outcome = MailboxOutcome.Unavailable;
+                return true;
             }
 
-            Wait = Backoff.Start();
-            while (true)
-            {
-                if (_view == null)
-                    return NTSTATUS.STATUS_NOT_SUPPORTED;
-
-                if (Peek(Lane + AnswerSequenceOffset) == Sequence)
-                {
-                    using SessionLock Lock = GuestSession.Acquire();
-                    if (Lock.Held)
-                    {
-                        // Another sender took over the shared lane after this answer sat unread for a full timeout.
-                        if (_view.ReadUInt32(Lane + RequestSequenceOffset) != Sequence)
-                            return NTSTATUS.STATUS_IO_TIMEOUT;
-
-                        Result = _view.ReadUInt64(Lane + ResultOffset);
-                        OutputLength = (int)Math.Min(_view.ReadUInt32(Lane + AnswerLengthOffset), (uint)Output.Length);
-
-                        if (OutputLength > 0)
-                            PayloadSpan(Lane).Slice(0, OutputLength).CopyTo(Output);
-
-                        NTSTATUS Status = (NTSTATUS)_view.ReadUInt32(Lane + StatusOffset);
-                        _view.Write(Lane + ReleasedSequenceOffset, Sequence);
-                        return Status;
-                    }
-                }
-
-                if (Environment.TickCount64 >= Deadline)
-                {
-                    Release(Lane, Sequence);
-                    return NTSTATUS.STATUS_IO_TIMEOUT;
-                }
-                Wait.Pause();
-            }
+            int Lane = LaneOffset(TargetOffset(Slot), GuestSession.OwnSlot);
+            return Mapping.ReadUInt32(Lane + AnswerSequenceOffset) == Sequence &&
+                TrySettle(Lane, Sequence, MailboxOutcome.TimedOut, false, Output, out Outcome, out Status, out OutputLength, out Result);
         }
 
-        private static Claim TryClaim(int Slot, long Lane, SessionOperation Operation, ulong Address, ulong Argument, ReadOnlySpan<byte> Input,
+        // An answer that already arrived is still taken. Otherwise the target undoes what it made for the request.
+        internal static MailboxOutcome Abandon(int Slot, uint Sequence, MailboxOutcome Reason, Span<byte> Output, out NTSTATUS Status, out int OutputLength,
+            out ulong Result)
+        {
+            TrySettle(LaneOffset(TargetOffset(Slot), GuestSession.OwnSlot), Sequence, Reason, true, Output, out MailboxOutcome Outcome, out Status,
+                out OutputLength, out Result);
+            return Outcome;
+        }
+
+        private static bool TrySettle(int Lane, uint Sequence, MailboxOutcome Abandoned, bool Final, Span<byte> Output, out MailboxOutcome Outcome,
+            out NTSTATUS Status, out int OutputLength, out ulong Result)
+        {
+            Outcome = Abandoned;
+            Status = NTSTATUS.STATUS_SUCCESS;
+            OutputLength = 0;
+            Result = 0;
+
+            using SessionLock Lock = Final ? AcquireToSettle() : GuestSession.Acquire();
+            SessionMapping? Mapping = _mapping;
+            if (Mapping == null)
+                return true;
+
+            // Another sender took over the shared lane after this request sat unanswered for a full timeout.
+            if (Mapping.ReadUInt32(Lane + RequestSequenceOffset) != Sequence)
+                return true;
+
+            // WriteAnswer publishes its sequence last, so an answer seen without the lock is complete.
+            bool Answered = Mapping.ReadUInt32(Lane + AnswerSequenceOffset) == Sequence;
+            if (!Lock.Held && !Answered)
+                return Final;
+
+            if (!Answered)
+            {
+                Mapping.WriteUInt32(Lane + ReleasedSequenceOffset, Sequence);
+                return true;
+            }
+
+            Result = Mapping.ReadUInt64(Lane + ResultOffset);
+            OutputLength = (int)Math.Min(Mapping.ReadUInt32(Lane + AnswerLengthOffset), (uint)Output.Length);
+            if (OutputLength > 0)
+                PayloadSpan(Mapping, Lane).Slice(0, OutputLength).CopyTo(Output);
+
+            Status = (NTSTATUS)Mapping.ReadUInt32(Lane + StatusOffset);
+            Mapping.WriteUInt32(Lane + ReleasedSequenceOffset, Sequence);
+            Outcome = MailboxOutcome.Answered;
+            return true;
+        }
+
+        private static Claim TryClaim(int Slot, int Lane, SessionOperation Operation, ulong Address, ulong Argument, ReadOnlySpan<byte> Input,
             int OutputLength, out uint Sequence)
         {
             Sequence = 0;
@@ -149,36 +160,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Lock.Held || !TryOpen())
                 return Claim.Unavailable;
 
-            uint Last = _view.ReadUInt32(Lane + RequestSequenceOffset);
-            if (!IsLaneFree(Lane, Last))
+            SessionMapping Mapping = _mapping!;
+            uint Last = Mapping.ReadUInt32(Lane + RequestSequenceOffset);
+            if (!IsLaneFree(Mapping, Lane, Last))
                 return Claim.Busy;
 
-            _view.Write(Lane + OperationOffset, (uint)Operation);
-            _view.Write(Lane + AddressOffset, Address);
-            _view.Write(Lane + ArgumentOffset, Argument);
-            _view.Write(Lane + LengthOffset, (uint)(Operation == SessionOperation.ReadMemory ? OutputLength : Input.Length));
+            Mapping.WriteUInt32(Lane + OperationOffset, (uint)Operation);
+            Mapping.WriteUInt64(Lane + AddressOffset, Address);
+            Mapping.WriteUInt64(Lane + ArgumentOffset, Argument);
+            Mapping.WriteUInt32(Lane + LengthOffset, (uint)(Operation == SessionOperation.ReadMemory ? OutputLength : Input.Length));
 
             if (Input.Length > 0)
-                Input.CopyTo(PayloadSpan(Lane));
+                Input.CopyTo(PayloadSpan(Mapping, Lane));
 
             Sequence = Last + 1;
-            _view.Write(Lane + RequestSequenceOffset, Sequence);
+            Mapping.WriteUInt32(Lane + RequestSequenceOffset, Sequence);
             SessionPump.Ring(Slot);
             return Claim.Claimed;
         }
 
         // An answer nobody read for a whole timeout belongs to a sender that is gone.
-        private static bool IsLaneFree(long Lane, uint Last)
-            => _view.ReadUInt32(Lane + AnswerSequenceOffset) == Last
-                && (_view.ReadUInt32(Lane + ReleasedSequenceOffset) == Last
-                    || Environment.TickCount64 - _view.ReadInt64(Lane + AnswerTickOffset) >= ResponseTimeoutMilliseconds);
-
-        private static void Release(long Lane, uint Sequence)
-        {
-            using SessionLock Lock = GuestSession.Acquire();
-            if (Lock.Held && _view != null && _view.ReadUInt32(Lane + RequestSequenceOffset) == Sequence)
-                _view.Write(Lane + ReleasedSequenceOffset, Sequence);
-        }
+        private static bool IsLaneFree(SessionMapping Mapping, int Lane, uint Last)
+            => Mapping.ReadUInt32(Lane + AnswerSequenceOffset) == Last
+                && (Mapping.ReadUInt32(Lane + ReleasedSequenceOffset) == Last
+                    || Environment.TickCount64 - (long)Mapping.ReadUInt64(Lane + AnswerTickOffset) >= ResponseTimeoutMilliseconds);
 
         /// <summary>
         /// <paramref name="Length"/> is how many bytes the sender wants back for
@@ -194,32 +199,39 @@ namespace Brovan.Core.Emulation.OS.Windows
             Payload = Span<byte>.Empty;
 
             int Slot = GuestSession.OwnSlot;
-            if (Slot < 0 || _view == null)
+            if (Slot < 0 || _mapping == null)
                 return false;
 
             using SessionLock Lock = GuestSession.Acquire();
-            if (!Lock.Held)
+            SessionMapping? Mapping = _mapping;
+            if (!Lock.Held || Mapping == null)
             {
                 SessionPump.Rescan();
                 return false;
             }
 
-            long Target = TargetOffset(Slot);
+            int Target = TargetOffset(Slot);
             for (int i = 0; i < LaneCount; i++)
             {
                 int Index = (_nextLane + i) % LaneCount;
-                long Lane = LaneOffset(Target, Index);
-                uint Sequence = _view.ReadUInt32(Lane + RequestSequenceOffset);
+                int Lane = LaneOffset(Target, Index);
+                uint Sequence = Mapping.ReadUInt32(Lane + RequestSequenceOffset);
                 if (Sequence == _handledSequences[Index])
                     continue;
 
-                Operation = (SessionOperation)_view.ReadUInt32(Lane + OperationOffset);
-                Address = _view.ReadUInt64(Lane + AddressOffset);
-                Argument = _view.ReadUInt64(Lane + ArgumentOffset);
-                Length = (int)Math.Min(_view.ReadUInt32(Lane + LengthOffset), (uint)MaxPayloadBytes);
-                Payload = PayloadSpan(Lane);
-
                 _handledSequences[Index] = Sequence;
+                if (Mapping.ReadUInt32(Lane + ReleasedSequenceOffset) == Sequence)
+                {
+                    WriteAnswer(Mapping, Lane, Sequence, 0, 0, 0);
+                    continue;
+                }
+
+                Operation = (SessionOperation)Mapping.ReadUInt32(Lane + OperationOffset);
+                Address = Mapping.ReadUInt64(Lane + AddressOffset);
+                Argument = Mapping.ReadUInt64(Lane + ArgumentOffset);
+                Length = (int)Math.Min(Mapping.ReadUInt32(Lane + LengthOffset), (uint)MaxPayloadBytes);
+                Payload = PayloadSpan(Mapping, Lane);
+
                 _activeLane = Index;
                 _nextLane = (Index + 1) % LaneCount;
                 return true;
@@ -228,23 +240,55 @@ namespace Brovan.Core.Emulation.OS.Windows
             return false;
         }
 
-        internal static void Complete(NTSTATUS Status, ulong Result, int Length)
+        // False when the sender gave the request up, so the caller undoes what it made.
+        internal static bool Complete(NTSTATUS Status, ulong Result, int Length)
         {
             int Slot = GuestSession.OwnSlot;
-            if (Slot < 0 || _view == null || _activeLane < 0)
-                return;
+            if (Slot < 0 || _mapping == null || _activeLane < 0)
+                return false;
 
-            using SessionLock Lock = GuestSession.Acquire();
-            if (!Lock.Held)
-                return;
+            using SessionLock Lock = AcquireToSettle();
+            SessionMapping? Mapping = _mapping;
+            if (!Lock.Held || Mapping == null)
+                return false;
 
-            long Lane = LaneOffset(TargetOffset(Slot), _activeLane);
-            _view.Write(Lane + AnswerLengthOffset, (uint)Math.Min(Length, MaxPayloadBytes));
-            _view.Write(Lane + ResultOffset, Result);
-            _view.Write(Lane + StatusOffset, (uint)Status);
-            _view.Write(Lane + AnswerTickOffset, Environment.TickCount64);
-            _view.Write(Lane + AnswerSequenceOffset, _handledSequences[_activeLane]);
+            int Sender = _activeLane;
+            int Lane = LaneOffset(TargetOffset(Slot), Sender);
+            uint Sequence = _handledSequences[Sender];
             _activeLane = -1;
+
+            if (Mapping.ReadUInt32(Lane + RequestSequenceOffset) != Sequence)
+                return false;
+
+            WriteAnswer(Mapping, Lane, Sequence, Status, Result, Length);
+            bool Taken = Mapping.ReadUInt32(Lane + ReleasedSequenceOffset) != Sequence;
+            if (Taken && Sender < GuestSession.SlotCount)
+                SessionPump.Ring(Sender);
+
+            return Taken;
+        }
+
+        // Without the lock the two sides of a request can disagree about its outcome.
+        private static SessionLock AcquireToSettle()
+        {
+            for (int Attempt = 0; Attempt < SettleLockAttempts; Attempt++)
+            {
+                SessionLock Lock = GuestSession.Acquire();
+                if (Lock.Held)
+                    return Lock;
+            }
+
+            Utils.LogError("[GuestSessionMailbox] The session lock stayed taken, so a request ends without a recorded outcome.");
+            return default;
+        }
+
+        private static void WriteAnswer(SessionMapping Mapping, int Lane, uint Sequence, NTSTATUS Status, ulong Result, int Length)
+        {
+            Mapping.WriteUInt32(Lane + AnswerLengthOffset, (uint)Math.Min(Length, MaxPayloadBytes));
+            Mapping.WriteUInt64(Lane + ResultOffset, Result);
+            Mapping.WriteUInt32(Lane + StatusOffset, (uint)Status);
+            Mapping.WriteUInt64(Lane + AnswerTickOffset, (ulong)Environment.TickCount64);
+            Mapping.WriteUInt32(Lane + AnswerSequenceOffset, Sequence);
         }
 
         /// <summary>
@@ -255,17 +299,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryOpen())
                 return;
 
-            long Target = TargetOffset(Slot);
+            SessionMapping Mapping = _mapping!;
+            int Target = TargetOffset(Slot);
             for (int Index = 0; Index < LaneCount; Index++)
-                new Span<byte>(_viewBase + LaneOffset(Target, Index), LaneHeaderSize).Clear();
+                new Span<byte>(Mapping.Base + LaneOffset(Target, Index), LaneHeaderSize).Clear();
 
             for (int Other = 0; Other < GuestSession.SlotCount; Other++)
             {
                 if (Other == Slot)
                     continue;
 
-                long Lane = LaneOffset(TargetOffset(Other), Slot);
-                _view.Write(Lane + ReleasedSequenceOffset, _view.ReadUInt32(Lane + RequestSequenceOffset));
+                int Lane = LaneOffset(TargetOffset(Other), Slot);
+                Mapping.WriteUInt32(Lane + ReleasedSequenceOffset, Mapping.ReadUInt32(Lane + RequestSequenceOffset));
             }
 
             Array.Clear(_handledSequences);
@@ -275,18 +320,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void Close()
         {
-            _view?.Dispose();
-            _map?.Dispose();
-            _stream?.Dispose();
-
-            _view = null;
-            _map = null;
-            _stream = null;
+            SessionMapping? Mapping = _mapping;
+            _mapping = null;
+            Mapping?.Dispose();
         }
 
-        private static unsafe bool TryOpen()
+        private static bool TryOpen()
         {
-            if (_view != null)
+            if (_mapping != null)
                 return true;
 
             if (_unavailable)
@@ -295,63 +336,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             try
             {
                 System.IO.Directory.CreateDirectory(GuestSession.Directory);
-
-                long Size = (long)GuestSession.SlotCount * TargetSize;
-
-                _stream = new FileStream(
-                    Path.Combine(GuestSession.Directory, FileName),
-                    FileMode.OpenOrCreate,
-                    FileAccess.ReadWrite,
-                    FileShare.ReadWrite | FileShare.Delete);
-
-                if (_stream.Length < Size)
-                    _stream.SetLength(Size);
-
-                _map = MemoryMappedFile.CreateFromFile(_stream, null, Size, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, true);
-                _view = _map.CreateViewAccessor(0, Size);
-
-                byte* Pointer = null;
-                _view.SafeMemoryMappedViewHandle.AcquirePointer(ref Pointer);
-                _viewBase = Pointer + _view.PointerOffset;
-                return true;
             }
-            catch (Exception Ex)
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
             {
-                Utils.LogError($"[GuestSessionMailbox] Unavailable: {Ex.Message}");
+                Utils.LogError($"[GuestSessionMailbox] Unavailable: {Error.Message}");
                 _unavailable = true;
-                _view = null;
-                _viewBase = null;
                 return false;
             }
+
+            _mapping = SessionMapping.OpenFile(Path.Combine(GuestSession.Directory, FileName), FileMode.OpenOrCreate, (long)GuestSession.SlotCount * TargetSize);
+            if (_mapping == null)
+                _unavailable = true;
+
+            return _mapping != null;
         }
 
-        private static unsafe uint Peek(long Offset) => Volatile.Read(ref *(uint*)(_viewBase + Offset));
+        private static unsafe Span<byte> PayloadSpan(SessionMapping Mapping, int Lane) => new(Mapping.Base + Lane + LaneHeaderSize, MaxPayloadBytes);
 
-        private static unsafe Span<byte> PayloadSpan(long Lane) => new(_viewBase + Lane + LaneHeaderSize, MaxPayloadBytes);
+        private static int TargetOffset(int Slot) => Slot * TargetSize;
 
-        private static long TargetOffset(int Slot) => (long)Slot * TargetSize;
-
-        private static long LaneOffset(long Target, int Sender)
-            => Target + (long)(Sender >= 0 ? Sender : SharedLane) * LaneSize;
-
-        private struct Backoff
-        {
-            private long _spinEnd;
-            private SpinWait _spinner;
-
-            public static Backoff Start() => new() { _spinEnd = Stopwatch.GetTimestamp() + ResponseSpinTicks };
-
-            public void Pause()
-            {
-                if (_spinEnd != 0 && Stopwatch.GetTimestamp() < _spinEnd)
-                {
-                    _spinner.SpinOnce(sleep1Threshold: -1);
-                    return;
-                }
-
-                _spinEnd = 0;
-                Thread.Sleep(ResponsePollMilliseconds);
-            }
-        }
+        private static int LaneOffset(int Target, int Sender)
+            => Target + (Sender >= 0 ? Sender : SharedLane) * LaneSize;
     }
 }

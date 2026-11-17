@@ -93,6 +93,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ObjectHandleFlags Flags;
     }
 
+    internal readonly record struct HeldHandle(ulong Handle, IHandleObject Object, AccessMask Access);
+
     /// <summary>
     /// Generic handles manager (for Processes, Files, Mutex, etc)
     /// </summary>

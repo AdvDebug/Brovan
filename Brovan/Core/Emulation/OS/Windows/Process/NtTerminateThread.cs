@@ -30,13 +30,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TerminatingSelf)
                 Instance.WaitUntilParked(TargetThread);
 
-            Instance.WinHelper.AbandonMutexesOwnedByThread(TargetThread.ThreadId);
-
-            TargetThread.ExitCode = unchecked((int)(uint)ExitStatus);
-            Instance.WinHelper.ClearTerminationState(TargetThread);
-            TargetThread.State = EmulatedThreadState.Terminated;
-            Instance.WinHelper.ReleaseThreadResources(TargetThread);
-            Instance.WakeSignal.Bump();
+            End(Instance, TargetThread, (uint)ExitStatus);
 
             if (TerminatingSelf)
             {
@@ -48,6 +42,26 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.TriggerEventMessage($"[{(ExitStatus == 0 ? '+' : '!')}] Thread with ID {TargetThread.ThreadId} was terminated with the status code 0x{ExitStatus:X}", LogFlags.General);
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        internal static void TerminateOther(BinaryEmulator Instance, EmulatedThread Thread, uint ExitStatus)
+        {
+            if (Thread.State == EmulatedThreadState.Terminated)
+                return;
+
+            Instance.WaitUntilParked(Thread);
+            End(Instance, Thread, ExitStatus);
+        }
+
+        private static void End(BinaryEmulator Instance, EmulatedThread Thread, uint ExitStatus)
+        {
+            Instance.WinHelper.AbandonMutexesOwnedByThread(Thread.ThreadId);
+
+            Thread.ExitCode = unchecked((int)ExitStatus);
+            Instance.WinHelper.ClearTerminationState(Thread);
+            Thread.State = EmulatedThreadState.Terminated;
+            Instance.WinHelper.ReleaseThreadResources(Thread);
+            Instance.WakeSignal.Bump();
         }
 
         /// <summary>

@@ -68,7 +68,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Blob == null || Index >= (uint)Blob.Handles.Length)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            AlpcHeldHandle Held = Blob.Handles[Index];
+            HeldHandle Held = Blob.Handles[Index];
             if (!AlpcMessaging.TryOpenHandle(Instance, Held, out ulong Delivering))
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 

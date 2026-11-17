@@ -109,7 +109,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (GuestSession.TryFindLiveSlot(ProcessId, out _))
                 return false;
 
-            ExitCode = GuestSession.TryReadExit(ProcessId, out uint Code) ? Code : HostExitCode();
+            // A lookup that could not take the session lock finds no slot either.
+            if (!GuestSession.TryReadExit(ProcessId, out uint Code) && !TryReadHostExit(out Code))
+                return false;
+
+            ExitCode = Code;
             Exited = true;
             Owner?.WakeSignal.Bump();
 
@@ -119,18 +123,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        private uint HostExitCode()
+        private bool TryReadHostExit(out uint Code)
         {
+            Code = 0;
             if (Host == null)
-                return 0;
+                return true;
 
             try
             {
-                return unchecked((uint)Host.ExitCode);
+                if (!Host.HasExited)
+                    return false;
+
+                Code = unchecked((uint)Host.ExitCode);
+                return true;
             }
-            catch (Exception)
+            catch (Exception Error) when (Error is InvalidOperationException || Error is NotSupportedException || Error is System.ComponentModel.Win32Exception)
             {
-                return 0;
+                return true;
             }
         }
 
@@ -138,28 +147,19 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Read = 0;
 
-            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
-                return Status;
-
-            return GuestSessionMailbox.Send(Slot, SessionOperation.ReadMemory, Address, 0, ReadOnlySpan<byte>.Empty, Destination, out Read, out _);
+            return Call(SessionOperation.ReadMemory, Address, 0, ReadOnlySpan<byte>.Empty, Destination, out Read, out _);
         }
 
         internal NTSTATUS WriteMemory(ulong Address, ReadOnlySpan<byte> Source, out ulong Written)
         {
             Written = 0;
 
-            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
-                return Status;
-
-            return GuestSessionMailbox.Send(Slot, SessionOperation.WriteMemory, Address, 0, Source, Span<byte>.Empty, out _, out Written);
+            return Call(SessionOperation.WriteMemory, Address, 0, Source, Span<byte>.Empty, out _, out Written);
         }
 
         internal NTSTATUS QueryMemory(ulong Address, Span<byte> Destination)
         {
-            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
-                return Status;
-
-            Status = GuestSessionMailbox.Send(Slot, SessionOperation.QueryMemory, Address, 0, ReadOnlySpan<byte>.Empty, Destination, out int Length, out _);
+            NTSTATUS Status = Call(SessionOperation.QueryMemory, Address, 0, ReadOnlySpan<byte>.Empty, Destination, out int Length, out _);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -171,9 +171,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             AllocatedBase = 0;
             AllocatedSize = 0;
 
-            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
-                return Status;
-
             Span<byte> Request = stackalloc byte[32];
             BinaryPrimitives.WriteUInt32LittleEndian(Request, AllocationType);
             BinaryPrimitives.WriteUInt32LittleEndian(Request.Slice(4), Protect);
@@ -182,7 +179,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             BinaryPrimitives.WriteUInt64LittleEndian(Request.Slice(24), Requirements.Alignment);
 
             Span<byte> Granted = stackalloc byte[8];
-            NTSTATUS Result = GuestSessionMailbox.Send(Slot, SessionOperation.AllocateMemory, Address, RegionSize, Request, Granted, out int GrantedLength, out AllocatedBase);
+            NTSTATUS Result = Call(SessionOperation.AllocateMemory, Address, RegionSize, Request, Granted, out int GrantedLength, out AllocatedBase);
 
             if (Result != NTSTATUS.STATUS_SUCCESS)
                 return Result;
@@ -199,14 +196,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             FreedBase = 0;
             FreedSize = 0;
 
-            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
-                return Status;
-
             Span<byte> Request = stackalloc byte[4];
             BinaryPrimitives.WriteUInt32LittleEndian(Request, FreeType);
 
             Span<byte> Freed = stackalloc byte[8];
-            NTSTATUS Result = GuestSessionMailbox.Send(Slot, SessionOperation.FreeMemory, Address, RegionSize, Request, Freed, out int FreedLength, out FreedBase);
+            NTSTATUS Result = Call(SessionOperation.FreeMemory, Address, RegionSize, Request, Freed, out int FreedLength, out FreedBase);
             if (Result != NTSTATUS.STATUS_SUCCESS)
                 return Result;
 
@@ -223,14 +217,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             ProtectedSize = 0;
             OldProtect = 0;
 
-            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
-                return Status;
-
             Span<byte> Request = stackalloc byte[4];
             BinaryPrimitives.WriteUInt32LittleEndian(Request, NewProtect);
 
             Span<byte> Changed = stackalloc byte[12];
-            NTSTATUS Result = GuestSessionMailbox.Send(Slot, SessionOperation.ProtectMemory, Address, RegionSize, Request, Changed, out int ChangedLength, out ProtectedBase);
+            NTSTATUS Result = Call(SessionOperation.ProtectMemory, Address, RegionSize, Request, Changed, out int ChangedLength, out ProtectedBase);
             if (Result != NTSTATUS.STATUS_SUCCESS)
                 return Result;
 
@@ -246,10 +237,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             ThreadId = 0;
 
-            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
-                return Status;
-
-            NTSTATUS Result = GuestSessionMailbox.Send(Slot, SessionOperation.CreateThread, StartRoutine, Argument, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out _, out ulong RemoteThreadId);
+            NTSTATUS Result = Call(SessionOperation.CreateThread, StartRoutine, Argument, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out _, out ulong RemoteThreadId);
             if (Result == NTSTATUS.STATUS_SUCCESS)
                 ThreadId = (uint)RemoteThreadId;
 
@@ -261,10 +249,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// </summary>
         internal NTSTATUS Resume()
         {
-            if (!TryResolveSlot(out int Slot, out NTSTATUS Status))
-                return Status;
-
-            return GuestSessionMailbox.Send(Slot, SessionOperation.ResumeProcess, 0, 0, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out _, out _);
+            return Call(SessionOperation.ResumeProcess, 0, 0, ReadOnlySpan<byte>.Empty, Span<byte>.Empty, out _, out _);
         }
 
         /// <summary>
@@ -293,16 +278,27 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private bool TryResolveSlot(out int Slot, out NTSTATUS Status)
+        private NTSTATUS Call(SessionOperation Operation, ulong Address, ulong Argument, ReadOnlySpan<byte> Input, Span<byte> Output, out int OutputLength,
+            out ulong Result)
         {
-            if (GuestSession.TryFindLiveSlot(ProcessId, out Slot))
-            {
-                Status = NTSTATUS.STATUS_SUCCESS;
-                return true;
-            }
+            OutputLength = 0;
+            Result = 0;
 
-            Status = NTSTATUS.STATUS_INVALID_CID;
-            return false;
+            if (!GuestSession.TryFindLiveSlot(ProcessId, out int Slot))
+                return NTSTATUS.STATUS_INVALID_CID;
+
+            MailboxOutcome Outcome = RemoteCalls.Send(Owner, this, Slot, Operation, Address, Argument, Input, Output, out NTSTATUS Status, out OutputLength,
+                out Result);
+            return StatusOf(Outcome, Status);
         }
+
+        internal static NTSTATUS StatusOf(MailboxOutcome Outcome, NTSTATUS Answered) => Outcome switch
+        {
+            MailboxOutcome.Answered => Answered,
+            MailboxOutcome.TooLarge => NTSTATUS.STATUS_INVALID_PARAMETER,
+            MailboxOutcome.TargetGone => NTSTATUS.STATUS_INVALID_CID,
+            MailboxOutcome.TimedOut => NTSTATUS.STATUS_IO_TIMEOUT,
+            _ => NTSTATUS.STATUS_NOT_SUPPORTED,
+        };
     }
 }

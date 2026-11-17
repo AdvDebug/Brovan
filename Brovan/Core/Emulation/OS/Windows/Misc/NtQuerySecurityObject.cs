@@ -7,6 +7,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint OwnerSecurityInformation = 0x00000001;
         private const uint GroupSecurityInformation = 0x00000002;
         private const uint DaclSecurityInformation = 0x00000004;
+        private const uint LabelSecurityInformation = 0x00000010;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -41,10 +42,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Group = PrimaryGroupOf(Token);
             }
 
-            // NT places the owner and then the group after the header (SeQuerySecurityDescriptorInfo).
+            byte[]? Sacl = HasDescriptor && (SecurityInformation & LabelSecurityInformation) != 0 ? LabelAclOf(Instance, Handle, Entry.Object) : null;
+
+            // NT places the owner, the group, the DACL and then the SACL after the header (SeQuerySecurityDescriptorInfo).
             int OwnerOffset = NtAccessCheck.SelfRelativeHeaderSize;
             int GroupOffset = OwnerOffset + (Owner?.Length ?? 0);
-            int Required = GroupOffset + (Group?.Length ?? 0);
+            int SaclOffset = GroupOffset + (Group?.Length ?? 0);
+            int Required = SaclOffset + (Sacl?.Length ?? 0);
             if (LengthNeededPtr != 0 && !Instance.WinHelper.WriteUInt32(LengthNeededPtr, (uint)Required))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
@@ -58,12 +62,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             ushort Control = HasDescriptor && (SecurityInformation & DaclSecurityInformation) != 0 ? NtAccessCheck.SeDaclPresent : (ushort)0;
-            Span<byte> SecurityDescriptor = stackalloc byte[NtAccessCheck.SelfRelativeHeaderSize + 2 * SidLength(MaxSubAuthorities)];
-            SecurityDescriptor = SecurityDescriptor.Slice(0, Required);
+            if (Sacl != null)
+                Control |= NtAccessCheck.SeSaclPresent | NtAccessCheck.SeSaclAutoInherited;
+
+            Span<byte> SecurityDescriptor = stackalloc byte[Required];
             NtAccessCheck.WriteSelfRelativeHeader(SecurityDescriptor, Control, OwnerOffset: Owner == null ? 0 : OwnerOffset, GroupOffset: Group == null ? 0 : GroupOffset,
-                DaclOffset: 0);
+                DaclOffset: 0, SaclOffset: Sacl == null ? 0 : SaclOffset);
             Owner?.CopyTo(SecurityDescriptor.Slice(OwnerOffset));
             Group?.CopyTo(SecurityDescriptor.Slice(GroupOffset));
+            Sacl?.CopyTo(SecurityDescriptor.Slice(SaclOffset));
 
             if (!Instance.WriteMemory(SecurityDescriptorPtr, SecurityDescriptor))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -81,6 +88,41 @@ namespace Brovan.Core.Emulation.OS.Windows
                    Handle == HandleManager.KNOWN_DLLS_DIRECTORY ||
                    Handle == HandleManager.KNOWN_DLLS32_DIRECTORY ||
                    Handle == HandleManager.RPC_CONTROL_DIRECTORY;
+        }
+
+        // NT labels a token NO_WRITE_UP and a process or thread NO_WRITE_UP | NO_READ_UP, at the integrity level of
+        // the token. Other objects that a medium process creates carry no label.
+        private static byte[]? LabelAclOf(BinaryEmulator Instance, ulong Handle, IHandleObject? Object)
+        {
+            uint Policy = NtAccessCheck.MandatoryNoWriteUp | NtAccessCheck.MandatoryNoReadUp;
+            WinToken? Token = null;
+            if (Object is WinToken Labelled)
+            {
+                Token = Labelled;
+                Policy = NtAccessCheck.MandatoryNoWriteUp;
+            }
+            else if (Object is WinProcess Process)
+                Token = Process.GetPrimaryToken();
+            else if (Object is WinRemoteThread { Process: { } Remote })
+                Token = ProcessOf(Instance, Remote)?.GetPrimaryToken();
+            else if (Object is EmulatedThread || HandleManager.IsCurrentProcessPseudoHandle(Handle) || HandleManager.IsCurrentThreadPseudoHandle(Handle))
+                Token = Instance.WinHelper.OwnProcess.GetPrimaryToken();
+
+            if (Token == null)
+                return null;
+
+            return NtAccessCheck.BuildAcl(NtAccessCheck.AceEntry.MandatoryLabel(LabelSidOf(IntegrityRidOf(Token)), Policy));
+        }
+
+        private static WinProcess? ProcessOf(BinaryEmulator Instance, RemoteGuestProcess Remote)
+        {
+            foreach (WinProcess Process in Instance.WinHelper.WinProcesses)
+            {
+                if (Process.Remote == Remote)
+                    return Process;
+            }
+
+            return null;
         }
 
         // NT gives an object a descriptor only when its type requires one or the object has a name.

@@ -27,6 +27,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!CreateDuplicate && !CloseSource)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
+            // NT probes the target handle first. The WOW64 thunk writes to a local, so on x86 the source is already
+            // closed when the copy faults.
+            bool Writable = !CreateDuplicate || Instance.AccessibleLength(TargetHandlePtr, HandleSize, true) == HandleSize;
+            if (!Writable && HandleSize == 8)
+                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
             NTSTATUS Status = ResolveProcess(Instance, SourceProcessHandle, out WinProcess SourceProcess);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
@@ -50,7 +56,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return Status;
                 }
 
-                if (TargetProcess == null || TargetProcess.PID != Instance.WinHelper.PID)
+                bool Local = TargetProcess != null && TargetProcess.PID == Instance.WinHelper.PID;
+                RemoteGuestProcess? Remote = Local ? null : TargetProcess?.Remote;
+                if (!Local && Remote == null)
                 {
                     if (CloseSource)
                         CloseSourceHandle(Instance, SourceHandle);
@@ -58,7 +66,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_NOT_SUPPORTED;
                 }
 
-                if (!Instance.IsRegionMapped(TargetHandlePtr, HandleSize))
+                if (!Writable)
                 {
                     if (CloseSource)
                         CloseSourceHandle(Instance, SourceHandle);
@@ -75,6 +83,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ObjectHandleFlags NewAttributes = ((Flags & DuplicateFlags.DUPLICATE_SAME_ATTRIBUTES) != 0)
                     ? SourceAttributes
                     : WinSysHelper.HandleFlagsOf(HandleAttributes);
+
+                if (Remote != null)
+                    return Push(Instance, Remote, SourceHandle, SourceObject, NewAccess, NewAttributes, TargetHandlePtr, CloseSource);
 
                 NewHandle = Instance.WinHelper.OpenObjectHandle(SourceObject, NewAccess, NewAttributes);
                 if (SourceObject is WinPort Port)
@@ -102,6 +113,62 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.TriggerEventMessage($"[+] NtDuplicateObject: Closed source handle 0x{SourceHandle:X}.", LogFlags.Syscall);
 
             return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private static NTSTATUS Push(BinaryEmulator Instance, RemoteGuestProcess Target, ulong SourceHandle, IHandleObject SourceObject, AccessMask Access,
+            ObjectHandleFlags Attributes, ulong TargetHandlePtr, bool CloseSource)
+        {
+            NTSTATUS Refused = NTSTATUS.STATUS_SUCCESS;
+            byte[] Record = Array.Empty<byte>();
+            if (Target.HasExited)
+                Refused = HandleDelivery.Exited;
+            else if (!HandleTransfer.TryWriteRecord(Instance, SourceHandle, new HandleEntry { Object = SourceObject, Permissions = Access, Flags = Attributes }, out Record))
+                Refused = NTSTATUS.STATUS_NOT_SUPPORTED;
+
+            if (Refused != NTSTATUS.STATUS_SUCCESS)
+            {
+                if (CloseSource)
+                    CloseSourceHandle(Instance, SourceHandle);
+
+                return Refused;
+            }
+
+            // NT closes the source whatever the outcome, so a held handle keeps the object until the target opens it.
+            HeldHandle Held = Instance.WinHelper.Hold(SourceObject, Access);
+            if (CloseSource)
+                CloseSourceHandle(Instance, SourceHandle);
+
+            return RemoteCalls.Start(Instance, new HandleDelivery(Target, Record, TargetHandlePtr, Held));
+        }
+
+        private sealed class HandleDelivery : RemoteCall
+        {
+            internal const NTSTATUS Exited = NTSTATUS.STATUS_PROCESS_IS_TERMINATING;
+
+            private readonly ulong TargetHandlePtr;
+            private readonly HeldHandle Held;
+
+            internal HandleDelivery(RemoteGuestProcess Target, byte[] Record, ulong TargetHandlePtr, HeldHandle Held)
+                : base(Target, SessionOperation.ReceiveHandle, 0, 0, Record, 0)
+            {
+                this.TargetHandlePtr = TargetHandlePtr;
+                this.Held = Held;
+            }
+
+            internal override NTSTATUS ExitedStatus => Exited;
+
+            // The target keeps the handle when the store faults, which NT avoids by probing first.
+            internal override NTSTATUS Ended(BinaryEmulator Instance, MailboxOutcome Outcome, NTSTATUS Status, ulong Result, ReadOnlySpan<byte> Answer)
+            {
+                Instance.WinHelper.Release(Held);
+
+                NTSTATUS Final = StatusOf(Outcome, Status);
+                // A call that was not parked has no thread and runs on the current one.
+                if (Final != NTSTATUS.STATUS_SUCCESS || (Thread != null && !IsLive))
+                    return Final;
+
+                return Instance.WinHelper.WritePointer(TargetHandlePtr, Result) ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_ACCESS_VIOLATION;
+            }
         }
 
         private static NTSTATUS ResolveProcess(BinaryEmulator Instance, ulong ProcessHandle, out WinProcess Process)

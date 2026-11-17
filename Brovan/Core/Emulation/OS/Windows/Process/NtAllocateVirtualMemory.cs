@@ -309,6 +309,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             return WriteOutputs(Instance, BaseAddressPtr, RegionSizePtr, GrantedBase, GrantedSize, OutputWidth);
         }
 
+        // A commit at address zero reserves too, and a replaced placeholder is a reservation that existed before.
+        internal static bool MakesReservation(uint AllocationType, ulong BaseAddress)
+            => (AllocationType & MemReplacePlaceholder) == 0 &&
+               ((AllocationType & MemReserve) != 0 || ((AllocationType & MemCommit) != 0 && BaseAddress == 0));
+
         internal static NTSTATUS Allocate(BinaryEmulator Instance, ref ulong BaseAddress, ref ulong RegionSize, uint AllocationType, uint Protect, AddressRequirements Requirements)
         {
             bool Reserve = (AllocationType & MemReserve) != 0;
