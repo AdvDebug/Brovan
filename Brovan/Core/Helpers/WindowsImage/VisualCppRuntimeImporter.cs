@@ -38,6 +38,25 @@ namespace Brovan.Core.Helpers.WindowsImage
             public bool Found => Address.Length != 0;
         }
 
+        private static readonly string[] CoreLibraries = { "msvcp140.dll", "vcruntime140.dll" };
+
+        // An image import never writes these names, so they come from an earlier runtime import.
+        public static bool IsInstalled(string BaseDirectory)
+        {
+            string Libraries = Path.Combine(BaseDirectory, WindowsImageImporter.LibrariesDirectory);
+
+            foreach (string Folder in new[] { Libraries, Path.Combine(Libraries, "SysWOW64") })
+            {
+                foreach (string Name in CoreLibraries)
+                {
+                    if (!File.Exists(Path.Combine(Folder, Name)))
+                        return false;
+                }
+            }
+
+            return true;
+        }
+
         public static bool Import(string BaseDirectory, HttpClient Client, Action<string> Report, Action<long, long, long, long>? Progress = null)
         {
             try

@@ -404,6 +404,15 @@ namespace Brovan.Core.Helpers
             return Written;
         }
 
+        public bool TryDeleteValue(string RelativePath, string Name)
+        {
+            bool Deleted = Owner.Writer.TryDeleteValue(RelativePath, Name);
+            Owner.RefreshAfterWrite(null);
+            if (Deleted)
+                Changes.Add(new HiveChange(RelativePath, ValueChanged));
+            return Deleted;
+        }
+
         // One level at a time, so each created key reports a name change on its parent as NtCreateKey does.
         public bool TryCreateKey(string RelativePath)
         {
@@ -2720,6 +2729,14 @@ namespace Brovan.Core.Helpers
                 return null;
 
             return OpenHive(HivePath, NtMountPoint, true, true, FileShare.ReadWrite);
+        }
+
+        internal static Hive OpenOffline(string HivePath)
+        {
+            if (!File.Exists(HivePath))
+                return null;
+
+            return OpenHive(HivePath, "\\Registry\\Offline", true, false, FileShare.None);
         }
 
         internal static bool IsAppHivePath(string NtPath)

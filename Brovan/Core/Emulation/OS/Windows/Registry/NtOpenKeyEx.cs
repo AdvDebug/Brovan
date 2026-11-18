@@ -27,7 +27,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (!Instance.IsRegionMapped(HandlePtr, (uint)Instance.WinHelper.PointerSize))
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                if (!Instance.WinHelper.TryResolveRegistryObjectPath(ObjectAttributesPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, NTSTATUS.STATUS_OBJECT_NAME_INVALID, NTSTATUS.STATUS_INVALID_HANDLE, out string KeyPath, out NTSTATUS Status))
+                if (!Instance.WinHelper.TryResolveRegistryObjectPath(ObjectAttributesPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, NTSTATUS.STATUS_OBJECT_NAME_INVALID, NTSTATUS.STATUS_INVALID_HANDLE, out string KeyPath, out string ParentPath, out NTSTATUS Status))
                 {
                     return Status;
                 }
@@ -37,7 +37,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtOpenKeyEx Running with the KeyPath: {KeyPath}", LogFlags.Syscall);
 
-                WinHandle Handle = Instance.WinHelper.OpenRegistryKey(KeyPath, DesiredAccess);
+                WinHandle Handle = Instance.WinHelper.OpenRegistryKey(KeyPath, DesiredAccess, Instance.WinHelper.OpensInWow64View(DesiredAccess, ParentPath));
                 if (Handle != null && Handle.Handle != 0)
                 {
                     if (!Instance.WinHelper.WritePointer(HandlePtr, Handle.Handle))

@@ -199,7 +199,13 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private const uint DeviceStateActive = 1;
         private const string MMDevicesKey = "\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio";
-        private const string CaptureEndpointPrefix = "{0.0.1.";
+
+        private const string RenderEndpointId = "{3f1c6b52-8a54-4d0e-9a3b-5e2c7d4b1a60}";
+        private const string CaptureEndpointId = "{8b5e2a17-4c3d-4f6a-b1d9-2e7c9a0f6d43}";
+        private const string EndpointAdapterName = "Brovan Audio";
+        private const string RenderFlowPrefix = "{0.0.0.00000000}";
+        private const string CaptureFlowPrefix = "{0.0.1.00000000}";
+        private const uint VtBlob = 0x41;
         private const string MicrophoneConsentKey = "\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\microphone";
         private const string ConsentDenied = "Deny";
 
@@ -277,7 +283,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         // counts the endpoints that arrived, so winmm enumerates on the first poll.
         private static byte[] GetPnpState(in LrpcMessage Message, BinaryEmulator Instance)
         {
-            int Generation = ScanActiveEndpoints(Instance, "Render", false, out _) + ScanActiveEndpoints(Instance, "Capture", false, out _);
+            int Generation = CountActiveEndpoints(Instance, "Render") + CountActiveEndpoints(Instance, "Capture");
             Log(Instance, $"PnP state polled, generation {Generation}.");
 
             Ndr20Writer Writer = new Ndr20Writer(32);
@@ -420,7 +426,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return LrpcPacket.BuildFault(Message, RpcXBadStubData);
             }
 
-            bool Capture = EndpointId != null && EndpointId.StartsWith(CaptureEndpointPrefix, StringComparison.Ordinal);
+            bool Capture = EndpointId != null && EndpointId.StartsWith(CaptureFlowPrefix, StringComparison.Ordinal);
 
             int Result = 0;
             if (ShareMode > AudioShareModeExclusive || !Format.IsValid())
@@ -1155,7 +1161,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private static bool IsConsentDenied(BinaryEmulator Instance, string KeyPath)
         {
-            if (!Instance.WinHelper.TryReadRegistryValue(KeyPath, "Value", out ValueNode Value) || Value.Data == null)
+            if (!Instance.WinHelper.TryReadNativeRegistryValue(KeyPath, "Value", out ValueNode Value) || Value.Data == null)
                 return false;
 
             return MemoryMarshal.Cast<byte, char>(Value.Data).TrimEnd('\0').Equals(ConsentDenied, StringComparison.OrdinalIgnoreCase);
@@ -1457,30 +1463,88 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private static bool TryFindActiveEndpoint(BinaryEmulator Instance, string Direction, out string EndpointId)
         {
-            return ScanActiveEndpoints(Instance, Direction, true, out EndpointId) > 0;
+            EndpointId = Direction == "Capture" ? CaptureEndpointId : RenderEndpointId;
+            return IsEndpointActive(Instance.WinHelper, MMDevicesKey + "\\" + Direction + "\\" + EndpointId);
         }
 
-        private static int ScanActiveEndpoints(BinaryEmulator Instance, string Direction, bool StopAtFirst, out string First)
+        // Audiosrv is a 64-bit service, so its endpoints live in the native view for x86 guests too.
+        internal static void PublishEndpoints(WinSysHelper Helper)
         {
-            First = null;
+            byte[] Format = EncodeFormatProperty(MixFormat);
+            PublishEndpoint(Helper, Format, "Render", RenderEndpointId, RenderFlowPrefix, "Speakers", 1, "{DFF21CE1-F70F-11D0-B917-00A0C9223196}",
+                "%windir%\\system32\\mmres.dll,-3010", "{e6327cad-dcec-4949-ae8a-991e976a79d2}");
+            PublishEndpoint(Helper, Format, "Capture", CaptureEndpointId, CaptureFlowPrefix, "Microphone", 4, "{DFF21BE1-F70F-11D0-B917-00A0C9223196}",
+                "%windir%\\system32\\mmres.dll,-3014", "{2eef81be-33fa-4800-9670-1cd474972c3f}");
+        }
+
+        private static void PublishEndpoint(WinSysHelper Helper, byte[] Format, string Direction, string EndpointId, string FlowPrefix, string Description,
+            uint FormFactor, string JackSubType, string Icon, string InterfaceClass)
+        {
+            string DirectionKey = MMDevicesKey + "\\" + Direction;
+            string EndpointKey = DirectionKey + "\\" + EndpointId;
+            string PropertiesKey = EndpointKey + "\\Properties";
+
+            if (!Helper.CreateNativeRegistryKeyPath(DirectionKey, false, out _)
+                || !Helper.CreateNativeRegistryKeyPath(EndpointKey, true, out _)
+                || !Helper.CreateNativeRegistryKeyPath(PropertiesKey, true, out _))
+                return;
+
+            string InstanceId = "SWD\\MMDEVAPI\\" + FlowPrefix + "." + EndpointId;
+            string InterfacePath = "\\\\?\\SWD#MMDEVAPI#" + FlowPrefix + "." + EndpointId + "#" + InterfaceClass;
+
+            SetDword(Helper, EndpointKey, "DeviceState", DeviceStateActive);
+            SetString(Helper, PropertiesKey, "{a45c254e-df1c-4efd-8020-67d146a850e0},2", Description);
+            SetString(Helper, PropertiesKey, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6", EndpointAdapterName);
+            SetDword(Helper, PropertiesKey, "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},0", FormFactor);
+            SetString(Helper, PropertiesKey, "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},2", "{00000000-0000-0000-0000-000000000000}");
+            SetDword(Helper, PropertiesKey, "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},7", 1);
+            SetString(Helper, PropertiesKey, "{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},8", JackSubType);
+            SetString(Helper, PropertiesKey, "{259abffc-50a7-47ce-af08-68c9a7d73366},12", Icon);
+            SetString(Helper, PropertiesKey, "{9c119480-ddc2-4954-a150-5bd240d454ad},1", InterfacePath);
+            SetString(Helper, PropertiesKey, "{9c119480-ddc2-4954-a150-5bd240d454ad},9", InterfacePath);
+            SetString(Helper, PropertiesKey, "{9c119480-ddc2-4954-a150-5bd240d454ad},2", InstanceId);
+            SetString(Helper, PropertiesKey, "{9c119480-ddc2-4954-a150-5bd240d454ad},10", InstanceId);
+            Helper.SetNativeRegistryValue(PropertiesKey, "{f19f064d-082c-4e27-bc73-6882a1bb8e4c},0", WinSysHelper.RegBinary, Format);
+            Helper.SetNativeRegistryValue(PropertiesKey, "{e4870e26-3cc5-4cd2-ba46-ca0a9a70ed04},0", WinSysHelper.RegBinary, Format);
+        }
+
+        private static void SetString(WinSysHelper Helper, string KeyPath, string Name, string Value)
+        {
+            Helper.SetNativeRegistryValue(KeyPath, Name, WinSysHelper.RegSz, Encoding.Unicode.GetBytes(Value + "\0"));
+        }
+
+        private static void SetDword(WinSysHelper Helper, string KeyPath, string Name, uint Value)
+        {
+            Helper.SetNativeRegistryValue(KeyPath, Name, WinSysHelper.RegDword, BitConverter.GetBytes(Value));
+        }
+
+        // NT: MMDevAPI stores a PROPVARIANT as its VARTYPE, a DWORD 1, then the value.
+        private static byte[] EncodeFormatProperty(WaveFormat Format)
+        {
+            Span<byte> Encoded = stackalloc byte[WaveFormat.MaxEncodedSize];
+            int Length = Format.Encode(Encoded);
+
+            byte[] Property = new byte[8 + Length];
+            BinaryPrimitives.WriteUInt32LittleEndian(Property.AsSpan(0, 4), VtBlob);
+            BinaryPrimitives.WriteUInt32LittleEndian(Property.AsSpan(4, 4), 1);
+            Encoded.Slice(0, Length).CopyTo(Property.AsSpan(8));
+            return Property;
+        }
+
+        private static int CountActiveEndpoints(BinaryEmulator Instance, string Direction)
+        {
             WinSysHelper Helper = Instance.WinHelper;
             string DirectionKey = MMDevicesKey + "\\" + Direction;
 
-            WinRegKey Root = Helper.ResolveRegistryKey(DirectionKey);
+            WinRegKey Root = Helper.ResolveNativeRegistryKey(DirectionKey);
             if (Root == null || !Helper.TryCollectRegistrySubKeyNames(Root, out List<string> Names))
                 return 0;
 
             int Count = 0;
             foreach (string Name in Names)
             {
-                if (!IsEndpointActive(Helper, DirectionKey + "\\" + Name))
-                    continue;
-
-                First ??= Name;
-                Count++;
-
-                if (StopAtFirst)
-                    break;
+                if (IsEndpointActive(Helper, DirectionKey + "\\" + Name))
+                    Count++;
             }
 
             return Count;
@@ -1488,7 +1552,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         private static bool IsEndpointActive(WinSysHelper Helper, string EndpointKey)
         {
-            return Helper.TryReadRegistryValue(EndpointKey, "DeviceState", out ValueNode State)
+            return Helper.TryReadNativeRegistryValue(EndpointKey, "DeviceState", out ValueNode State)
                 && State.Data != null
                 && State.Data.Length >= 4
                 && BinaryPrimitives.ReadUInt32LittleEndian(State.Data) == DeviceStateActive;

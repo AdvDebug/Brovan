@@ -31,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            if (!Instance.WinHelper.TryResolveRegistryObjectPath(ObjectAttributesPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, NTSTATUS.STATUS_INVALID_PARAMETER, NTSTATUS.STATUS_INVALID_PARAMETER, out string KeyPath, out NTSTATUS Status))
+            if (!Instance.WinHelper.TryResolveRegistryObjectPath(ObjectAttributesPtr, NTSTATUS.STATUS_ACCESS_VIOLATION, NTSTATUS.STATUS_INVALID_PARAMETER, NTSTATUS.STATUS_INVALID_PARAMETER, out string KeyPath, out string ParentPath, out NTSTATUS Status))
             {
                 return Status;
             }
@@ -45,14 +45,15 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             const uint RegOptionVolatile = 0x00000001;
 
+            bool Wow64View = Instance.WinHelper.OpensInWow64View(DesiredAccess, ParentPath);
             bool CreatedNew = false;
-            if (!Instance.WinHelper.RegistryKeyExists(KeyPath, out _, out _, out _)
-                && !Instance.WinHelper.CreateRegistryKeyPath(KeyPath, (CreateOptions & RegOptionVolatile) != 0, out CreatedNew))
+            if (!Instance.WinHelper.RegistryKeyExists(KeyPath, Wow64View, out _, out _, out _, out _)
+                && !Instance.WinHelper.CreateRegistryKeyPath(KeyPath, (CreateOptions & RegOptionVolatile) != 0, Wow64View, out CreatedNew))
             {
                 return NTSTATUS.STATUS_OBJECT_PATH_NOT_FOUND;
             }
 
-            WinHandle Handle = Instance.WinHelper.OpenRegistryKey(KeyPath, DesiredAccess);
+            WinHandle Handle = Instance.WinHelper.OpenRegistryKey(KeyPath, DesiredAccess, Wow64View);
             if (Handle == null || Handle.Handle == 0)
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 

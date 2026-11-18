@@ -30,12 +30,15 @@ namespace Brovan.Core.Helpers.WindowsImage
         private const string SysWow64Path = "Windows/SysWOW64";
         private const string ConfigPath = "Windows/System32/config";
 
-        // SystemRoot/owned lists the WindowsLibs folders an import wrote, for the next import to remove. A rule that
-        // adds files raises CurrentLayout, and imports from OldestServedLayout on still load.
+        // SystemRoot/owned lists the WindowsLibs folders an import wrote, for the next import to remove. A change to
+        // what an import writes raises CurrentLayout, and imports from OldestServedLayout on still load.
         private const string LayoutFileName = "layout";
         private const string OwnedListFileName = "owned";
-        private const int CurrentLayout = 1;
+        private const int CurrentLayout = 2;
         private const int OldestServedLayout = 1;
+
+        private const string RegistryStagingDirectory = RegistryDirectory + ".staging";
+        private const string RegistryAsideDirectory = RegistryDirectory + ".old";
 
         private enum Subdirectories
         {
@@ -61,6 +64,8 @@ namespace Brovan.Core.Helpers.WindowsImage
         private const string DefaultUserHive = "Users/Default/NTUSER.DAT";
 
         private static readonly string[] RegistryHives = { "SOFTWARE", "SYSTEM", "DEFAULT", "SAM", "SECURITY" };
+        private const string UserHiveName = "NTUSER.DAT";
+        private static readonly string[] ProducedHives = [.. RegistryHives, UserHiveName];
 
         private static readonly string[] VersionKeyFiles = { CompositionTableSet.KeyFile };
 
@@ -237,6 +242,8 @@ namespace Brovan.Core.Helpers.WindowsImage
             if (ImageIndex < 1)
                 ImageIndex = 1;
 
+            RecoverRegistrySwap(BaseDirectory);
+
             Report($"[*] {Reader.Compression} image, {Reader.ImageCount} edition(s), reading edition {ImageIndex}.");
 
             List<PendingFile> Files = new List<PendingFile>();
@@ -253,9 +260,9 @@ namespace Brovan.Core.Helpers.WindowsImage
                 }
 
                 foreach (string Hive in RegistryHives)
-                    CollectFile(Contents, ConfigPath + "/" + Hive, RegistryDirectory + "/" + Hive, Files, Report);
+                    CollectFile(Contents, ConfigPath + "/" + Hive, RegistryStagingDirectory + "/" + Hive, Files, Report);
 
-                CollectFile(Contents, DefaultUserHive, RegistryDirectory + "/NTUSER.DAT", Files, Report);
+                CollectFile(Contents, DefaultUserHive, RegistryStagingDirectory + "/" + UserHiveName, Files, Report);
             }
 
             ReplaceOwnedContent(BaseDirectory, OwnedDirectories(Files));
@@ -305,6 +312,8 @@ namespace Brovan.Core.Helpers.WindowsImage
 
             ExtractLoose(Reader, Loose, Targets, Tracker);
             ExtractPacked(Reader, Packed, Targets, Tracker);
+
+            CommitRegistry(BaseDirectory, Report);
 
             File.WriteAllText(Path.Combine(BaseDirectory, SystemRootDirectory, LayoutFileName), CurrentLayout.ToString(CultureInfo.InvariantCulture));
             Report($"[+] Imported {Files.Count} files ({Tracker.Bytes / (1024 * 1024)} MB).");
@@ -393,6 +402,86 @@ namespace Brovan.Core.Helpers.WindowsImage
 
             System.IO.Directory.CreateDirectory(Root);
             File.WriteAllLines(OwnedList, Owned);
+        }
+
+        // The hives go live as one directory, so a guest never loads a mix of old and new hives.
+        private static void CommitRegistry(string BaseDirectory, Action<string> Report)
+        {
+            (string Live, string Staging, string Aside) = RegistryDirectories(BaseDirectory);
+
+            try
+            {
+                CarryUnproducedFiles(Live, Staging);
+
+                if (!ImageSetupPass.Run(Staging, ProducedHives, Report))
+                    throw new IOException("The registry hives of the image could not be set up.");
+            }
+            catch
+            {
+                if (System.IO.Directory.Exists(Staging))
+                    System.IO.Directory.Delete(Staging, true);
+                throw;
+            }
+
+            if (System.IO.Directory.Exists(Live))
+                System.IO.Directory.Move(Live, Aside);
+
+            System.IO.Directory.Move(Staging, Live);
+
+            try
+            {
+                System.IO.Directory.Delete(Aside, true);
+            }
+            catch (Exception Error) when (Error is IOException || Error is UnauthorizedAccessException)
+            {
+                Report($"[-] The previous registry stays in {RegistryAsideDirectory} until the next import: {Error.Message}");
+            }
+        }
+
+        private static void CarryUnproducedFiles(string Live, string Staging)
+        {
+            if (!System.IO.Directory.Exists(Live))
+                return;
+
+            HashSet<string> Produced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string StagedFile in System.IO.Directory.GetFiles(Staging))
+                Produced.Add(Path.GetFileName(StagedFile));
+
+            foreach (string Existing in System.IO.Directory.GetFiles(Live))
+            {
+                string Name = Path.GetFileName(Existing);
+                if (Produced.Add(Name))
+                    File.Copy(Existing, Path.Combine(Staging, Name));
+            }
+        }
+
+        private static (string Live, string Staging, string Aside) RegistryDirectories(string BaseDirectory)
+        {
+            return (Path.Combine(BaseDirectory, RegistryDirectory),
+                Path.Combine(BaseDirectory, RegistryStagingDirectory),
+                Path.Combine(BaseDirectory, RegistryAsideDirectory));
+        }
+
+        private static void RecoverRegistrySwap(string BaseDirectory)
+        {
+            (string Live, string Staging, string Aside) = RegistryDirectories(BaseDirectory);
+
+            if (System.IO.Directory.Exists(Staging))
+                System.IO.Directory.Delete(Staging, true);
+
+            if (!System.IO.Directory.Exists(Aside))
+                return;
+
+            if (System.IO.Directory.Exists(Live))
+                System.IO.Directory.Delete(Aside, true);
+            else
+                System.IO.Directory.Move(Aside, Live);
+        }
+
+        public static bool IsRegistrySwapInterrupted(string BaseDirectory)
+        {
+            (string Live, _, string Aside) = RegistryDirectories(BaseDirectory);
+            return !System.IO.Directory.Exists(Live) && System.IO.Directory.Exists(Aside);
         }
 
         private static bool TryResolveOwnedDirectory(string BaseDirectory, string Line, out string Directory)
@@ -563,7 +652,19 @@ namespace Brovan.Core.Helpers.WindowsImage
 
         private static SafeFileHandle OpenTarget(string Target, long Length)
         {
-            return File.OpenHandle(Target, FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.None, Length);
+            try
+            {
+                return File.OpenHandle(Target, FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.None, Length);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                FileInfo Existing = new FileInfo(Target);
+                if (!Existing.Exists || !Existing.IsReadOnly)
+                    throw;
+
+                Existing.IsReadOnly = false;
+                return File.OpenHandle(Target, FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.None, Length);
+            }
         }
 
         /// <summary>

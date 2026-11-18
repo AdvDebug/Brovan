@@ -1750,9 +1750,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         /// <summary>
         /// Resolves a registry OBJECT_ATTRIBUTES value to a full NT registry path.
         /// </summary>
-        public bool TryResolveRegistryObjectPath(ulong ObjectAttributesPtr, NTSTATUS MemoryFailureStatus, NTSTATUS EmptyPathStatus, NTSTATUS InvalidRootStatus, out string KeyPath, out NTSTATUS Status)
+        public bool TryResolveRegistryObjectPath(ulong ObjectAttributesPtr, NTSTATUS MemoryFailureStatus, NTSTATUS EmptyPathStatus, NTSTATUS InvalidRootStatus,
+            out string KeyPath, out string ParentPath, out NTSTATUS Status)
         {
             KeyPath = string.Empty;
+            ParentPath = null;
             Status = NTSTATUS.STATUS_SUCCESS;
 
             if (ObjectAttributesPtr == 0)
@@ -1818,6 +1820,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (string.IsNullOrEmpty(KeyPath))
                 {
                     KeyPath = ParentKey.FullPath;
+                    ParentPath = KeyPath;
                     return true;
                 }
 
@@ -1827,7 +1830,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (!IsAbsoluteNtPath)
                 {
-                    string ParentPath = ParentKey.FullPath.TrimEnd('\\', '\0');
+                    ParentPath = ParentKey.FullPath.TrimEnd('\\', '\0');
                     string Relative = KeyPath.TrimStart('\\');
                     KeyPath = string.IsNullOrEmpty(Relative) ? ParentPath : ParentPath + "\\" + Relative;
                     ThroughAppHive = RegistryManager.IsAppHivePath(ParentPath);
@@ -9734,6 +9737,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             InitializeSyntheticWindowsVersionRegistryDefaults();
             Win32kDxgk.PublishDriverKey(this);
+            RPC.Ports.AudioSrvPortHandler.PublishEndpoints(this);
             Win32kDxgk.StartDisplayIdentity(this, Emulator);
             InitializeSyntheticKnownFolderDescriptions();
             InitializeSyntheticSteamRegistry();
@@ -9858,25 +9862,38 @@ namespace Brovan.Core.Emulation.OS.Windows
             SetSyntheticRegistryString(CurrentVersionKey, "InstallationType", 1, WindowsVersionInfo.InstallationType);
             SetSyntheticRegistryString(CurrentVersionKey, "DisplayVersion", 1, WindowsVersionInfo.DisplayVersion);
             SetSyntheticRegistryString(CurrentVersionKey, "ReleaseId", 1, WindowsVersionInfo.DisplayVersion);
-            SetSyntheticRegistryString(CurrentVersionKey, "CurrentVersion", 1, WindowsVersionInfo.CurrentVersion);
-            SetSyntheticRegistryString(CurrentVersionKey, "CurrentBuild", 1, WindowsVersionInfo.BuildNumber.ToString());
-            SetSyntheticRegistryString(CurrentVersionKey, "CurrentBuildNumber", 1, WindowsVersionInfo.BuildNumber.ToString());
-            SetSyntheticRegistryDword(CurrentVersionKey, "CurrentMajorVersionNumber", WindowsVersionInfo.MajorVersion);
-            SetSyntheticRegistryDword(CurrentVersionKey, "CurrentMinorVersionNumber", WindowsVersionInfo.MinorVersion);
-            SetSyntheticRegistryDword(CurrentVersionKey, "UBR", WindowsVersionInfo.UpdateBuildRevision);
-            SetSyntheticRegistryString(CurrentVersionKey, "BuildBranch", 1, WindowsVersionInfo.BuildBranch);
-            SetSyntheticRegistryString(CurrentVersionKey, "BuildLab", 1, WindowsVersionInfo.BuildLab);
-            SetSyntheticRegistryString(CurrentVersionKey, "BuildLabEx", 1, WindowsVersionInfo.BuildLabEx);
-            SetSyntheticRegistryString(CurrentVersionKey, "CurrentType", 1, "Multiprocessor Free");
+
+            SetKernelVersionData(CurrentVersionKey);
+            SetKernelVersionData("\\Registry\\Machine\\Software\\Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion");
 
             const string ProductOptionsKey = "\\Registry\\Machine\\System\\CurrentControlSet\\Control\\ProductOptions";
             AddSyntheticRegistryKey(ProductOptionsKey);
             SetSyntheticRegistryString(ProductOptionsKey, "ProductType", 1, WindowsVersionInfo.RegistryProductType);
         }
 
-        private void AddSyntheticRegistryKey(string NtPath)
+        // NT: CmpSetVersionData writes this set under both roots at every boot.
+        private void SetKernelVersionData(string CurrentVersionKey)
         {
-            CreateRegistryKeyPath(NtPath, false, out _);
+            string BuildNumber = WindowsVersionInfo.BuildNumber.ToString();
+            AddSyntheticRegistryKey(CurrentVersionKey, Native: true);
+            SetSyntheticRegistryString(CurrentVersionKey, "CurrentVersion", 1, WindowsVersionInfo.CurrentVersion, Native: true);
+            SetSyntheticRegistryDword(CurrentVersionKey, "CurrentMajorVersionNumber", WindowsVersionInfo.MajorVersion, Native: true);
+            SetSyntheticRegistryDword(CurrentVersionKey, "CurrentMinorVersionNumber", WindowsVersionInfo.MinorVersion, Native: true);
+            SetSyntheticRegistryString(CurrentVersionKey, "CurrentType", 1, "Multiprocessor Free", Native: true);
+            DeleteRegistryValue(CurrentVersionKey, "CSDVersion", Wow64View: false);
+            DeleteRegistryValue(CurrentVersionKey, "CSDBuildNumber", Wow64View: false);
+            SetSyntheticRegistryString(CurrentVersionKey, "CurrentBuild", 1, BuildNumber, Native: true);
+            SetSyntheticRegistryString(CurrentVersionKey, "CurrentBuildNumber", 1, BuildNumber, Native: true);
+            SetSyntheticRegistryDword(CurrentVersionKey, "UBR", WindowsVersionInfo.UpdateBuildRevision, Native: true);
+            SetSyntheticRegistryString(CurrentVersionKey, "BuildBranch", 1, WindowsVersionInfo.BuildBranch, Native: true);
+            SetSyntheticRegistryString(CurrentVersionKey, "BuildLab", 1, WindowsVersionInfo.BuildLab, Native: true);
+            SetSyntheticRegistryString(CurrentVersionKey, "BuildLabEx", 1, WindowsVersionInfo.BuildLabEx, Native: true);
+            SetSyntheticRegistryString(CurrentVersionKey, "SystemRoot", 1, WindowsVersionInfo.SystemRoot, Native: true);
+        }
+
+        private void AddSyntheticRegistryKey(string NtPath, bool Native = false)
+        {
+            CreateRegistryKeyPath(NtPath, false, !Native && Emulator.IsX86Guest, out _);
         }
 
         // Only the named key is volatile. A volatile parent would hold every stable key under it in memory.
@@ -9889,20 +9906,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             CreateRegistryKeyPath(NtPath, true, out _);
         }
 
-        private void SetSyntheticRegistryString(string NtPath, string ValueName, int Type, string Value)
+        private void SetSyntheticRegistryString(string NtPath, string ValueName, int Type, string Value, bool Native = false)
         {
-            SetSyntheticRegistryValue(NtPath, ValueName, Type, Encoding.Unicode.GetBytes((Value ?? string.Empty) + "\0"));
+            SetSyntheticRegistryValue(NtPath, ValueName, Type, Encoding.Unicode.GetBytes((Value ?? string.Empty) + "\0"), Native);
         }
 
-        private void SetSyntheticRegistryDword(string NtPath, string ValueName, uint Value)
+        private void SetSyntheticRegistryDword(string NtPath, string ValueName, uint Value, bool Native = false)
         {
-            SetSyntheticRegistryValue(NtPath, ValueName, 4, BitConverter.GetBytes(Value));
+            SetSyntheticRegistryValue(NtPath, ValueName, 4, BitConverter.GetBytes(Value), Native);
         }
 
         // Rewriting an unchanged value would churn the hive on every start.
-        private void SetSyntheticRegistryValue(string NtPath, string ValueName, int Type, byte[] Data)
+        private void SetSyntheticRegistryValue(string NtPath, string ValueName, int Type, byte[] Data, bool Native = false)
         {
-            AddSyntheticRegistryKey(NtPath);
+            bool Wow64View = !Native && Emulator.IsX86Guest;
+            AddSyntheticRegistryKey(NtPath, Native);
 
             NtPath = NormalizeNtRegistryPath(NtPath);
             if (string.IsNullOrEmpty(NtPath))
@@ -9911,12 +9929,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             ValueName ??= string.Empty;
             Data ??= Array.Empty<byte>();
 
-            if (TryReadRegistryValue(NtPath, ValueName, out ValueNode Existing)
+            if (TryReadRegistryValue(NtPath, ValueName, Wow64View, out ValueNode Existing)
                 && Existing.Type == Type
                 && (Existing.Data ?? Array.Empty<byte>()).AsSpan().SequenceEqual(Data))
                 return;
 
-            SetRegistryValue(NtPath, ValueName, Type, Data);
+            SetRegistryValue(NtPath, ValueName, Type, Data, Wow64View);
         }
 
         private void SetVolatileRegistryString(string NtPath, string ValueName, int Type, string Value)
@@ -10033,9 +10051,33 @@ namespace Brovan.Core.Emulation.OS.Windows
         // ResolvedPath is the spelling a write has to target, which the Wow64 redirect can change.
         public bool RegistryKeyExists(string NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly, out string ResolvedPath)
         {
+            return RegistryKeyExists(NtPath, Emulator.IsX86Guest, out Hive, out Key, out TempOnly, out ResolvedPath);
+        }
+
+        private const uint KeyWow64_64Key = 0x0100;
+        private const uint KeyWow64_32Key = 0x0200;
+
+        // NT: a relative name under a key that is already past the SOFTWARE redirection point keeps that key's view.
+        internal bool OpensInWow64View(AccessMask DesiredAccess, string ParentPath)
+        {
+            uint Access = (uint)DesiredAccess;
+            if ((Access & KeyWow64_64Key) != 0)
+                return false;
+
+            if ((Access & KeyWow64_32Key) != 0)
+                return true;
+
+            if (ParentPath != null && TryApplyWow64RegistryRedirect(NormalizeNtRegistryPath(ParentPath), out _))
+                return false;
+
+            return Emulator.IsX86Guest;
+        }
+
+        internal bool RegistryKeyExists(string NtPath, bool Wow64View, out Hive Hive, out RegistryHiveReader.HiveKey Key, out bool TempOnly, out string ResolvedPath)
+        {
             string Normalized = NormalizeNtRegistryPath(NtPath);
 
-            if (Emulator.IsX86Guest
+            if (Wow64View
                 && TryApplyWow64RegistryRedirect(Normalized, out string Redirected)
                 && RegistryKeyExistsExact(Redirected, out Hive, out Key, out TempOnly))
             {
@@ -10433,9 +10475,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool TryReadRegistryValue(string NtPath, string ValueName, out ValueNode Value)
         {
+            return TryReadRegistryValue(NtPath, ValueName, Emulator.IsX86Guest, out Value);
+        }
+
+        internal bool TryReadNativeRegistryValue(string NtPath, string ValueName, out ValueNode Value)
+        {
+            return TryReadRegistryValue(NtPath, ValueName, false, out Value);
+        }
+
+        private bool TryReadRegistryValue(string NtPath, string ValueName, bool Wow64View, out ValueNode Value)
+        {
             Value = null;
 
-            WinRegKey RegKey = ResolveRegistryKey(NtPath);
+            WinRegKey RegKey = ResolveRegistryKey(NtPath, Wow64View);
             return RegKey != null && TryGetRegistryValue(RegKey, ValueName, out Value);
         }
 
@@ -10525,8 +10577,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        // NT has no stable key under a volatile one.
         public bool CreateRegistryKeyPath(string NtPath, bool Volatile, out bool CreatedNew)
+        {
+            return CreateRegistryKeyPath(NtPath, Volatile, Emulator.IsX86Guest, out CreatedNew);
+        }
+
+        internal bool CreateNativeRegistryKeyPath(string NtPath, bool Volatile, out bool CreatedNew)
+        {
+            return CreateRegistryKeyPath(NtPath, Volatile, false, out CreatedNew);
+        }
+
+        // NT has no stable key under a volatile one.
+        internal bool CreateRegistryKeyPath(string NtPath, bool Volatile, bool Wow64View, out bool CreatedNew)
         {
             CreatedNew = false;
 
@@ -10534,7 +10596,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(NtPath))
                 return false;
 
-            if (RegistryKeyExists(NtPath, out Hive Existing, out _, out _, out string ResolvedPath))
+            if (RegistryKeyExists(NtPath, Wow64View, out Hive Existing, out _, out _, out string ResolvedPath))
             {
                 // A key on disk still needs its memory side, or a volatile write would reach the hive.
                 if (Volatile)
@@ -10547,7 +10609,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(ParentPath))
                 return false;
 
-            if (!CreateRegistryKeyPath(ParentPath, Volatile, out _))
+            if (!CreateRegistryKeyPath(ParentPath, Volatile, Wow64View, out _))
                 return false;
 
             Hive Hive = GetHiveByNtPath(NtPath);
@@ -10630,11 +10692,21 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool SetRegistryValue(string NtPath, string ValueName, int Type, byte[] Data)
         {
+            return SetRegistryValue(NtPath, ValueName, Type, Data, Emulator.IsX86Guest);
+        }
+
+        internal bool SetNativeRegistryValue(string NtPath, string ValueName, int Type, byte[] Data)
+        {
+            return SetRegistryValue(NtPath, ValueName, Type, Data, false);
+        }
+
+        private bool SetRegistryValue(string NtPath, string ValueName, int Type, byte[] Data, bool Wow64View)
+        {
             NtPath = NormalizeNtRegistryPath(NtPath);
             if (string.IsNullOrEmpty(NtPath))
                 return false;
 
-            if (!RegistryKeyExists(NtPath, out Hive Hive, out _, out _, out string ResolvedPath))
+            if (!RegistryKeyExists(NtPath, Wow64View, out Hive Hive, out _, out _, out string ResolvedPath))
                 return false;
 
             ValueName ??= string.Empty;
@@ -10682,11 +10754,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool DeleteRegistryValue(string NtPath, string ValueName)
         {
+            return DeleteRegistryValue(NtPath, ValueName, Emulator.IsX86Guest);
+        }
+
+        private bool DeleteRegistryValue(string NtPath, string ValueName, bool Wow64View)
+        {
             NtPath = NormalizeNtRegistryPath(NtPath);
             if (string.IsNullOrEmpty(NtPath))
                 return false;
 
-            if (!RegistryKeyExists(NtPath, out Hive Hive, out RegistryHiveReader.HiveKey Key, out _, out string ResolvedPath))
+            if (!RegistryKeyExists(NtPath, Wow64View, out Hive Hive, out RegistryHiveReader.HiveKey Key, out _, out string ResolvedPath))
                 return false;
 
             ValueName ??= string.Empty;
@@ -10815,7 +10892,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinHandle OpenRegistryKey(string NtPath, AccessMask Permissions)
         {
-            WinRegKey RegKey = ResolveRegistryKey(NtPath);
+            return OpenRegistryKey(NtPath, Permissions, Emulator.IsX86Guest);
+        }
+
+        internal WinHandle OpenRegistryKey(string NtPath, AccessMask Permissions, bool Wow64View)
+        {
+            WinRegKey RegKey = ResolveRegistryKey(NtPath, Wow64View);
             if (RegKey == null)
                 return null;
 

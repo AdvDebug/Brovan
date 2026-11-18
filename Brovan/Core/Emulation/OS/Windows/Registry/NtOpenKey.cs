@@ -22,6 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 NTSTATUS.STATUS_OBJECT_NAME_INVALID,
                 NTSTATUS.STATUS_INVALID_HANDLE,
                 out string KeyPath,
+                out string ParentPath,
                 out NTSTATUS Status))
             {
                 return Status;
@@ -30,7 +31,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtOpenKey Running with the KeyPath: {KeyPath}", LogFlags.Syscall);
 
-            WinHandle Handle = Instance.WinHelper.OpenRegistryKey(KeyPath, DesiredAccess);
+            WinHandle Handle = Instance.WinHelper.OpenRegistryKey(KeyPath, DesiredAccess, Instance.WinHelper.OpensInWow64View(DesiredAccess, ParentPath));
             if (Handle != null && Handle.Handle != 0)
             {
                 if (!Instance.WinHelper.WritePointer(HandlePtr, Handle.Handle))

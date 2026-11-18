@@ -431,7 +431,12 @@ namespace Brovan.Android
                 return StatusMissingWindowsLibs;
 
             if (!Directory.Exists(Path.Combine(AppContext.BaseDirectory, WindowsImageImporter.RegistryDirectory)))
+            {
+                if (WindowsImageImporter.IsRegistrySwapInterrupted(AppContext.BaseDirectory))
+                    Utils.LogError("[-] A Windows import stopped while it replaced the registry. Import Windows again to finish it.");
+
                 return StatusMissingRegistry;
+            }
 
             if (!File.Exists(BinaryEmulator.ApiSetMapPath) && !TryGenerateApiSetMap())
                 return StatusApiSetMapFailed;

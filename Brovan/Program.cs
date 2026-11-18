@@ -520,6 +520,12 @@ namespace Brovan
             }
 
             string RegPath = Path.Combine(AppContext.BaseDirectory, "WinReg");
+            if (WindowsImageImporter.IsRegistrySwapInterrupted(AppContext.BaseDirectory))
+            {
+                PrintFatal("[-] A Windows import stopped while it replaced the registry. Run Brovan with --install-windows again to finish it.");
+                return false;
+            }
+
             if (!Directory.Exists(RegPath))
             {
                 if (IsWindows)

@@ -113,8 +113,15 @@ namespace Brovan.Core.Helpers.WindowsImage
                 if (!WindowsImageImporter.TryWriteApiSetMap(BaseDirectory, Report))
                     Report("[!] The image had no apisetschema.dll; keeping the existing API set map.");
 
-                using HttpClient Client = CreateClient();
-                VisualCppRuntimeImporter.Import(BaseDirectory, Client, Report, Progress);
+                if (VisualCppRuntimeImporter.IsInstalled(BaseDirectory))
+                {
+                    Report("[*] The Visual C++ runtimes are already installed. Update them on their own to get a newer version.");
+                }
+                else
+                {
+                    using HttpClient Client = CreateClient();
+                    VisualCppRuntimeImporter.Import(BaseDirectory, Client, Report, Progress);
+                }
 
                 return true;
             }

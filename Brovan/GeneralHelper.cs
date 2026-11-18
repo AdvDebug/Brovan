@@ -1544,7 +1544,7 @@ namespace Brovan
                 if (Problem != null && !SystemRootReported)
                 {
                     SystemRootReported = true;
-                    Utils.LogError($"[IO] The imported Windows files {Problem}. Import Windows again for file dialogs and other parts that read C:\\Windows.");
+                    Utils.LogError($"[IO] The imported Windows files {Problem}. Import Windows again to update the registry, file dialogs and other parts that read C:\\Windows.");
                 }
 
                 ForgetChangedShippedDirectories();
