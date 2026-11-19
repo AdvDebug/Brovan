@@ -36,10 +36,7 @@ namespace Brovan.Core.Emulation
         private UCErrors _error;
         private readonly List<MappedRegion> _mappedRegions = new List<MappedRegion>();
         private readonly List<IntPtr> _pendingFrees = new List<IntPtr>();
-        private readonly Dictionary<IntPtr, nuint> _bufferSizes = new Dictionary<IntPtr, nuint>();
-        private readonly HashSet<IntPtr> _heldBuffers = new HashSet<IntPtr>();
-        private readonly Dictionary<IntPtr, IDisposable> _bufferOwners = new Dictionary<IntPtr, IDisposable>();
-        private readonly Dictionary<IntPtr, int> _pinnedBuffers = new Dictionary<IntPtr, int>();
+        private readonly Dictionary<IntPtr, BackingBlock> _blocks = new Dictionary<IntPtr, BackingBlock>();
         private readonly HostDiscardRuns _discardRuns = new HostDiscardRuns();
         private ulong _pendingFreeBytes;
         private readonly List<MappedRegion> _unmapSurvivors = new List<MappedRegion>();
@@ -103,6 +100,13 @@ namespace Brovan.Core.Emulation
 
             if (_error != UCErrors.UC_ERR_OK)
                 throw new UnicornException($"Couldn't open a unicorn instance (error {_error})");
+
+            if (!UsesBackingFile && brov_backing_open(MemoryBudget.GuestBackingFileBytes, MemoryBudget.WindowMappings,
+                    MemoryBudget.WindowSites, MemoryBudget.WindowNarrowedPages) == UCErrors.UC_ERR_OK)
+            {
+                UsesBackingFile = true;
+                brov_window_attach();
+            }
 
             this.mode = mode;
         }
@@ -196,8 +200,7 @@ namespace Brovan.Core.Emulation
                     return IntPtr.Zero;
                 }
 
-                _bufferSizes[(IntPtr)ptr] = (nuint)size;
-                _heldBuffers.Add((IntPtr)ptr);
+                _blocks[(IntPtr)ptr] = new BackingBlock { Size = size, Held = true };
                 _error = UCErrors.UC_ERR_OK;
                 return (IntPtr)ptr;
             }
@@ -210,15 +213,13 @@ namespace Brovan.Core.Emulation
                 if (DisposedCheck())
                     return IntPtr.Zero;
 
-                if (hostPointer == IntPtr.Zero || owner == null || size == 0 || _bufferSizes.ContainsKey(hostPointer) || FindBufferBase(hostPointer) != IntPtr.Zero)
+                if (hostPointer == IntPtr.Zero || owner == null || size == 0 || _blocks.ContainsKey(hostPointer) || FindBufferBase(hostPointer) != IntPtr.Zero)
                 {
                     _error = UCErrors.UC_ERR_ARG;
                     return IntPtr.Zero;
                 }
 
-                _bufferSizes[hostPointer] = (nuint)size;
-                _bufferOwners[hostPointer] = owner;
-                _heldBuffers.Add(hostPointer);
+                _blocks[hostPointer] = new BackingBlock { Size = size, Owner = owner, Held = true };
                 _error = UCErrors.UC_ERR_OK;
                 return hostPointer;
             }
@@ -228,15 +229,30 @@ namespace Brovan.Core.Emulation
         {
             lock (_mapsLock)
             {
-                if (DisposedCheck() || !_heldBuffers.Remove(storage))
+                if (DisposedCheck() || !_blocks.TryGetValue(storage, out BackingBlock Block) || !Block.Held)
                     return;
 
+                Block.Held = false;
                 FreeIfUnmapped(storage);
             }
         }
 
+        private static volatile bool UsesBackingFile;
+
+        private static int _backingFileFull;
+
         private static unsafe byte* AllocateBacking(nuint size)
         {
+            if (UsesBackingFile)
+            {
+                IntPtr FromFile = brov_backing_alloc(size);
+                if (FromFile != IntPtr.Zero)
+                    return (byte*)FromFile;
+
+                if (Interlocked.Exchange(ref _backingFileFull, 1) == 0)
+                    Utils.LogError($"[Unicorn] The guest backing file has no room for 0x{(ulong)size:X} bytes; such blocks get their own host memory.");
+            }
+
             if (GeneralHelper.IsWindows)
                 return (byte*)VirtualAlloc(IntPtr.Zero, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
@@ -246,14 +262,23 @@ namespace Brovan.Core.Emulation
 
         private static unsafe void FreeBacking(byte* pointer, nuint size)
         {
+            if (UsesBackingFile && brov_backing_free((IntPtr)pointer, size))
+                return;
+
             if (GeneralHelper.IsWindows)
                 VirtualFree((IntPtr)pointer, UIntPtr.Zero, MEM_RELEASE);
             else
                 Munmap((IntPtr)pointer, size);
         }
 
+        private static void DiscardBacking(IntPtr start, ulong size)
+        {
+            if (!UsesBackingFile || !brov_backing_discard(start, size))
+                HostDiscard.Release(start, size);
+        }
+
         private bool IsDiscardable(IntPtr Buffer)
-            => !HostDiscard.Disabled && !_pinnedBuffers.ContainsKey(Buffer) && !_bufferOwners.ContainsKey(Buffer) && !_heldBuffers.Contains(Buffer);
+            => _blocks.TryGetValue(Buffer, out BackingBlock Block) && Block.IsDiscardable;
 
         public IntPtr PinBacking(IntPtr hostPointer, ulong size)
         {
@@ -263,11 +288,11 @@ namespace Brovan.Core.Emulation
                     return IntPtr.Zero;
 
                 IntPtr Buffer = FindBufferBase(hostPointer);
-                if (Buffer == IntPtr.Zero || size == 0 || !_bufferSizes.TryGetValue(Buffer, out nuint BufferSize)
-                    || size > (ulong)BufferSize - (ulong)(hostPointer.ToInt64() - Buffer.ToInt64()))
+                if (Buffer == IntPtr.Zero || size == 0 || !_blocks.TryGetValue(Buffer, out BackingBlock Block)
+                    || size > Block.Size - (ulong)(hostPointer.ToInt64() - Buffer.ToInt64()))
                     return IntPtr.Zero;
 
-                CollectionsMarshal.GetValueRefOrAddDefault(_pinnedBuffers, Buffer, out _)++;
+                Block.Pins++;
                 return Buffer;
             }
         }
@@ -279,25 +304,25 @@ namespace Brovan.Core.Emulation
                 if (DisposedCheck())
                     return;
 
-                ref int Pins = ref CollectionsMarshal.GetValueRefOrNullRef(_pinnedBuffers, pin);
-                if (Unsafe.IsNullRef(ref Pins) || --Pins > 0)
+                if (!_blocks.TryGetValue(pin, out BackingBlock Block) || Block.Pins == 0 || --Block.Pins > 0)
                     return;
 
-                _pinnedBuffers.Remove(pin);
                 FreeIfUnmapped(pin);
             }
         }
 
-        private unsafe void ReleaseBacking(IntPtr buffer)
+        private void ReleaseBacking(IntPtr buffer)
         {
-            if (!_bufferSizes.TryGetValue(buffer, out nuint Size))
-                return;
+            if (_blocks.Remove(buffer, out BackingBlock Block))
+                FreeBlock(buffer, Block);
+        }
 
-            _bufferSizes.Remove(buffer);
-            if (_bufferOwners.Remove(buffer, out IDisposable Owner))
-                Owner.Dispose();
+        private static unsafe void FreeBlock(IntPtr buffer, BackingBlock Block)
+        {
+            if (Block.Owner != null)
+                Block.Owner.Dispose();
             else
-                FreeBacking((byte*)buffer, Size);
+                FreeBacking((byte*)buffer, (nuint)Block.Size);
         }
 
         public unsafe bool MapMemory(ulong address, ulong size, MemoryProtection protection)
@@ -314,7 +339,7 @@ namespace Brovan.Core.Emulation
                     _error = uc_mem_map_ptr(_uc, address, new UIntPtr(size), protection, (IntPtr)ptr);
                     if (_error == UCErrors.UC_ERR_OK)
                     {
-                        _bufferSizes[(IntPtr)ptr] = nativeSize;
+                        _blocks[(IntPtr)ptr] = new BackingBlock { Size = size };
                         InsertMappedRegion(new MappedRegion { Address = address, Size = size, Ptr = (IntPtr)ptr, BufferBase = (IntPtr)ptr });
                         return true;
                     }
@@ -366,11 +391,11 @@ namespace Brovan.Core.Emulation
                     return Region.BufferBase;
             }
 
-            foreach (IntPtr Held in _heldBuffers)
+            foreach (KeyValuePair<IntPtr, BackingBlock> Entry in _blocks)
             {
-                byte* Start = (byte*)Held;
-                if (_bufferSizes.TryGetValue(Held, out nuint Size) && Target >= Start && Target < Start + Size)
-                    return Held;
+                byte* Start = (byte*)Entry.Key;
+                if (Entry.Value.Held && Target >= Start && Target < Start + Entry.Value.Size)
+                    return Entry.Key;
             }
 
             return IntPtr.Zero;
@@ -462,12 +487,11 @@ namespace Brovan.Core.Emulation
 
         private void FreeIfUnmapped(IntPtr Buffer)
         {
-            if (_heldBuffers.Contains(Buffer) || _pinnedBuffers.ContainsKey(Buffer) || IsBufferMapped(Buffer))
+            if (!_blocks.TryGetValue(Buffer, out BackingBlock Block) || Block.IsHeldOrPinned || IsBufferMapped(Buffer))
                 return;
 
             _pendingFrees.Add(Buffer);
-            if (_bufferSizes.TryGetValue(Buffer, out nuint Bytes))
-                AddPendingBytes(Bytes);
+            AddPendingBytes(Block.Size);
         }
 
         // Frees and discards wait for the end of the slice, and the memory stays resident until then.
@@ -1592,8 +1616,30 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        private static readonly bool ReportDirectWindow = Environment.GetEnvironmentVariable("BROVAN_DIRECT_MEM_STATS") == "1";
+        private static int _directWindowCloseReported;
+
+        private static unsafe void ReportDirectWindowState(bool Counters)
+        {
+            if (!UsesBackingFile)
+                return;
+
+            ulong* Counts = stackalloc ulong[5];
+            if (brov_window_stats(Counts, out IntPtr CloseReason) != UCErrors.UC_ERR_OK)
+                return;
+
+            if (CloseReason != IntPtr.Zero && Interlocked.Exchange(ref _directWindowCloseReported, 1) == 0)
+                Utils.LogError($"[Unicorn] The direct memory window closed: {Marshal.PtrToStringAnsi(CloseReason)}. Guest memory goes through the TLB from here on.");
+
+            if (Counters)
+                Utils.LogError($"[Unicorn] Direct memory window: views {Counts[0]}, narrowed {Counts[1]}, widened {Counts[2]}, site faults {Counts[3]}, patched sites {Counts[4]}.");
+        }
+
         private unsafe void FlushPendingFrees()
         {
+            if (Volatile.Read(ref _directWindowCloseReported) == 0)
+                ReportDirectWindowState(false);
+
             lock (_mapsLock)
             {
                 if (_pendingFrees.Count == 0 && _discardRuns.Count == 0)
@@ -1607,8 +1653,8 @@ namespace Brovan.Core.Emulation
                 for (int i = 0; i < _discardRuns.Count; i++)
                 {
                     HostDiscardRuns.Run Run = _discardRuns[i];
-                    if (_bufferSizes.ContainsKey(Run.Key) && IsDiscardable(Run.Key))
-                        HostDiscard.Release(Run.Start, Run.Size);
+                    if (IsDiscardable(Run.Key))
+                        DiscardBacking(Run.Start, Run.Size);
                 }
 
                 _discardRuns.Clear();
@@ -2239,41 +2285,22 @@ namespace Brovan.Core.Emulation
                             lock (_hooksLock) { HooksList.Remove(hook); }
                         }
 
+                        if (ReportDirectWindow)
+                            ReportDirectWindowState(true);
+
                         try { uc_close(_uc); } catch { }
                         _uc = IntPtr.Zero;
 
                         lock (_mapsLock)
                         {
-                            unsafe
-                            {
-                                _unmapReleasedBuffers.Clear();
-                                foreach (var region in _mappedRegions)
-                                {
-                                    if (region.BufferBase != IntPtr.Zero && !_unmapReleasedBuffers.Contains(region.BufferBase))
-                                        _unmapReleasedBuffers.Add(region.BufferBase);
-                                }
-                                foreach (IntPtr buffer in _unmapReleasedBuffers)
-                                    ReleaseBacking(buffer);
-                                _unmapReleasedBuffers.Clear();
-                                _unmapSurvivors.Clear();
-                                _mappedRegions.Clear();
-                                InvalidateRegionIndex();
-
-                                foreach (IntPtr ptr in _pendingFrees)
-                                    ReleaseBacking(ptr);
-
-                                foreach (IntPtr ptr in _heldBuffers)
-                                    ReleaseBacking(ptr);
-
-                                foreach (IntPtr ptr in _pinnedBuffers.Keys)
-                                    ReleaseBacking(ptr);
-                            }
-                            _heldBuffers.Clear();
+                            foreach (KeyValuePair<IntPtr, BackingBlock> Entry in _blocks)
+                                FreeBlock(Entry.Key, Entry.Value);
+                            _blocks.Clear();
+                            _mappedRegions.Clear();
+                            InvalidateRegionIndex();
                             _pendingFrees.Clear();
                             _discardRuns.Clear();
-                            _pinnedBuffers.Clear();
                             _pendingFreeBytes = 0;
-                            _bufferSizes.Clear();
                         }
                         lock (_hooksLock) { HooksList.Clear(); }
                     }

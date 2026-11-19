@@ -234,6 +234,26 @@ namespace Brovan.Core.Emulation
         public static extern UCErrors brov_budget_ptr(IntPtr uc, out IntPtr ptr);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_backing_open(ulong size, uint windowMappings, uint windowSites, uint windowNarrowedPages);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern UCErrors brov_window_attach();
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern unsafe UCErrors brov_window_stats(ulong* counts, out IntPtr closeReason);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr brov_backing_alloc(ulong size);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool brov_backing_free(IntPtr ptr, ulong size);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
+        [return: MarshalAs(UnmanagedType.I1)]
+        public static extern bool brov_backing_discard(IntPtr ptr, ulong size);
+
+        [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]
         public static extern UCErrors brov_mem_alias_add(IntPtr uc, ulong address, ulong size, IntPtr host);
 
         [DllImport("unicorn", CallingConvention = CallingConvention.Cdecl)]

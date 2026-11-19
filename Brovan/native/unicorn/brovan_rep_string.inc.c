@@ -19,6 +19,22 @@ static size_t brov_rep_run_bytes(target_ulong first, target_ulong second,
     return (size_t)(bytes & ~(((target_ulong)1 << shift) - 1));
 }
 
+/* Promotes a clean RAM page, because a direct guest store does not go through the TLB and never promotes it. */
+static uint8_t *brov_rep_store_host(CPUX86State *env, target_ulong addr, size_t bytes, int mmu_idx, uintptr_t ra)
+{
+    uint8_t *host = tlb_vaddr_to_host(env, addr, MMU_DATA_STORE, mmu_idx);
+    target_ulong tlb_addr;
+
+    if (host) {
+        return host;
+    }
+    tlb_addr = tlb_addr_write(tlb_entry(env, mmu_idx, addr));
+    if (!tlb_hit(env->uc, tlb_addr, addr) || (tlb_addr & TLB_FLAGS_MASK) != TLB_NOTDIRTY) {
+        return NULL;
+    }
+    return probe_access(env, addr, (int)bytes, MMU_DATA_STORE, mmu_idx, ra);
+}
+
 static void brov_rep_charge(CPUX86State *env, size_t bytes)
 {
     CPUState *cs = env_cpu(env);
@@ -52,7 +68,7 @@ void helper_brov_rep_movs(CPUX86State *env, uint32_t shift, uint32_t wide)
     if (!host_src) {
         return;
     }
-    host_dst = tlb_vaddr_to_host(env, dst, MMU_DATA_STORE, mmu_idx);
+    host_dst = brov_rep_store_host(env, dst, bytes, mmu_idx, GETPC());
     if (!host_dst) {
         return;
     }
@@ -94,7 +110,7 @@ void helper_brov_rep_stos(CPUX86State *env, uint32_t shift, uint32_t wide)
         return;
     }
 
-    host_dst = tlb_vaddr_to_host(env, dst, MMU_DATA_STORE, cpu_mmu_index(env, false));
+    host_dst = brov_rep_store_host(env, dst, bytes, cpu_mmu_index(env, false), GETPC());
     if (!host_dst) {
         return;
     }

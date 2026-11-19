@@ -11,12 +11,40 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define BROV_ABI_VERSION 3u
+#define BROV_ABI_VERSION 4u
 #define BROV_BLOB_MAGIC 0x4356524Bu /* "KRVC" */
+
+/* The guest backing file exists only on a host whose TCG backend emits direct guest memory accesses. */
+#ifndef BROV_HOST_HAS_DIRECT_EMITTER
+#if defined(__aarch64__) && defined(__linux__)
+#define BROV_HOST_HAS_DIRECT_EMITTER 1
+#else
+#define BROV_HOST_HAS_DIRECT_EMITTER 0
+#endif
+#endif
+
+struct uc_struct;
+void brov_window_view(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host, uint32_t perms);
+void brov_window_unview(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host);
+void brov_window_protect(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host, uint64_t ram,
+                         uint32_t perms, bool was_exec);
+void brov_window_narrow(struct uc_struct *uc, uint64_t guest, void *host);
+void brov_window_widen(struct uc_struct *uc, uint64_t guest, void *host, uint32_t perms);
+uint64_t brov_window_emit_mask(void);
+void brov_window_bind(struct uc_struct *uc);
+void brov_window_note_site(void);
+bool brov_window_code_has_sites(void);
+bool brov_window_reserved(void);
+void brov_window_forget_sites(void);
+bool brov_window_checking(void);
+void brov_window_check_store(struct uc_struct *uc, uint64_t guest, void *host, uint32_t perms);
 
 /* Blocks translated in budget mode carry a decrement the others do not, so a
  * blob is only interchangeable with a run in the same mode. */
 #define BROV_BLOB_FLAG_BUDGET 0x1u
+
+/* Blocks translated with the direct memory window hold its mask and need the window to run. */
+#define BROV_BLOB_FLAG_DIRECT 0x2u
 
 /* A guest spinning on pause makes no progress until another thread runs, so a
  * pause is charged against the slice budget, like PAUSE-loop exiting on a
@@ -63,6 +91,7 @@ typedef enum brov_reason {
     BROV_REASON_BLOATED,
     BROV_REASON_SLOT_UNRESOLVED,
     BROV_REASON_BUDGET,
+    BROV_REASON_DIRECT,
     BROV_REASON_MAX
 } brov_reason;
 
@@ -209,6 +238,7 @@ struct brov_ops {
     void (*set_budget)(struct uc_struct *uc, int32_t budget);
     int32_t *(*budget_ptr)(struct uc_struct *uc);
     bool (*page_has_tbs)(struct uc_struct *uc, uint64_t ram_addr);
+    void (*set_window_base)(struct uc_struct *uc, uint64_t base);
     void (*release)(struct uc_struct *uc);
 };
 

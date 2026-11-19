@@ -133,6 +133,17 @@ namespace Brovan.Core.Settings
         // Live WHP backing windows of one process. Each reserves 16 MiB of host addresses.
         public static int BackingWindows { get; private set; }
 
+        // Host addresses of the Unicorn guest backing file. A block that does not fit gets its own host memory.
+        public static ulong GuestBackingFileBytes { get; private set; }
+
+        // Host mappings of the whole process past which the Unicorn direct memory window closes, kept well under the
+        // host's per-process limit (65530 by default on Linux), which the managed runtime shares.
+        public static uint WindowMappings { get; private set; }
+
+        // Direct memory sites whose faults are counted, and window pages narrowed for translated code, of one process.
+        public static uint WindowSites { get; private set; }
+        public static uint WindowNarrowedPages { get; private set; }
+
         // Host windows of one process. Windows has no limit, because a recreated window loses its activation state.
         public static int HostTopLevels { get; private set; }
 
@@ -197,6 +208,10 @@ namespace Brovan.Core.Settings
             ActivationContextAssemblies = (int)Pick(Off: 64, Minimal: 64, Medium: 48, High: 32, Aggressive: 16);
             ActivationContextBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 128));
             BackingWindows = (int)Pick(Off: 524288, Minimal: 262144, Medium: 131072, High: 65536, Aggressive: 32768);
+            GuestBackingFileBytes = Megabytes(Pick(Off: 65536, Minimal: 65536, Medium: 32768, High: 32768, Aggressive: 16384));
+            WindowMappings = (uint)Pick(Off: 32768, Minimal: 32768, Medium: 24576, High: 16384, Aggressive: 16384);
+            WindowSites = (uint)Pick(Off: 16384, Minimal: 16384, Medium: 8192, High: 4096, Aggressive: 4096);
+            WindowNarrowedPages = (uint)Pick(Off: 65536, Minimal: 65536, Medium: 32768, High: 16384, Aggressive: 16384);
             HostTopLevels = GeneralHelper.IsWindows ? int.MaxValue : (int)Pick(Off: 4096, Minimal: 2048, Medium: 512, High: 256, Aggressive: 128);
             AlpcRemoteConnections = (int)Pick(Off: 1024, Minimal: 768, Medium: 512, High: 256, Aggressive: 128);
             AlpcChannelRingBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 256));

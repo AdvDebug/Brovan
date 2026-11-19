@@ -17,6 +17,10 @@
     <UnicornPatchFile Include="$(UnicornPatchDir)patches.manifest" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_uc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_uc_api.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_backing_file.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_direct_window.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_direct_arm64.inc.c" />
+    <UnicornPatchFile Include="$(UnicornPatchDir)brovan_direct_site_arm64.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_uc_tcg_decls.inc.h" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_uc_tcg.inc.c" />
     <UnicornPatchFile Include="$(UnicornPatchDir)brovan_tcg_slots.inc.c" />

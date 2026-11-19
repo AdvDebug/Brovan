@@ -651,7 +651,7 @@ static int brov_save_impl(struct uc_struct *uc, void **blob_out, size_t *len_out
     hdr.magic = BROV_BLOB_MAGIC;
     hdr.abi = BROV_ABI_VERSION;
     hdr.header_bytes = (uint32_t)sizeof(hdr);
-    hdr.flags = uc->brov_budget_mode ? BROV_BLOB_FLAG_BUDGET : 0u;
+    hdr.flags = (uc->brov_budget_mode ? BROV_BLOB_FLAG_BUDGET : 0u) | (brov_window_code_has_sites() ? BROV_BLOB_FLAG_DIRECT : 0u);
     hdr.layout_fingerprint = brov_layout_fingerprint();
     hdr.host_fingerprint = brov_host_fingerprint(uc);
     hdr.target_arch = (uint32_t)uc->arch;
@@ -854,6 +854,10 @@ static int brov_load_impl(struct uc_struct *uc, const void *blob, size_t len)
         }
     }
 
+    if ((hdr->flags & BROV_BLOB_FLAG_DIRECT) != 0 && !brov_window_reserved()) {
+        reason = BROV_REASON_DIRECT;
+        goto reject;
+    }
     if (((hdr->flags & BROV_BLOB_FLAG_BUDGET) != 0) != (uc->brov_budget_mode != 0)) {
         reason = BROV_REASON_BUDGET;
         goto reject;
@@ -1025,6 +1029,9 @@ static int brov_load_impl(struct uc_struct *uc, const void *blob, size_t len)
     s->brov_load_count++;
     s->brov_loaded_tbs = live;
     s->brov_stale_tbs = stale;
+    if ((hdr->flags & BROV_BLOB_FLAG_DIRECT) != 0) {
+        brov_window_note_site();
+    }
     uc->brov_last_reason = BROV_OK;
     return UC_ERR_OK;
 
@@ -1263,6 +1270,11 @@ static void brov_set_budget_impl(struct uc_struct *uc, int32_t budget)
     cpu_neg(uc->cpu)->brov_insn_budget = budget;
 }
 
+static void brov_set_window_base_impl(struct uc_struct *uc, uint64_t base)
+{
+    cpu_neg(uc->cpu)->brov_window_base = base;
+}
+
 static int32_t *brov_budget_ptr_impl(struct uc_struct *uc)
 {
     return &cpu_neg(uc->cpu)->brov_insn_budget;
@@ -1297,6 +1309,7 @@ static void brov_install(struct uc_struct *uc)
     uc->brov.set_budget = brov_set_budget_impl;
     uc->brov.budget_ptr = brov_budget_ptr_impl;
     uc->brov.page_has_tbs = brov_page_has_tbs_impl;
+    uc->brov.set_window_base = brov_set_window_base_impl;
     uc->brov.release = brov_release_impl;
 
     /* Starts on so that the first uc_emu_start() does not have to flush the

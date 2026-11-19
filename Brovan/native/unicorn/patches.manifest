@@ -28,6 +28,10 @@ validated|2.1.4
 
 copy|brovan_uc.h|include/brovan_uc.h
 copy|brovan_uc_api.inc.c|include/brovan_uc_api.inc.c
+copy|brovan_backing_file.inc.c|include/brovan_backing_file.inc.c
+copy|brovan_direct_window.inc.c|include/brovan_direct_window.inc.c
+copy|brovan_direct_arm64.inc.c|include/brovan_direct_arm64.inc.c
+copy|brovan_direct_site_arm64.inc.h|include/brovan_direct_site_arm64.inc.h
 copy|brovan_uc_tcg_decls.inc.h|include/brovan_uc_tcg_decls.inc.h
 copy|brovan_uc_tcg.inc.c|include/brovan_uc_tcg.inc.c
 copy|brovan_tcg_slots.inc.c|include/brovan_tcg_slots.inc.c
@@ -66,6 +70,8 @@ replace-all|uc.c|g_free(uc->tcg_ctx);|brov_free_arena(uc->tcg_ctx);
 insert-before|uc.c|memset(uc, 0, sizeof(*uc));|    brov_release_uc(uc);
 insert-before|qemu/unicorn_common.h|/* clean up tcg_ctx->code_gen_buffer. */|    if (s->uc->brov.release) { s->uc->brov.release(s->uc); }
 append|uc.c|#include "brovan_uc_api.inc.c"
+append|uc.c|#include "brovan_backing_file.inc.c"
+append|uc.c|#include "brovan_direct_window.inc.c"
 
 # --- code buffer, slot table, ops install -----------------------------------
 insert-after|qemu/accel/tcg/translate-all.c|#include "uc_priv.h"|#include "brovan_uc_tcg_decls.inc.h"
@@ -83,6 +89,7 @@ replace-all|qemu/include/exec/gen-icount.h|tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_
 
 # --- instruction budget: a per-block decrement instead of a code hook --------
 insert-after|qemu/include/exec/cpu-defs.h|IcountDecr icount_decr;|    int32_t brov_insn_budget;
+insert-after|qemu/include/exec/cpu-defs.h|int32_t brov_insn_budget;|    uint64_t brov_window_base;
 insert-after|qemu/accel/tcg/tcg-runtime.c|#include <uc_priv.h>|#include "brovan_tcg_budget.inc.h"
 insert-in-body|qemu/accel/tcg/tcg-runtime.c|void *HELPER(lookup_tb_ptr)(CPUArchState *env)|    { void *brov_p; if (brov_lookup_tb_ptr(env, &brov_p)) { return brov_p; } }
 insert-after|qemu/accel/tcg/tcg-runtime.c|void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {|    brov_budget_expired((struct uc_struct *)p);
@@ -239,6 +246,14 @@ replace-all|qemu/softmmu/memory.c|address_space_dispatch_compact(fv->dispatch);|
 # --- a readonly flip changes its range and dispatch section in place --------
 insert-after|qemu/softmmu/memory.c|static bool brov_render_flat(FlatView *view, MemoryRegion *root);|static bool brov_set_readonly_in_place(MemoryRegion *mr, bool readonly);
 insert-in-body|qemu/softmmu/memory.c|void memory_region_set_readonly(MemoryRegion *mr, bool readonly)|    if (brov_set_readonly_in_place(mr, readonly)) { return; }
+insert-in-body|qemu/softmmu/memory.c|void memory_region_set_readonly(MemoryRegion *mr, bool readonly)|    if (mr->uc->brov_protect_batch && mr->ram_block) { brov_window_protect(mr->uc, mr->addr, int128_get64(mr->size), memory_region_get_ram_ptr(mr), memory_region_get_ram_addr(mr), mr->perms, mr->brov_was_exec); }
+replace-all|qemu/softmmu/memory.c|    memory_region_add_subregion(uc->system_memory, begin, ram);|    memory_region_add_subregion(uc->system_memory, begin, ram); brov_window_view(uc, begin, size, ptr, perms);
+insert-in-body|qemu/softmmu/memory.c|void memory_unmap(struct uc_struct *uc, MemoryRegion *mr)|    if (mr->ram_block) { brov_window_unview(uc, mr->addr, int128_get64(mr->size), memory_region_get_ram_ptr(mr)); }
+insert-after|qemu/softmmu/memory.c|subregion->enabled = false;|        if (subregion->ram_block) { brov_window_unview(uc, subregion->addr, int128_get64(subregion->size), memory_region_get_ram_ptr(subregion)); }
+insert-after|uc.c|res = mem_map(uc, uc->memory_map_ptr(uc, address, size, perms, ptr));|    if (res != UC_ERR_OK) { brov_window_unview(uc, address, size, ptr); }
+insert-after|qemu/include/exec/memory.h|uint32_t perms;|    bool brov_was_exec;
+insert-after|qemu/softmmu/memory.c|ram->perms = perms;|    ram->brov_was_exec = (perms & UC_PROT_EXEC) != 0;
+insert-after|uc.c|mr->perms = perms;|            if ((perms & UC_PROT_EXEC) != 0) { mr->brov_was_exec = true; }
 replace-all|uc.c|uc->readonly_mem(mr, (perms & UC_PROT_WRITE) == 0);|uc->brov_protect_batch = true; uc->readonly_mem(mr, (perms & UC_PROT_WRITE) == 0); uc->brov_protect_batch = false;
 insert-after|uc.c|if (mr->perms != perms && !split_region(uc, mr, addr, len, false)) {|                uc->tcg_flush_tlb(uc); /* brov: readonly flips before a failed split deferred their flush */
 insert-after|uc.c|if (!split_mmio_region(uc, mr, addr, len, false)) {|                uc->tcg_flush_tlb(uc); /* brov: readonly flips before a failed mmio split deferred their flush */
@@ -405,3 +420,14 @@ insert-before|qemu/tcg/optimize.c|if (opc == INDEX_op_call) {|        if (opc ==
 # These two write XMM registers in env.
 replace-all|qemu/target/i386/helper.h|DEF_HELPER_FLAGS_2(fxrstor, TCG_CALL_NO_WG, void, env, tl)|DEF_HELPER_FLAGS_2(fxrstor, 0, void, env, tl)
 replace-all|qemu/target/i386/helper.h|DEF_HELPER_FLAGS_3(xrstor, TCG_CALL_NO_WG, void, env, tl, i64)|DEF_HELPER_FLAGS_3(xrstor, 0, void, env, tl, i64)
+
+# Direct guest memory accesses on an aarch64 host (brovan_direct_arm64.inc.c).
+insert-after|uc.c|uc->emu_count = count;|    brov_window_bind(uc);
+insert-after|qemu/accel/tcg/translate-all.c|tcg_region_reset_all(cpu->uc->tcg_ctx);|    brov_window_forget_sites();
+insert-before|qemu/tcg/aarch64/tcg-target.inc.c|#include "brovan_vecmem.inc.c"|#include "brovan_direct_arm64.inc.c"
+replace-all|qemu/tcg/aarch64/tcg-target.inc.c|    tcg_out_tlb_read(s, addr_reg, memop, &label_ptr, mem_index, 1);|    tcg_insn_unit *brov_done = brov_direct_emit(s, memop, ext, data_reg, addr_reg, true); tcg_out_tlb_read(s, addr_reg, memop, &label_ptr, mem_index, 1);
+replace-all|qemu/tcg/aarch64/tcg-target.inc.c|    tcg_out_tlb_read(s, addr_reg, memop, &label_ptr, mem_index, 0);|    tcg_insn_unit *brov_done = brov_direct_emit(s, memop, TCG_TYPE_I64, data_reg, addr_reg, false); tcg_out_tlb_read(s, addr_reg, memop, &label_ptr, mem_index, 0);
+replace-all|qemu/tcg/aarch64/tcg-target.inc.c|                        s->code_ptr, label_ptr);|                        s->code_ptr, label_ptr); brov_direct_done(s, brov_done);
+replace-all|qemu/tcg/aarch64/tcg-target.inc.c|                        data_reg, addr_reg, s->code_ptr, label_ptr);|                        data_reg, addr_reg, s->code_ptr, label_ptr); brov_direct_done(s, brov_done);
+insert-after|qemu/tcg/aarch64/tcg-target.inc.c|tcg_regset_set_reg(s->reserved_regs, TCG_VEC_TMP);|    brov_direct_reserve(s);
+insert-after|qemu/tcg/aarch64/tcg-target.inc.c|tcg_out_mov(s, TCG_TYPE_PTR, TCG_AREG0, tcg_target_call_iarg_regs[0]);|    brov_direct_prologue(s);

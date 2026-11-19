@@ -261,14 +261,8 @@ namespace Brovan.Core.Emulation
             public bool Untouched;
         }
 
-        private sealed class BackingAllocation
+        private sealed class BackingAllocation : BackingBlock
         {
-            public ulong Size;
-            public int LivePages;
-            public int AliasPages;
-            public int Pins;
-            public bool Held;
-            public IDisposable Owner;
             public bool HugePages;
             public ulong GuestBase;
         }
@@ -2295,17 +2289,11 @@ namespace Brovan.Core.Emulation
             else
                 allocation.LivePages--;
 
-            if (!IsReferenced(allocation))
+            if (!allocation.IsReferenced)
                 _releasedBackings.Add(page.OwnedBacking);
-            else if (!page.IsAlias && IsDiscardable(allocation))
+            else if (!page.IsAlias && allocation.IsDiscardable)
                 _discardRuns.Add(page.OwnedBacking, page.HostPage, KvmConstants.PageSize);
         }
-
-        private static bool IsReferenced(BackingAllocation allocation)
-            => allocation.LivePages > 0 || allocation.AliasPages > 0 || allocation.Pins > 0 || allocation.Held;
-
-        private static bool IsDiscardable(BackingAllocation allocation)
-            => !HostDiscard.Disabled && allocation.AliasPages == 0 && allocation.Pins == 0 && !allocation.Held && allocation.Owner == null;
 
         // Only after the rebuild deletes the slots. Until then other processors can reach the backing.
         private void FreeReleasedBackings()
@@ -2321,7 +2309,7 @@ namespace Brovan.Core.Emulation
             for (int i = 0; i < _discardRuns.Count; i++)
             {
                 HostDiscardRuns.Run run = _discardRuns[i];
-                if (!_backingAllocations.TryGetValue(run.Key, out BackingAllocation allocation) || !IsDiscardable(allocation)
+                if (!_backingAllocations.TryGetValue(run.Key, out BackingAllocation allocation) || !allocation.IsDiscardable
                     || IsBackingStillMapped(run.Start, run.Size))
                     continue;
 
@@ -2394,7 +2382,7 @@ namespace Brovan.Core.Emulation
 
         private void FreeIfUnreferenced(IntPtr backing, BackingAllocation allocation)
         {
-            if (IsReferenced(allocation) || IsBackingStillMapped(backing, allocation.Size)) return;
+            if (allocation.IsReferenced || IsBackingStillMapped(backing, allocation.Size)) return;
 
             FreeAllocation(backing, allocation);
             _backingAllocations.Remove(backing);

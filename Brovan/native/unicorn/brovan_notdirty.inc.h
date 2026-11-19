@@ -28,8 +28,8 @@ static inline bool brov_page_holds_code(struct uc_struct *uc, MemoryRegion *mr,
     return uc->brov.page_has_tbs && uc->brov.page_has_tbs(uc, ram_addr);
 }
 
-static inline bool brov_notdirty_allowed(CPUState *cpu, vaddr mem_vaddr,
-                                         CPUTLBEntry *tlbe)
+static inline MemoryRegion *brov_notdirty_region(CPUState *cpu, vaddr mem_vaddr,
+                                                 CPUTLBEntry *tlbe)
 {
 #ifdef TARGET_ARM
     /* TARGET_PAGE_MASK reads uc->init_target_page on this target. */
@@ -39,23 +39,38 @@ static inline bool brov_notdirty_allowed(CPUState *cpu, vaddr mem_vaddr,
     MemoryRegion *mr = cpu->uc->memory_mapping(cpu->uc, pa);
 
     if (!mr || tlbe->addr_write == (target_ulong)-1) {
-        return false;
+        return NULL;
     }
     if (mr->priority < cpu->uc->snapshot_level) {
-        return false;
+        return NULL;
     }
     /* Paging is off, so the guest address is the address inside the region. */
     if (!mr->ram_block ||
         brov_page_holds_code(cpu->uc, mr, memory_region_get_ram_addr(mr) + (pa - mr->addr))) {
-        return false;
+        return NULL;
     }
-    return !brov_mem_hook_needs_slow_path(cpu->uc, pa);
+    return brov_mem_hook_needs_slow_path(cpu->uc, pa) ? NULL : mr;
+}
+
+/* Paging is off, so the guest address is the TLB virtual address. */
+static inline void brov_window_check_refused(CPUState *cpu, vaddr mem_vaddr, CPUTLBEntry *tlbe)
+{
+    MemoryRegion *mr;
+
+    if (!brov_window_checking()) {
+        return;
+    }
+    mr = cpu->uc->memory_mapping(cpu->uc, mem_vaddr);
+    if (mr && mr->ram_block) {
+        brov_window_check_store(cpu->uc, mem_vaddr, (void *)(uintptr_t)(mem_vaddr + tlbe->addend), mr->perms);
+    }
 }
 
 static inline bool brov_notdirty_promote(CPUState *cpu, vaddr mem_vaddr,
                                          CPUTLBEntry *tlbe)
 {
     static int disabled = -1;
+    MemoryRegion *mr;
 
     if (disabled < 0) {
         /* Kill switch: this decides whether a guest store may skip
@@ -66,7 +81,13 @@ static inline bool brov_notdirty_promote(CPUState *cpu, vaddr mem_vaddr,
         return false;
     }
 
-    return brov_notdirty_allowed(cpu, mem_vaddr, tlbe);
+    mr = brov_notdirty_region(cpu, mem_vaddr, tlbe);
+    if (!mr) {
+        brov_window_check_refused(cpu, mem_vaddr, tlbe);
+        return false;
+    }
+    brov_window_widen(cpu->uc, mem_vaddr, (void *)(uintptr_t)(mem_vaddr + tlbe->addend), mr->perms);
+    return true;
 }
 
 /* The inverse of tlb_set_dirty, which indexes the TLB. A block covers one or two
@@ -161,7 +182,10 @@ static inline void brov_alias_protect_code(struct uc_struct *uc, ram_addr_t ram_
         const brov_alias_range *alias = &uc->brov_aliases[i];
 
         if (host - alias->host < alias->size) {
-            tlb_reset_dirty_by_vaddr(uc->cpu, alias->guest + (host - alias->host), TARGET_PAGE_SIZE);
+            uint64_t guest = alias->guest + (host - alias->host);
+
+            tlb_reset_dirty_by_vaddr(uc->cpu, guest, TARGET_PAGE_SIZE);
+            brov_window_narrow(uc, guest, (void *)host);
         }
     }
 }
@@ -211,6 +235,9 @@ static inline bool brov_alias_store(CPUState *cpu, vaddr mem_vaddr, unsigned siz
         }
     }
 
+    if (code_left) {
+        brov_window_check_refused(cpu, mem_vaddr, tlbe);
+    }
     return code_left;
 }
 
