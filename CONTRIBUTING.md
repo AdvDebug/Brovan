@@ -1,91 +1,71 @@
+<div align="center">
+
 # Contributing to Brovan
 
-Thanks for taking the time to help improve Brovan.
+Thanks for helping. Contributions of every size are welcome, and you do not need to be an expert.
 
-Brovan is a work-in-progress emulator project, and contributions of all sizes are welcome. You do not need to be an expert to contribute. Small fixes, documentation improvements, bug reports, and code changes are all useful.
+[README](README.md) &nbsp;·&nbsp; [Wiki](https://github.com/AdvDebug/Brovan/wiki) &nbsp;·&nbsp; [Open an issue](https://github.com/AdvDebug/Brovan/issues)
+
+</div>
+
+## Ways to help
+
+| Area | What you can do |
+|---|---|
+| **Test and report bugs** | Run games and programs, and open an issue when one breaks. A clear report is one of the most useful things you can send. |
+| **Implement system calls** | The most important work. Add missing system calls, fill in the cases programs expect, and make results and error codes match real Windows. |
+| **Improve compatibility** | Pick a program that does not run yet and find out why. The wiki's [troubleshooting guide](https://github.com/AdvDebug/Brovan/wiki/Debugging-&-Troubleshooting) shows how. |
+| **Make it faster** | Find bottlenecks in the scheduler, in system calls that run often, in registry reads and similar hot paths. |
+| **Improve the debugger** | Make the debugger prompt and its output easier to read and follow. |
+| **Improve the docs** | Fix or extend the README, the FAQ and the wiki. |
 
 ## Before you start
 
-Before contributing, please read the wiki pages on:
+- Read the wiki's [architecture page](https://github.com/AdvDebug/Brovan/wiki/Architecture) to see how Brovan fits together.
+- For anything bigger than a small fix, open an issue first, so we can agree on the approach before you spend time on it.
 
-- emulator architecture
-- emulator usage
-- project setup
-- debugging and troubleshooting
+## Build and test
 
-These pages explain how Brovan is structured and how to run it locally, which will help you understand the code! You can find them on the wiki here: https://github.com/AdvDebug/Brovan/wiki
+You need the .NET 10 SDK, CMake and a C++ compiler. The wiki's [build page](https://github.com/AdvDebug/Brovan/wiki/Building-Brovan) lists the requirements and the optional OpenGL and OpenCL drivers.
 
-A good first contribution is usually one of these:
+```powershell
+dotnet build Brovan/Brovan.csproj -c Release
+```
 
-- fixing a small bug
-- improving a comment or piece of documentation
-- cleaning up code that is confusing
-- reproducing and reporting a bug clearly
-- performance optimizations
-- adding a syscall or improving existing ones
-- just testing the emulator and finding general bugs
+> [!TIP]
+> On Windows, build from PowerShell or Command Prompt, not Git Bash. The Unicorn step extracts an archive with `tar`, and the `tar` in Git Bash cannot handle Windows paths.
 
-And keep your changes small. smaller changes in chunks and separate PRs are much better than a very big PR that is harder to review.
+Then run a program with your build, from `Brovan/bin/Release/net10.0`:
 
-## How to contribute
+```powershell
+.\Brovan.exe --backend=whp -c "start;exit" C:\path\to\program.exe
+```
 
-1. Fork the repository.
-2. Clone your fork locally.
-3. Create a new branch for your change.
-4. Make your change.
-5. Test it as well as you can.
-6. Open a pull request.
+On Windows, the first start asks for administrator rights once, to copy the registry. Test on Windows Hypervisor Platform and on Unicorn (`--backend=unicorn`) if you can, since some bugs show up on only one of them. Comparing with what the program does on real Windows helps too.
 
-## Pull request guidelines
+## Pull requests
 
-Please keep pull requests focused on one thing at a time.
+1. Fork the repository and create a branch for your change.
+2. Make the change and test it as well as you can.
+3. Open a pull request that explains what changed, why, and how to test it.
 
-Good pull requests:
+Keep each pull request to one change. Several small ones are much easier to review than one big one. If it fixes a bug, say how to reproduce the bug before the fix and how to check it after. If you could not test something, that is fine. Just say what you tested and what still needs checking.
 
-- are small and easy to review
-- explain what changed and why
-- include steps to test the change
-- mention any known limitations
+**Code style.** Match the file you are editing, including its naming and its summaries. Keep changes small and readable, use clear names, and do not add complexity unless it solves a real problem.
 
-If your change affects behavior, please describe how to reproduce the issue before the fix and how to verify the fix after it.
-
-## Code style
-
-Please try to match the style of the surrounding code.
-
-A few simple rules help a lot:
-
-- keep changes minimal and readable
-- use clear names
-- avoid adding extra complexity unless it solves a real problem
-- follow the patterns already used in the file you are editing (for example some files have summaries, so add function summaries so other people that contributes understands your code, etc)
-
-## Testing
-
-Before opening a pull request, run the project and verify your change if possible.
-
-If you cannot fully test something, that is okay. Just say what you tested and what still needs verification, and i will take care of the rest.
+**Commit messages.** Use a short subject that says what the change does, under about 50 characters, such as "Duplicate handles into other session processes".
 
 ## Reporting bugs
 
-A good bug report should include:
+Use the [bug report template](https://github.com/AdvDebug/Brovan/issues/new?template=bug_report.md) and include:
 
-- what you were trying to do
-- what happened
-- what you expected to happen
-- steps to reproduce
-- logs, screenshots, or crash output if available
+- the program, what you were trying to do, and what happened instead
+- the steps to reproduce it
+- your OS and the backend you used
+- `error_log.log` from the folder next to Brovan if it crashed, and a screenshot if it helps
 
-Clear bug reports make it much easier to fix problems quickly.
+## Questions
 
-## Some stuff to work on
+If something is unclear, open an issue. It is fine to ask before you start a pull request. You can also contact me on Discord if you want to ask privately.
 
-You can look at <a href="https://github.com/AdvDebug/Brovan/blob/main/IDEAS.md">IDEAS.md</a> as a start, containing some ideas that came on the top of my head. but improvements can be made anywhere, as the project still has a lot to be worked on.
-
-## Need help?
-
-If something is unclear, open an issue for the project. It is fine to ask questions before making a pull request. you can also contact me on discord if you want to ask privately.
-
-## Thank you
-
-Every contribution matters. Brovan gets better because people take the time to improve it.
+Thank you. Every contribution makes Brovan better.

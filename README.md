@@ -1,189 +1,105 @@
 <div align="center">
-  <img src="./brovan_banner.png" alt="Brovan banner" width="100%" style="border-radius: 10px;" />
-  
-  <br/><br/>
-  
-  [![.NET](https://img.shields.io/badge/.NET-10.0-512BD4?style=flat-square&logo=dotnet)](https://dotnet.microsoft.com/)
-  [![Language](https://img.shields.io/badge/Language-C%23-239120?style=flat-square&logo=csharp)](https://learn.microsoft.com/dotnet/csharp/)
+  <img src="./brovan_banner.png" alt="Brovan. Run Windows and Linux programs on Windows, Linux and Android." width="100%" />
+
+  <h3>Play games, try untrusted programs safely, and see everything they do.</h3>
+
+  [![Build](https://img.shields.io/github/actions/workflow/status/AdvDebug/Brovan/build.yml?branch=main&style=flat-square&label=build)](https://github.com/AdvDebug/Brovan/actions/workflows/build.yml)
   [![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)](LICENSE)
-  
-  <p align="center">
-    <b>A user-mode x86_64 binary emulator for inspecting programs, tracing syscalls, and safely running untrusted software.</b>
-  </p>
-  
+
+  <b><a href="#get-started">Get started</a></b> &nbsp;·&nbsp; <b><a href="#for-researchers">For researchers</a></b> &nbsp;·&nbsp; <a href="FAQ.md">FAQ</a> &nbsp;·&nbsp; <a href="https://github.com/AdvDebug/Brovan/wiki">Wiki</a>
 </div>
+
+<br/>
+
+<table>
+  <tr>
+    <td width="33%" align="center"><img src="docs/images/silksong.jpg" alt="Hollow Knight: Silksong in Brovan" width="100%" /><br/><sub>Hollow Knight: Silksong</sub></td>
+    <td width="33%" align="center"><img src="docs/images/lethal-company.jpg" alt="Lethal Company in Brovan" width="100%" /><br/><sub>Lethal Company</sub></td>
+    <td width="33%" align="center"><img src="docs/images/ultrakill.jpg" alt="ULTRAKILL in Brovan" width="100%" /><br/><sub>ULTRAKILL</sub></td>
+  </tr>
+  <tr>
+    <td width="33%" align="center"><img src="docs/images/left-4-dead-2.jpg" alt="Left 4 Dead 2 in Brovan" width="100%" /><br/><sub>Left 4 Dead 2</sub></td>
+    <td width="33%" align="center"><img src="docs/images/a-short-hike.jpg" alt="A Short Hike in Brovan" width="100%" /><br/><sub>A Short Hike</sub></td>
+    <td width="33%" align="center"><img src="docs/images/vkquake.jpg" alt="vkQuake in Brovan" width="100%" /><br/><sub>vkQuake</sub></td>
+  </tr>
+</table>
+
+<p align="center"><sub>Real captures from Brovan on Windows Hypervisor Platform. How well a game runs varies, so check the <a href="FAQ.md#will-my-game-or-program-work">FAQ</a>.</sub></p>
 
 ## What is Brovan?
 
-Brovan is an interactive x86_64 emulator that gives you full control over how programs execute. It can be used to reverse engineer binaries, trace API and system calls, capture network traffic, or run software in an isolated environment without executing it directly on your host CPU.
+Brovan runs Windows programs and games in a sandbox, on Windows, Linux and Android.
 
-It is designed to support as much software as possible while remaining a safe, efficient, and high-performance option for running Windows and Linux software across Windows, Linux and Android. Brovan is still in early development, so it is not yet fully mature or reliable.
-
-Supported backends:
-* **Unicorn Engine** for cross-platform emulation
-* **WHP** (Windows Hypervisor Platform) for hardware acceleration on Windows
-* **KVM** (Kernel-based Virtual Machine) for hardware acceleration on Linux
-
-## Core Features
-
-<div align="center">
-
-<table width="100%">
+<table>
   <tr>
-    <td width="50%" valign="top" align="left">
-      <p><b>MULTI-FORMAT LOADING</b></p>
-      <p>Load and execute binaries directly inside the emulator without host installation.</p>
-      <sub><code>PE</code> &nbsp; <code>ELF</code> &nbsp; <code>Memory Dumps</code> &nbsp; <code>Raw Shellcode</code></sub>
-    </td>
-    <td width="50%" valign="top" align="left">
-      <p><b>BROVVULK GRAPHICS LAYER</b></p>
-      <p>Custom Vulkan translation subsystem handling DXVK calls and game rendering.</p>
-      <sub><code>DXVK</code> &nbsp; <code>DirectX</code> &nbsp; <code>Vulkan Surface</code></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top" align="left">
-      <p><b>SYSCALL & API TRACING</b></p>
-      <p>Inspect execution live to see what functions, DLLs, and kernel calls the program accesses.</p>
-      <sub><code>Kernel Syscalls</code> &nbsp; <code>Symbol Resolving</code> &nbsp; <code>Loaded DLLs</code></sub>
-    </td>
-    <td width="50%" valign="top" align="left">
-      <p><b>NETWORK DUMPING</b></p>
-      <p>Intercept guest socket traffic and export network activity for payload analysis.</p>
-      <sub><code>Socket Intercept</code> &nbsp; <code>PCAP Capture</code> &nbsp; <code>Traffic Analysis</code></sub>
-    </td>
+    <td width="33%" valign="top"><b>Play</b><br/>Windows games on your own GPU, even on Android.<br/><a href="#get-started">Get started</a></td>
+    <td width="33%" valign="top"><b>Try safely</b><br/>Programs cannot change your files or go online unless you let them.<br/><a href="FAQ.md#how-does-brovan-sandbox-programs">How the sandbox works</a></td>
+    <td width="33%" valign="top"><b>Analyze</b><br/>See every system call and API call, and stop or change any of them.<br/><a href="#for-researchers">For researchers</a></td>
   </tr>
 </table>
 
-</div>
+> [!NOTE]
+> Brovan is in early development. Many games and programs run, and some do not yet. If something breaks, check the [FAQ](FAQ.md) or [open an issue](https://github.com/AdvDebug/Brovan/issues).
 
-## Previews & Demos
+## Get started
 
-### Gaming & Graphics (Brovvulk)
+### On Windows and Linux
 
-Brovan can render guest graphical applications through its Brovvulk (Brovan<->Vulkan) translation subsystem. Here is a sample game i had (Deltarune), but it can work on many other games:
+1. **Download** Brovan for [Windows](https://github.com/AdvDebug/Brovan/releases/download/latest-build/Brovan-win-x64.zip) or [Linux](https://github.com/AdvDebug/Brovan/releases/download/latest-build/Brovan-linux-x64.tar.gz) from the [latest build](https://github.com/AdvDebug/Brovan/releases/tag/latest-build).
+2. **Extract it** and open **BrovanGUI**.
+3. **Open Setup** and click **Install the latest** next to DXVK, which most games need. On Linux, also pick a Windows 11 ISO there. Brovan takes the Windows system files from it.
+4. **Click +** next to **Library**, choose the game's `.exe`, and click **Launch**.
 
-<div align="center">
+<p align="center"><img src="docs/images/launcher.png" alt="The BrovanGUI launcher" width="80%" /></p>
 
-<table width="100%">
-  <tr>
-    <td align="center" width="60%">
-      <a href="https://github.com/user-attachments/assets/a8090272-4dc1-47f8-bfd6-0407d2faaba2">
-        <img src="https://github.com/user-attachments/assets/a8090272-4dc1-47f8-bfd6-0407d2faaba2" 
-             alt="Deltarune running in Brovan" width="100%" 
-             style="border-radius: 8px; border: 1px solid #30363d;" />
-      </a>
-    </td>
-    <td valign="top" width="40%" align="left">
-      <h4>Deltarune Bring-up</h4>
-      <ul>
-        <li>Vulkan surface rendering via Brovvulk</li>
-        <li>DPI-aware host window integration</li>
-        <li>WHP acceleration for a smoother gaming experience</li>
-      </ul>
-    </td>
-  </tr>
-</table>
+<details>
+<summary><b>Make games run faster</b></summary>
+<br/>
 
-</div>
+On Windows, Brovan runs much faster with **Windows Hypervisor Platform**, which is part of Windows but off by default.
 
-### Binary Execution & Tracing
+1. Open the Start menu, type **Turn Windows features on or off** and open it.
+2. Tick **Windows Hypervisor Platform**, click **OK**, and restart.
 
-<div align="center">
+If BrovanGUI still says it is not available, turn on virtualization (Intel VT-x, AMD-V or SVM) in your PC's BIOS. On Linux, Brovan uses KVM, and your user needs access to `/dev/kvm`.
+</details>
 
-<table width="100%">
-  <tr>
-    <td width="33%" align="center" valign="top">
-      <a href="https://github.com/user-attachments/assets/d77b4d0a-6715-4e97-ac0b-f37ef23e37bd">
-        <img src="https://github.com/user-attachments/assets/d77b4d0a-6715-4e97-ac0b-f37ef23e37bd" 
-             alt="Cross-platform Linux execution" width="100%" style="border-radius: 6px;" />
-      </a>
-      <br />
-      <b>Linux ELF on Windows</b>
-      <br />
-      <sub>Running <code>fastfetch</code> cross-platform</sub>
-    </td>
-    <td width="33%" align="center" valign="top">
-      <a href="https://github.com/user-attachments/assets/4c264450-e7bd-48ab-85e0-4220ae416c88">
-        <img src="https://github.com/user-attachments/assets/4c264450-e7bd-48ab-85e0-4220ae416c88" 
-             alt="Syscall tracing log" width="100%" style="border-radius: 6px;" />
-      </a>
-      <br />
-      <b>Syscall Tracing</b>
-      <br />
-      <sub>Live logs of API calls and dynamic symbols</sub>
-    </td>
-    <td width="33%" align="center" valign="top">
-      <a href="https://github.com/user-attachments/assets/a3f41dda-fe36-48a9-9ea2-f02b24235d7d">
-        <img src="https://github.com/user-attachments/assets/a3f41dda-fe36-48a9-9ea2-f02b24235d7d" 
-             alt="Raw binary execution" width="100%" style="border-radius: 6px;" />
-      </a>
-      <br />
-      <b>Raw Binaries</b>
-      <br />
-      <sub>Executing shellcode and memory dumps</sub>
-    </td>
-  </tr>
-</table>
+### On Android
 
-</div>
+Install [the APK](https://github.com/AdvDebug/Brovan/releases/download/latest-build/Brovan-android-arm64.apk) from the latest build, open the app and follow its setup. One step asks for a Windows ISO on your phone and imports the system files from it. The app can open Microsoft's download page if you need one.
 
-### Network Inspection
+<p align="center"><img src="docs/images/android-not-a-human.jpg" alt="No, I'm Not a Human running in Brovan on an Android phone, with on-screen controls" width="80%" /><br/><sub>No, I'm Not a Human on a Pixel 7, with Brovan's on-screen controls</sub></p>
 
-<div align="center">
+## For researchers
 
-<table width="100%">
-  <tr>
-    <td width="50%" align="center" valign="top">
-      <a href="https://github.com/user-attachments/assets/d0932ff6-08cf-49e5-a48d-70c577352152">
-        <img src="https://github.com/user-attachments/assets/d0932ff6-08cf-49e5-a48d-70c577352152" 
-             alt="Network dumping" width="100%" style="border-radius: 6px;" />
-      </a>
-      <br />
-      <b>Network Capture</b>
-      <br />
-      <sub>Intercepting guest socket reads and writes</sub>
-    </td>
-    <td width="50%" align="center" valign="top">
-      <a href="https://github.com/user-attachments/assets/8bea785c-8f29-4261-8450-97e6b9dd7622">
-        <img src="https://github.com/user-attachments/assets/8bea785c-8f29-4261-8450-97e6b9dd7622" 
-             alt="Traffic viewer" width="100%" style="border-radius: 6px;" />
-      </a>
-      <br />
-      <b>Traffic Analyzer</b>
-      <br />
-      <sub>Viewing dumped PCAPs and payloads</sub>
-    </td>
-  </tr>
-</table>
+Brovan works at the system call level. The real Windows DLLs run inside the guest, and Brovan implements the NT kernel, win32k and the system services under them, so every call into the kernel can be traced, stopped or changed.
 
-</div>
+- **Debugger:** conditional breakpoints, read/write/execute watchpoints, stepping and snapshots
+- **Tracing:** live system call and API call traces, exported to JSON, CSV or text
+- **Control:** rules that allow, deny or rewrite system calls, and ghost patches the program cannot see
+- **Network:** traffic capture to PCAP, with loopback-only access by default
+- **Inputs:** 64-bit and 32-bit PE, 64-bit ELF, memory dumps and raw shellcode
+- **Backends:** Unicorn on any host, with the full analysis toolset, or WHP on Windows and KVM on Linux for speed
 
-## Documentation & Wiki
+<p align="center"><img src="docs/images/debugger.png" alt="Brovan stopped at a breakpoint on NtCreateFile" width="100%" /><br/><sub>A breakpoint on <code>ntdll!NtCreateFile</code>, with the disassembly at that address</sub></p>
 
-Check out the [GitHub Wiki](https://github.com/AdvDebug/Brovan/wiki) for:
-- [Building from source](https://github.com/AdvDebug/Brovan/wiki/Building-Brovan)
-- Architecture details
-- Command reference and usage guides
-- [FAQ](https://github.com/AdvDebug/Brovan/blob/main/FAQ.md)
+<p align="center"><img src="docs/images/api-trace.png" alt="API calls and system calls traced live" width="100%" /><br/><sub>API calls and system calls, traced live</sub></p>
 
-> [!WARNING]
-> The [Releases](https://github.com/AdvDebug/Brovan/releases) page may not always have the latest changes.  
-> For the most up-to-date version, **[build from source](https://github.com/AdvDebug/Brovan/wiki/Building-Brovan)** instead
-> or use the latest build from <a href="https://github.com/AdvDebug/Brovan/actions">GitHub Actions</a>
+The wiki documents [the commands](https://github.com/AdvDebug/Brovan/wiki/Brovan-Usage), including scripting from the command line, and the [architecture](https://github.com/AdvDebug/Brovan/wiki/Architecture). The [FAQ](FAQ.md) explains the sandbox and how Brovan compares to other tools.
 
-# Credits
-Thanks to <a href="https://github.com/icedland/iced">Iced library</a> for x86_64 disassembly and assembly.
+## Contributing
 
-Thanks to <a href="https://github.com/unicorn-engine/unicorn">Unicorn Engine</a> for the core emulator.
+Bug reports, fixes and new system calls are all welcome. [CONTRIBUTING.md](CONTRIBUTING.md) shows where to start and how to build Brovan.
 
-Thanks to <a href="https://www.mesa3d.org">Mesa</a> for zink, which gives Windows programs OpenGL on top of Brovvulk.
+## Credits
 
-Thanks to <a href="https://github.com/kpet/clvk">clvk</a> and <a href="https://github.com/google/clspv">clspv</a> for OpenCL on top of Brovvulk, and to <a href="https://github.com/llvm/llvm-project">LLVM</a>, <a href="https://github.com/KhronosGroup/SPIRV-Tools">SPIRV-Tools</a> and <a href="https://github.com/KhronosGroup/SPIRV-LLVM-Translator">SPIRV-LLVM-Translator</a>, which they are built with.
+- [Iced](https://github.com/icedland/iced) for disassembly and assembly.
+- [Unicorn Engine](https://github.com/unicorn-engine/unicorn) for the core emulator.
+- [DXVK](https://github.com/doitsujin/dxvk) for Direct3D on top of Vulkan.
+- [Mesa](https://www.mesa3d.org) for Zink, which gives Windows programs OpenGL.
+- [clvk](https://github.com/kpet/clvk) and [clspv](https://github.com/google/clspv) for OpenCL, built with [LLVM](https://github.com/llvm/llvm-project), [SPIRV-Tools](https://github.com/KhronosGroup/SPIRV-Tools) and [SPIRV-LLVM-Translator](https://github.com/KhronosGroup/SPIRV-LLVM-Translator).
 
-Thanks to my friend <a href="https://github.com/GittingHubbers">GittingHubbers</a> for help with the MLFQ Scheduler.
-
-Thanks to my friend <a href="https://github.com/ZypherionTechnologies">Adam (Zypherion Technologies)</a> for help with various parts of the emulator.
+Thanks to my friends [GittingHubbers](https://github.com/GittingHubbers) for help with the MLFQ scheduler, and [Adam (Zypherion Technologies)](https://github.com/ZypherionTechnologies) for help with various parts of the emulator.
 
 ## License
 

@@ -275,14 +275,19 @@ jobs:
           path: artifacts/android/*.apk
           retention-days: 14
 
+  # A v* tag publishes a versioned release. Every build of main replaces the files of the rolling
+  # latest-build release, so its download links never change.
   release:
     name: Publish GitHub Release
     # success() includes the optional driver jobs.
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/') && needs.build.result == 'success' && needs.android.result == 'success' }}
+    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main') && needs.build.result == 'success' && needs.android.result == 'success' }}
     needs: [ build, android ]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Download build artifacts
@@ -298,12 +303,47 @@ jobs:
           ( cd "release-artifacts/Brovan Windows x64" && zip -qr "$GITHUB_WORKSPACE/release-assets/Brovan-win-x64.zip" . )
           chmod +x "release-artifacts/Brovan Linux x64/Brovan" "release-artifacts/Brovan Linux x64/BrovanGUI"
           tar -C "release-artifacts/Brovan Linux x64" -czf release-assets/Brovan-linux-x64.tar.gz .
-          cp release-artifacts/"Brovan Android arm64"/*.apk release-assets/
+          cp release-artifacts/"Brovan Android arm64"/*.apk release-assets/Brovan-android-arm64.apk
 
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ github.ref_name }}" release-assets/* \
             --title "${{ github.ref_name }}" \
             --generate-notes
+
+      - name: Update the latest-build release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: latest-build
+        run: |
+          # A run that finishes after a newer push must not replace the newer files.
+          head=$(gh api "repos/$GH_REPO/commits/main" --jq .sha)
+          if [ "$head" != "$GITHUB_SHA" ]; then
+            echo "main has moved on to $head, so the newer run publishes instead."
+            exit 0
+          fi
+
+          if gh api "repos/$GH_REPO/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true > /dev/null
+          else
+            gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" > /dev/null
+          fi
+
+          short="${GITHUB_SHA::7}"
+          notes="The newest build of \`main\`, from commit [$short](https://github.com/$GH_REPO/commit/$GITHUB_SHA) on $(date -u '+%Y-%m-%d %H:%M UTC'). It is replaced after every successful build.
+
+          - **Windows:** Brovan-win-x64.zip
+          - **Linux:** Brovan-linux-x64.tar.gz
+          - **Android:** Brovan-android-arm64.apk"
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+            gh release edit "$TAG" --title "Latest build" --notes "$notes" --latest
+          else
+            gh release create "$TAG" release-assets/* --title "Latest build" --notes "$notes" --latest
+          fi
