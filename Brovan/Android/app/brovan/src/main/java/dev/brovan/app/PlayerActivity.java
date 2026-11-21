@@ -69,22 +69,22 @@ import dev.brovan.input.PointerState;
 public class PlayerActivity extends AppCompatActivity
         implements BrovanNative.Listener, BrovanNative.PlayerListener, BrovanNative.MessageListener, DebuggerView.Listener {
 
-    private static final String EXTRA_DIRECTORY = "directory";
-    private static final String EXTRA_EXECUTABLE = "executable";
+    static final String EXTRA_DIRECTORY = "directory";
+    static final String EXTRA_EXECUTABLE = "executable";
     private static final String EXTRA_NAME = "name";
-    private static final String EXTRA_DEVELOPER = "developer";
+    static final String EXTRA_DEVELOPER = "developer";
     private static final String EXTRA_CONTROLS = "controls";
     private static final String EXTRA_SUSTAINED = "sustained";
     private static final String EXTRA_LAYOUT = "layout";
     private static final String EXTRA_POINTER = "pointer";
-    private static final String EXTRA_ARGUMENTS = "arguments";
-    private static final String EXTRA_SETTINGS = "settings_json";
+    static final String EXTRA_ARGUMENTS = "arguments";
+    static final String EXTRA_SETTINGS = "settings_json";
     private static final String EXTRA_POINTER_SPEED = "pointer_speed";
-    private static final String EXTRA_DISPLAY_SCALE = "display_scale";
-    private static final String EXTRA_GUEST_DIRECTORY = "guest_directory";
-    private static final String EXTRA_SESSION = "session";
-    private static final String EXTRA_TOKEN = "token";
-    private static final String EXTRA_DEPTH = "depth";
+    static final String EXTRA_DISPLAY_SCALE = "display_scale";
+    static final String EXTRA_GUEST_DIRECTORY = "guest_directory";
+    static final String EXTRA_SESSION = "session";
+    static final String EXTRA_TOKEN = "token";
+    static final String EXTRA_DEPTH = "depth";
 
     private static final int MAX_LINES = 1200;
     private static final int TRIM_CHUNK = 200;
@@ -126,6 +126,8 @@ public class PlayerActivity extends AppCompatActivity
     private ControlOverlay controls;
     private ControlEditor controlEditor;
     private TaskbarView taskbar;
+    private GuestRun run;
+    private GuestSpawner.Wake wake;
     private Settings settings;
     private ProgramSettings program;
     private Library library;
@@ -211,6 +213,19 @@ public class PlayerActivity extends AppCompatActivity
         Theming.install(this, palette);
 
         super.onCreate(savedInstanceState);
+
+        run = GuestRun.current();
+        if (run == null) {
+            // Android can bring back a pool slot's old task in a new process, whose guest is gone.
+            if (getClass() != PlayerActivity.class) {
+                finish();
+                return;
+            }
+
+            run = GuestRun.create(this, getIntent(), 0);
+        }
+        wake = new GuestSpawner.Wake(this);
+
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         applySustainedPerformance();
 
@@ -221,7 +236,7 @@ public class PlayerActivity extends AppCompatActivity
 
         settings = new Settings(this);
         library = new Library(this);
-        programId = getIntent().getStringExtra(ProgramSettings.EXTRA_PROFILE_ID);
+        programId = run.settings().getStringExtra(ProgramSettings.EXTRA_PROFILE_ID);
         try {
             program = new ProgramSettings(library, library.find(programId), settings);
         } catch (IOException failure) {
@@ -242,16 +257,17 @@ public class PlayerActivity extends AppCompatActivity
         debugger = findViewById(R.id.debugger);
         debugger.setListener(this);
         taskbar = findViewById(R.id.taskbar);
-        TaskbarView.publish(this, getIntent().getStringExtra(EXTRA_NAME), getIntent().getStringExtra(EXTRA_EXECUTABLE));
+        TaskbarView.publish(this, run.settings().getStringExtra(EXTRA_NAME),
+                run.settings().getStringExtra(EXTRA_EXECUTABLE));
 
         controls.setAccent(palette.get(Palette.Role.ACCENT), palette.get(Palette.Role.ON_ACCENT));
-        controls.setCustomLayout(ControlLayout.fromJson(getIntent().getStringExtra(EXTRA_LAYOUT)));
-        int scheme = getIntent().getIntExtra(EXTRA_CONTROLS, 0);
+        controls.setCustomLayout(ControlLayout.fromJson(run.settings().getStringExtra(EXTRA_LAYOUT)));
+        int scheme = run.settings().getIntExtra(EXTRA_CONTROLS, 0);
         controls.apply(ControlOverlay.Scheme.values()[scheme]);
 
         surface.setPointerMode(BrovanSurfaceView.PointerMode.values()[
-                getIntent().getIntExtra(EXTRA_POINTER, 0)]);
-        PointerState.setSpeed(ProgramSettings.snapSpeed(getIntent().getFloatExtra(EXTRA_POINTER_SPEED, 1f)));
+                run.settings().getIntExtra(EXTRA_POINTER, 0)]);
+        PointerState.setSpeed(ProgramSettings.snapSpeed(run.settings().getFloatExtra(EXTRA_POINTER_SPEED, 1f)));
         menuTip = findViewById(R.id.menu_tip);
         closing = findViewById(R.id.closing);
         status = findViewById(R.id.status);
@@ -267,7 +283,7 @@ public class PlayerActivity extends AppCompatActivity
         logColorCommand = ContextCompat.getColor(this, R.color.log_command);
         logColorText = Theming.color(this, Palette.Role.TEXT_PRIMARY);
 
-        developerMode = getIntent().getBooleanExtra(EXTRA_DEVELOPER, false);
+        developerMode = run.settings().getBooleanExtra(EXTRA_DEVELOPER, false);
         debugger.setDeveloperMode(developerMode);
 
         EditText command = findViewById(R.id.command);
@@ -300,35 +316,36 @@ public class PlayerActivity extends AppCompatActivity
         BrovanNative.setListener(this);
         BrovanNative.setPlayerListener(this);
         BrovanNative.setMessageListener(this);
-        if (getIntent().getStringExtra(EXTRA_SESSION) == null) {
-            try {
-                runToken = library.beginRun(programId, android.os.Process.myPid());
-            } catch (IOException failure) {
-                showSaveFailure(failure);
+        run.attach();
+
+        if (!run.started()) {
+            if (run.settings().getStringExtra(EXTRA_SESSION) == null) {
+                try {
+                    runToken = library.beginRun(programId, android.os.Process.myPid());
+                } catch (IOException failure) {
+                    showSaveFailure(failure);
+                }
+            }
+            start();
+        } else {
+            setStatus(run.settings().getStringExtra(EXTRA_NAME));
+            if (run.startStatus() != BrovanNative.STATUS_OK) {
+                fail(describe(run.startStatus()));
+            } else if (run.exited()) {
+                onExit(run.exitReason());
             }
         }
-        start();
         offerMenuTip();
     }
 
     private void start() {
-        int status = BrovanNative.init(getFilesDir().getAbsolutePath());
+        int status = run.init();
         if (status != BrovanNative.STATUS_OK) {
             fail(getString(R.string.player_start_failed, status));
             return;
         }
 
-        BrovanNative.setLogSink(developerMode);
-        setStatus(getIntent().getStringExtra(EXTRA_NAME));
-
-        String session = getIntent().getStringExtra(EXTRA_SESSION);
-        if (session != null && !session.isEmpty()) {
-            BrovanNative.joinSession(session, getIntent().getIntExtra(EXTRA_TOKEN, 0),
-                    getIntent().getIntExtra(EXTRA_DEPTH, 1));
-        }
-
-        BrovanNative.setSpawnHandler((image, arguments, workingDirectory, sessionId, spawnToken, depth) ->
-                GuestSpawner.spawn(this, getIntent(), image, arguments, workingDirectory, sessionId, spawnToken, depth));
+        setStatus(run.settings().getStringExtra(EXTRA_NAME));
 
         // Developer mode leaves the guest at the debugger prompt instead of running it, so the debugger has
         // to be up for the "start" that gets it going to be reachable.
@@ -337,19 +354,7 @@ public class PlayerActivity extends AppCompatActivity
             append(getString(R.string.player_developer_hint));
         }
 
-        // A spawned program gets a guest path, not the host directory of the program.
-        String guestDirectory = getIntent().getStringExtra(EXTRA_GUEST_DIRECTORY);
-        String directory = guestDirectory == null || guestDirectory.isEmpty()
-                ? getIntent().getStringExtra(EXTRA_DIRECTORY)
-                : guestDirectory;
-
-        int result = BrovanNative.start(
-                getIntent().getStringExtra(EXTRA_EXECUTABLE),
-                getIntent().getStringExtra(EXTRA_ARGUMENTS),
-                directory,
-                null,
-                getIntent().getStringExtra(EXTRA_SETTINGS));
-
+        int result = run.start();
         if (result != BrovanNative.STATUS_OK) {
             fail(describe(result));
         }
@@ -373,7 +378,7 @@ public class PlayerActivity extends AppCompatActivity
     }
 
     private void applySustainedPerformance() {
-        if (!getIntent().getBooleanExtra(EXTRA_SUSTAINED, false)) {
+        if (!run.settings().getBooleanExtra(EXTRA_SUSTAINED, false)) {
             return;
         }
 
@@ -412,18 +417,18 @@ public class PlayerActivity extends AppCompatActivity
 
     private void bindMenu(View view) {
         view.findViewById(R.id.resume).setOnClickListener(button -> dismissMenu());
-        ((TextView) view.findViewById(R.id.title)).setText(getIntent().getStringExtra(EXTRA_NAME));
+        ((TextView) view.findViewById(R.id.title)).setText(run.settings().getStringExtra(EXTRA_NAME));
 
         BrovanSurfaceView.PointerMode[] modes = BrovanSurfaceView.PointerMode.values();
         String[] modeLabels = getResources().getStringArray(R.array.pointer_modes);
 
         TextView pointer = view.findViewById(R.id.pointer);
-        pointer.setText(modeLabels[getIntent().getIntExtra(EXTRA_POINTER, 0)]);
+        pointer.setText(modeLabels[run.settings().getIntExtra(EXTRA_POINTER, 0)]);
         pointer.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         View pointerRow = (View) pointer.getParent();
         pointerRow.setFocusable(true);
         pointerRow.setOnClickListener(button -> Theming.rowDialog(pointer)
-                .setSingleChoiceItems(modeLabels, getIntent().getIntExtra(EXTRA_POINTER, 0), (dialog, position) -> {
+                .setSingleChoiceItems(modeLabels, run.settings().getIntExtra(EXTRA_POINTER, 0), (dialog, position) -> {
                     surface.setPointerMode(modes[position]);
                     pointer.setText(modeLabels[position]);
                     try {
@@ -431,7 +436,7 @@ public class PlayerActivity extends AppCompatActivity
                     } catch (IOException failure) {
                         showSaveFailure(failure);
                     }
-                    getIntent().putExtra(EXTRA_POINTER, position);
+                    run.put(EXTRA_POINTER, position);
                     dialog.dismiss();
                 }).setNegativeButton(android.R.string.cancel, null).show());
 
@@ -447,7 +452,7 @@ public class PlayerActivity extends AppCompatActivity
                 .setSingleChoiceItems(schemeLabels, controls.scheme().ordinal(), (dialog, position) -> {
                     controls.apply(schemes[position]);
                     scheme.setText(schemeLabels[position]);
-                    getIntent().putExtra(EXTRA_CONTROLS, position);
+                    run.put(EXTRA_CONTROLS, position);
                     try {
                         program.setControlScheme(position);
                     } catch (IOException failure) {
@@ -472,7 +477,7 @@ public class PlayerActivity extends AppCompatActivity
 
         // Dragging the slider reports every step it passes through, and each one would rewrite the manifest.
         onRelease(speed, released -> {
-            getIntent().putExtra(EXTRA_POINTER_SPEED, released.getValue());
+            run.put(EXTRA_POINTER_SPEED, released.getValue());
             try {
                 program.setPointerSpeed(released.getValue());
             } catch (IOException failure) {
@@ -529,7 +534,7 @@ public class PlayerActivity extends AppCompatActivity
     }
 
     private int displayScale() {
-        return getIntent().getIntExtra(EXTRA_DISPLAY_SCALE, 0);
+        return run.settings().getIntExtra(EXTRA_DISPLAY_SCALE, 0);
     }
 
     private void bindDisplayScale(View view) {
@@ -588,7 +593,7 @@ public class PlayerActivity extends AppCompatActivity
             return;
         }
 
-        getIntent().putExtra(EXTRA_DISPLAY_SCALE, index);
+        run.put(EXTRA_DISPLAY_SCALE, index);
         surface.setDisplayDpi(Settings.DISPLAY_DPIS[index]);
         try {
             program.setDisplayScale(index);
@@ -644,8 +649,8 @@ public class PlayerActivity extends AppCompatActivity
             return;
         }
 
-        getIntent().putExtra(EXTRA_LAYOUT, json);
-        getIntent().putExtra(EXTRA_CONTROLS, ControlOverlay.Scheme.CUSTOM.ordinal());
+        run.put(EXTRA_LAYOUT, json);
+        run.put(EXTRA_CONTROLS, ControlOverlay.Scheme.CUSTOM.ordinal());
         controlEditor.stop();
         controls.setCustomLayout(layout);
         controls.apply(ControlOverlay.Scheme.CUSTOM);
@@ -773,13 +778,17 @@ public class PlayerActivity extends AppCompatActivity
     }
 
     @Override
-    public void onWindowCreated() {
+    public void onWindowShown() {
         runOnUiThread(() -> {
             windowCreated = true;
             if (consoleShown && !viewChosen) {
                 showSurface();
             }
         });
+    }
+
+    @Override
+    public void onConsoleWritten() {
     }
 
     private void showConsole() {
@@ -825,6 +834,7 @@ public class PlayerActivity extends AppCompatActivity
     protected void onStart() {
         super.onStart();
         taskbar.startWatching();
+        wake.start();
     }
 
     @Override
@@ -837,6 +847,7 @@ public class PlayerActivity extends AppCompatActivity
     protected void onStop() {
         super.onStop();
         taskbar.stopWatching();
+        wake.stop();
     }
 
     @Override
@@ -864,7 +875,7 @@ public class PlayerActivity extends AppCompatActivity
         quitting = true;
         surface.hideKeyboard();
         ((TextView) findViewById(R.id.closing_text))
-                .setText(getString(R.string.player_closing, getIntent().getStringExtra(EXTRA_NAME)));
+                .setText(getString(R.string.player_closing, run.settings().getStringExtra(EXTRA_NAME)));
         closing.setVisibility(View.VISIBLE);
         setStatus(getString(R.string.player_status_stopping));
         BrovanNative.requestClose();

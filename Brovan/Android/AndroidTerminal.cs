@@ -22,6 +22,7 @@ namespace Brovan.Android
         private readonly object _create = new();
         private TerminalScreen _screen;
         private int _attached;
+        private int _written;
         private volatile bool _controlCAsInput;
 
         // Delay screen allocation until the memory profile is set.
@@ -61,6 +62,14 @@ namespace Brovan.Android
             Screen.Write(data, outputMode);
             PostReplies();
             Publish();
+            NoteWritten();
+        }
+
+        // Cursor moves and clears change the screen too, but only text counts as the program writing.
+        private void NoteWritten()
+        {
+            if (Interlocked.Exchange(ref _written, 1) == 0)
+                AndroidHost.NotifyPlayer(AndroidHost.PlayerConsoleWritten);
         }
 
         public TerminalGeometry Geometry
@@ -83,6 +92,9 @@ namespace Brovan.Android
         {
             int cells = Screen.Fill(x, y, element, count);
             Publish();
+            if (cells > 0 && mode != GuestConsoleOutputMode.Suppressed && element != '\0' && !char.IsWhiteSpace(element))
+                NoteWritten();
+
             return cells;
         }
 

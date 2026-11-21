@@ -19,6 +19,7 @@
 #define BROV_WINDOW_RECOUNT 4096
 #define BROV_WINDOW_HOST_HEADROOM 8192
 #define BROV_WINDOW_PATCH_AFTER 8
+#define BROV_WINDOW_SITE_PROBES 8
 
 static struct {
     uint8_t *base;
@@ -364,7 +365,7 @@ static void brov_window_narrow_alias_code(struct uc_struct *uc, uint64_t guest, 
             MemoryRegion *mr = uc->memory_mapping(uc, other);
             uint64_t stop = mr && mr->end > other ? MIN((uint64_t)mr->end, other_end) : other + BROV_WINDOW_PAGE;
 
-            if (mr && mr->ram_block && mr->brov_was_exec) {
+            if (mr && mr->ram_block && (mr->perms & UC_PROT_EXEC) != 0) {
                 for (; other < stop; other += BROV_WINDOW_PAGE) {
                     if (uc->brov.page_has_tbs(uc, mr->ram_block->offset + (other - mr->addr))) {
                         brov_window_narrow_page(uc, guest + (alias->host + (other - alias->guest) - start), PROT_READ,
@@ -413,31 +414,18 @@ void brov_window_unview(struct uc_struct *uc, uint64_t guest, uint64_t size, voi
     brov_window_forget_lost(guest, size);
 }
 
-/* A region keeps its translated blocks after it loses EXEC, so their pages stay without write. */
-void brov_window_protect(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host, uint64_t ram,
-                         uint32_t perms, bool was_exec)
+/* A writable region is not executable, so only other mappings of its host pages can hold blocks. */
+void brov_window_protect(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host, uint32_t perms)
 {
     int prot = brov_window_prot(perms);
-    uint64_t page;
 
     if (!brov_window_backs(guest, size, host)) {
         return;
     }
     brov_window_set(guest, size, prot, "protect");
     brov_window_forget_lost(guest, size);
-    if ((prot & PROT_WRITE) == 0 || !uc->brov.page_has_tbs) {
-        return;
-    }
-    if (uc->brov_alias_count != 0) {
+    if ((prot & PROT_WRITE) != 0 && uc->brov_alias_count != 0 && uc->brov.page_has_tbs) {
         brov_window_narrow_alias_code(uc, guest, size, host);
-    }
-    if (!was_exec) {
-        return;
-    }
-    for (page = 0; page < size && brov_window_open(); page += BROV_WINDOW_PAGE) {
-        if (uc->brov.page_has_tbs(uc, ram + page)) {
-            brov_window_narrow_page(uc, guest + page, PROT_READ, "code page");
-        }
     }
 }
 
@@ -533,13 +521,29 @@ void brov_window_forget_sites(void)
 }
 
 /* A site that keeps faulting branches to its probe for good, because an access outside the file or to MMIO always
- * faults. */
+ * faults. Sites that share a home slot would keep resetting each other's count, so a site looks at a few slots. */
 static void brov_window_count_site(uintptr_t pc)
 {
-    uint32_t i = brov_window_hash((uint64_t)(pc >> 2), g_brov_window.site_mask);
+    uint32_t home = brov_window_hash((uint64_t)(pc >> 2), g_brov_window.site_mask);
+    uint32_t i = UINT32_MAX, empty = UINT32_MAX, fewest = home, k;
 
     g_brov_window.faults++;
-    if (g_brov_window.site_pc[i] != pc) {
+    for (k = 0; k < BROV_WINDOW_SITE_PROBES; k++) {
+        uint32_t j = (home + k) & g_brov_window.site_mask;
+
+        if (g_brov_window.site_pc[j] == pc) {
+            i = j;
+            break;
+        }
+        if (g_brov_window.site_pc[j] == 0 && empty == UINT32_MAX) {
+            empty = j;
+        }
+        if (g_brov_window.site_hits[j] < g_brov_window.site_hits[fewest]) {
+            fewest = j;
+        }
+    }
+    if (i == UINT32_MAX) {
+        i = empty != UINT32_MAX ? empty : fewest;
         g_brov_window.site_pc[i] = pc;
         g_brov_window.site_hits[i] = 0;
     }
@@ -713,16 +717,13 @@ void brov_window_unview(struct uc_struct *uc, uint64_t guest, uint64_t size, voi
     (void)host;
 }
 
-void brov_window_protect(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host, uint64_t ram,
-                         uint32_t perms, bool was_exec)
+void brov_window_protect(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host, uint32_t perms)
 {
     (void)uc;
     (void)guest;
     (void)size;
     (void)host;
-    (void)ram;
     (void)perms;
-    (void)was_exec;
 }
 
 void brov_window_narrow(struct uc_struct *uc, uint64_t guest, void *host)

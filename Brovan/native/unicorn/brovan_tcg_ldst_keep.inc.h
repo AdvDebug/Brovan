@@ -39,7 +39,7 @@ static void brov_ldst_keep_setup(TCGContext *s)
     const TCGRegSet scratch = brov_ldst_keep_scratch(s, INDEX_op_qemu_st_i64);
     const TCGRegSet scratch_wide = brov_ldst_keep_scratch(s, INDEX_op_qemu_st_v128);
 
-    if (scratch == 0 || scratch_wide == 0 || getenv("BROVAN_NO_LDST_KEEP") != NULL) {
+    if (scratch == 0 || scratch_wide == 0 || brov_switch_set(BROV_SWITCH_NO_LDST_KEEP)) {
         return;
     }
     s->brov_ldst_kept = s->tcg_target_call_clobber_regs & ~(scratch | scratch_wide);

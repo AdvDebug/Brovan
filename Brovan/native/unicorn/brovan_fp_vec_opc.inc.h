@@ -69,6 +69,8 @@ DEF(qemu_st_v128, 0, 2, 2, TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS | TCG_OPF
 
 /* Stores every dirty XMM global to env, and leaves none of them in a host register. */
 DEF(sync_xmm, 0, 0, 0, TCG_OPF_NOT_PRESENT)
+/* The last op of an instruction that has sync_xmm. */
+DEF(sync_xmm_end, 0, 0, 0, TCG_OPF_NOT_PRESENT)
 
 /* The constant is the flags of the block that asks. */
 #ifndef TCG_TARGET_HAS_brov_jmpstub

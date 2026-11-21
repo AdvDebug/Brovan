@@ -108,6 +108,8 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
 
         private static readonly bool TopLevelWindowsDisabled = Environment.GetEnvironmentVariable("BROVAN_NO_TOP_LEVEL_WINDOWS") == "1";
 
+        internal static bool ServesTopLevels(bool hostAvailable) => hostAvailable && !TopLevelWindowsDisabled;
+
         /// <summary>
         /// The wait is armed on both the host event source and the wake object, so this only bounds how long a
         /// dropped wake can stall the loop; it is not the rate at which events are noticed.
@@ -824,7 +826,7 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
                 _textMetrics = _display as ITextMetricsSupport;
                 _keyboardTranslate = _display as IKeyboardTranslateSupport;
 
-                if (_display is ITopLevelWindowHost topLevelHost && topLevelHost.TopLevelsAvailable && !TopLevelWindowsDisabled)
+                if (_display is ITopLevelWindowHost topLevelHost && ServesTopLevels(topLevelHost.TopLevelsAvailable))
                 {
                     _topLevelHost = topLevelHost;
                     _layeredSupported = topLevelHost.SupportsLayered;

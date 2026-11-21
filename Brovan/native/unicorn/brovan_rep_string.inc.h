@@ -2,20 +2,10 @@
 #ifndef BROVAN_REP_STRING_INC_H
 #define BROVAN_REP_STRING_INC_H
 
-static bool brov_rep_fast_off(void)
-{
-    static int off = -1;
-
-    if (off < 0) {
-        off = getenv("BROVAN_NO_REP_FAST") != NULL;
-    }
-    return off != 0;
-}
-
 /* The helper adds no segment base and steps once per run, so it takes no single step. */
 static bool brov_rep_fast_ok(DisasContext *s, bool has_source)
 {
-    if (brov_rep_fast_off() || !s->jmp_opt) {
+    if (brov_switch_set(BROV_SWITCH_NO_REP_FAST) || !s->jmp_opt) {
         return false;
     }
     if (has_source && s->override >= 0) {

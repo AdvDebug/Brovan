@@ -24,16 +24,6 @@
 #ifndef BROVAN_TCG_LOOKUP_INC_H
 #define BROVAN_TCG_LOOKUP_INC_H
 
-static bool brov_jmp_inline_off(void)
-{
-    static int off = -1;
-
-    if (off < 0) {
-        off = getenv("BROVAN_NO_JMP_INLINE") != NULL;
-    }
-    return off != 0;
-}
-
 static void brov_gen_lookup_inline(DisasContext *s)
 {
     TCGContext *tcg_ctx = s->uc->tcg_ctx;
@@ -55,7 +45,7 @@ static void brov_gen_lookup_inline(DisasContext *s)
         return;
     }
 
-    if (!TCG_TARGET_HAS_brov_inlinejmp || brov_jmp_inline_off()) {
+    if (!TCG_TARGET_HAS_brov_inlinejmp || brov_switch_set(BROV_SWITCH_NO_JMP_INLINE)) {
         tcg_gen_lookup_and_goto_ptr(tcg_ctx);
         return;
     }

@@ -16,18 +16,6 @@
 #ifndef BROVAN_NOTDIRTY_H
 #define BROVAN_NOTDIRTY_H
 
-/* A region that lost EXEC keeps its blocks, and they run again when EXEC comes back.
- * notdirty_write() asks this before it invalidates and before it promotes, and both answers must agree.
- * Paging is off, so tlbe->addr_code is never -1 and the region permission is the test. */
-static inline bool brov_page_holds_code(struct uc_struct *uc, MemoryRegion *mr,
-                                        ram_addr_t ram_addr)
-{
-    if ((mr->perms & UC_PROT_EXEC) != 0) {
-        return true;
-    }
-    return uc->brov.page_has_tbs && uc->brov.page_has_tbs(uc, ram_addr);
-}
-
 static inline MemoryRegion *brov_notdirty_region(CPUState *cpu, vaddr mem_vaddr,
                                                  CPUTLBEntry *tlbe)
 {
@@ -44,9 +32,8 @@ static inline MemoryRegion *brov_notdirty_region(CPUState *cpu, vaddr mem_vaddr,
     if (mr->priority < cpu->uc->snapshot_level) {
         return NULL;
     }
-    /* Paging is off, so the guest address is the address inside the region. */
-    if (!mr->ram_block ||
-        brov_page_holds_code(cpu->uc, mr, memory_region_get_ram_addr(mr) + (pa - mr->addr))) {
+    /* notdirty_write() invalidates only in an executable region, so stores there keep the slow path. */
+    if (!mr->ram_block || (mr->perms & UC_PROT_EXEC) != 0) {
         return NULL;
     }
     return brov_mem_hook_needs_slow_path(cpu->uc, pa) ? NULL : mr;

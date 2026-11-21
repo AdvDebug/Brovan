@@ -1,5 +1,6 @@
 /* After sync_xmm no XMM global is in a host register, so the next op that uses one loads it again.
- * tcg_optimize forgets what it knows about them at the same op. */
+ * tcg_optimize forgets what it knows about them at the same op. A pinned XMM register is in env from sync_xmm
+ * to sync_xmm_end. */
 #ifndef BROVAN_TCG_XMM_INC_H
 #define BROVAN_TCG_XMM_INC_H
 
@@ -20,11 +21,19 @@ static void brov_xmm_liveness(TCGContext *s)
 
 static void brov_xmm_alloc(TCGContext *s)
 {
+    uint32_t pinned = 0;
     int i;
 
     for (i = 0; i < s->brov_xmm_count; i++) {
-        temp_sync(s, &s->temps[s->brov_xmm_first + i], s->reserved_regs, 0, -1);
+        TCGTemp *ts = &s->temps[s->brov_xmm_first + i];
+
+        if (ts->fixed_reg) {
+            pinned |= brov_pin_mask_of(s, ts->reg);
+        } else {
+            temp_sync(s, ts, s->reserved_regs, 0, -1);
+        }
     }
+    brov_pin_env_begin(s, pinned);
 }
 
 /* The stock frame slot holds 8 bytes at an 8 byte boundary, but the backend spills a 128 bit temp with

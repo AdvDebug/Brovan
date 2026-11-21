@@ -9,7 +9,9 @@ import android.app.ActivityManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.Editable;
@@ -21,6 +23,7 @@ import android.view.LayoutInflater;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.MotionEvent;
+import android.view.OrientationEventListener;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
@@ -127,6 +130,8 @@ public class MainActivity extends AppCompatActivity {
     private float scrollPosition;
     private ValueAnimator tabMotion;
     private ValueAnimator subMotion;
+    private OrientationEventListener posture;
+    private GuestSpawner.Wake wake;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -211,6 +216,74 @@ public class MainActivity extends AppCompatActivity {
             files.refresh();
         }
         refreshRuntimes();
+        watchHeldOrientation();
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        if (wake == null) {
+            wake = new GuestSpawner.Wake(this);
+        }
+        wake.start();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        wake.stop();
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (posture != null) {
+            posture.disable();
+        }
+    }
+
+    // The player forces landscape, and auto-rotate would otherwise keep the library in the posture used for play.
+    private void holdOrientation() {
+        boolean landscape = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
+        setRequestedOrientation(landscape
+                ? ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+                : ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
+    }
+
+    // The hold ends once the device is held the way the screen shows, so auto-rotate takes over without a turn.
+    private void watchHeldOrientation() {
+        if (getRequestedOrientation() == ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) {
+            return;
+        }
+
+        if (posture == null) {
+            posture = new OrientationEventListener(this) {
+                @Override
+                public void onOrientationChanged(int degrees) {
+                    if (degrees != ORIENTATION_UNKNOWN && matchesScreen(degrees)) {
+                        releaseOrientation();
+                    }
+                }
+            };
+        }
+
+        if (posture.canDetectOrientation()) {
+            posture.enable();
+        } else {
+            releaseOrientation();
+        }
+    }
+
+    private boolean matchesScreen(int degrees) {
+        int screen = getWindowManager().getDefaultDisplay().getRotation() * 90;
+        int offAxis = Math.floorMod(degrees - screen, 180);
+        return offAxis <= 30 || offAxis >= 150;
+    }
+
+    private void releaseOrientation() {
+        posture.disable();
+        posture = null;
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
     }
 
     private void paintNavigationBar() {
@@ -1152,7 +1225,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void launch(Program program) {
         try {
-            startActivity(PlayerActivity.intentFor(this, program, settings));
+            Intent player = PlayerActivity.intentFor(this, program, settings);
+            holdOrientation();
+            startActivity(player);
         } catch (IOException failure) {
             snack(failure.getMessage());
         }

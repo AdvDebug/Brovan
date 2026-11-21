@@ -172,6 +172,9 @@ namespace Brovan.Android
             }, nameof(SetSurface));
         }
 
+        [UnmanagedCallersOnly(EntryPoint = "brovan_top_levels_enabled")]
+        public static int TopLevelsEnabled() => GuiThreadManager.ServesTopLevels(AndroidHost.LayersAvailable) ? 1 : 0;
+
         [UnmanagedCallersOnly(EntryPoint = "brovan_clear_surface")]
         public static void ClearSurface()
         {

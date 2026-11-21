@@ -15,12 +15,7 @@ static void gen_sse(CPUX86State *env, DisasContext *s, int b,
 
 static bool brov_fp_vec_off(void)
 {
-    static int off = -1;
-
-    if (off < 0) {
-        off = getenv("BROVAN_NO_FPVEC") != NULL;
-    }
-    return off != 0;
+    return brov_switch_set(BROV_SWITCH_NO_FPVEC);
 }
 
 static void brov_gen_mxcsr_eob(DisasContext *s)
@@ -36,10 +31,11 @@ static void brov_xmm_init(struct uc_struct *uc)
         "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
     };
     TCGContext *tcg_ctx = uc->tcg_ctx;
+    bool pinned = false;
     int i;
 
     tcg_ctx->brov_xmm_count = 0;
-    if (!TCG_TARGET_HAS_v128 || getenv("BROVAN_NO_XMM_GLOBALS") != NULL) {
+    if (!TCG_TARGET_HAS_v128 || !tcg_ctx->brov_xmm_on) {
         return;
     }
     for (i = 0; i < BROV_XMM_MAX; i++) {
@@ -49,8 +45,12 @@ static void brov_xmm_init(struct uc_struct *uc)
         if (i == 0) {
             tcg_ctx->brov_xmm_first = (uint16_t)temp_idx(tcg_ctx, ts);
         }
-        /* sync_xmm takes them as one range of temps. */
+        pinned |= ts->fixed_reg;
+        /* sync_xmm takes them as one range of temps, and a pinned XMM register has no other sync. */
         if (temp_idx(tcg_ctx, ts) != (size_t)tcg_ctx->brov_xmm_first + i) {
+            if (pinned) {
+                tcg_abort();
+            }
             return;
         }
         tcg_ctx->brov_xmm[i] = temp_tcgv_vec(tcg_ctx, ts);
@@ -119,6 +119,122 @@ static void brov_xmm_check_claim(TCGContext *tcg_ctx, TCGOp *before)
     }
 }
 
+static bool brov_op_writes(TCGContext *tcg_ctx, const TCGOp *op, TCGArg arg)
+{
+    int nb_oargs = op->opc == INDEX_op_call ? TCGOP_CALLO(op) : tcg_ctx->tcg_op_defs[op->opc].nb_oargs;
+    int i;
+
+    for (i = 0; i < nb_oargs; i++) {
+        if (op->args[i] == arg) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool brov_t0_forward(TCGContext *tcg_ctx, TCGOp *store, TCGOp *load)
+{
+    TCGOpcode opc;
+    unsigned type, vece;
+    TCGOp *mov;
+
+    if (store->opc == INDEX_op_st_vec && load->opc == INDEX_op_ld_vec && TCGOP_VECL(store) == 1 &&
+        TCGOP_VECL(load) == 1) {
+        opc = INDEX_op_mov_vec;
+        type = 1;
+        vece = 0;
+    } else if (store->opc == INDEX_op_st32_i64 && load->opc == INDEX_op_ld32_vec) {
+        opc = INDEX_op_movi2v_vec;
+        type = 0;
+        vece = MO_32;
+    } else if (store->opc == INDEX_op_st_i64 && load->opc == INDEX_op_ld_vec && TCGOP_VECL(load) == 0) {
+        opc = INDEX_op_movi2v_vec;
+        type = 0;
+        vece = MO_64;
+    } else {
+        return false;
+    }
+
+    mov = tcg_op_insert_before(tcg_ctx, load, opc);
+    mov->args[0] = load->args[0];
+    mov->args[1] = store->args[0];
+    TCGOP_VECL(mov) = type;
+    TCGOP_VECE(mov) = vece;
+    tcg_op_remove(tcg_ctx, load);
+    return true;
+}
+
+static bool brov_t0_slot(const TCGOp *op, TCGArg env, TCGArg first, TCGArg end)
+{
+    return op->args[1] == env && op->args[2] >= first && op->args[2] < end;
+}
+
+static bool brov_t0_read_after(TCGContext *tcg_ctx, TCGOp *store, TCGArg env, TCGArg first, TCGArg end)
+{
+    TCGOp *op;
+
+    for (op = QTAILQ_NEXT(store, link); op != NULL; op = QTAILQ_NEXT(op, link)) {
+        const TCGOpDef *def = &tcg_ctx->tcg_op_defs[op->opc];
+
+        if (op->opc == INDEX_op_call) {
+            return true;
+        }
+        if (def->nb_oargs == 1 && def->nb_iargs == 1 && def->nb_cargs >= 1 && brov_t0_slot(op, env, first, end)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* gen_sse loads a memory operand into xmm_t0 before any path claims the instruction, and a claimed path reads it back
+ * from there. The read takes the stored value instead, and the store goes when nothing else reads the slot. */
+static void brov_xmm_forward_t0(TCGContext *tcg_ctx, TCGOp *before)
+{
+    const TCGArg env = tcgv_ptr_arg(tcg_ctx, tcg_ctx->cpu_env);
+    const TCGArg first = offsetof(CPUX86State, xmm_t0);
+    const TCGArg end = first + sizeof(ZMMReg);
+    TCGOp *store = NULL, *forwarded = NULL, *op, *next;
+    const TCGOpDef *def;
+
+    for (op = QTAILQ_NEXT(before, link); op != NULL; op = next) {
+        next = QTAILQ_NEXT(op, link);
+        switch (op->opc) {
+        case INDEX_op_st_vec:
+        case INDEX_op_st_i64:
+        case INDEX_op_st32_i64:
+            if (brov_t0_slot(op, env, first, end)) {
+                store = op->args[2] == first ? op : NULL;
+                forwarded = NULL;
+                continue;
+            }
+            break;
+        case INDEX_op_ld_vec:
+        case INDEX_op_ld32_vec:
+            if (store != NULL && op->args[1] == env && op->args[2] == first &&
+                brov_t0_forward(tcg_ctx, store, op)) {
+                forwarded = store;
+                continue;
+            }
+            break;
+        default:
+            break;
+        }
+        if (store == NULL) {
+            continue;
+        }
+        def = &tcg_ctx->tcg_op_defs[op->opc];
+        /* A plain temp does not live across a label or a branch, and a call or another store may write the slot. */
+        if (op->opc == INDEX_op_set_label || op->opc == INDEX_op_call || (def->flags & TCG_OPF_BB_END) ||
+            (def->nb_oargs == 0 && def->nb_iargs == 2 && def->nb_cargs >= 1 && brov_t0_slot(op, env, first, end)) ||
+            brov_op_writes(tcg_ctx, op, store->args[0])) {
+            store = NULL;
+        }
+    }
+    if (forwarded != NULL && !brov_t0_read_after(tcg_ctx, forwarded, env, first, end)) {
+        tcg_op_remove(tcg_ctx, forwarded);
+    }
+}
+
 static void brov_gen_sse(CPUX86State *env, DisasContext *s, int b,
                          target_ulong pc_start, int rex_r)
 {
@@ -132,8 +248,10 @@ static void brov_gen_sse(CPUX86State *env, DisasContext *s, int b,
     }
     if (s->brov_xmm_claimed) {
         brov_xmm_check_claim(tcg_ctx, before);
+        brov_xmm_forward_t0(tcg_ctx, before);
     } else {
         tcg_op_insert_after(tcg_ctx, before, INDEX_op_sync_xmm);
+        tcg_emit_op(tcg_ctx, INDEX_op_sync_xmm_end);
     }
 }
 
@@ -412,12 +530,7 @@ enum {
 
 static bool brov_sse_vec_off(void)
 {
-    static int off = -1;
-
-    if (off < 0) {
-        off = getenv("BROVAN_NO_SSEVEC") != NULL;
-    }
-    return off != 0;
+    return brov_switch_set(BROV_SWITCH_NO_SSEVEC);
 }
 
 static int brov_sse_vec_kind(SSEFunc_0_epp fn, unsigned *vece)
@@ -667,12 +780,7 @@ static bool brov_gen_sse_shuf(DisasContext *s, int b, int b1, int op1_offset, in
 /* The slow path passes the value through xmm_t0, which the instruction is done with by then. */
 static bool brov_vecmem_ok(void)
 {
-    static int off = -1;
-
-    if (off < 0) {
-        off = getenv("BROVAN_NO_VECMEM") != NULL;
-    }
-    return TCG_TARGET_HAS_brov_vecmem && TCG_TARGET_HAS_v128 && off == 0;
+    return TCG_TARGET_HAS_brov_vecmem && TCG_TARGET_HAS_v128 && !brov_switch_set(BROV_SWITCH_NO_VECMEM);
 }
 
 static void brov_gen_vecmem(DisasContext *s, TCGOpcode opc, TCGv_vec reg)

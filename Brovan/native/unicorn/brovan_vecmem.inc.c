@@ -89,9 +89,12 @@ static bool brov_vecmem_out(TCGContext *s, TCGOpcode opc, const TCGArg *args)
     }
 
     if (brov_direct_may_emit(s, MO_LEQ)) {
+        TCGReg site_reg = is_ld ? brov_direct_load_reg(s, TCG_TYPE_V128, vec, addr) : vec;
+
         brov_direct_check(s, addr, 16, is_ld, &direct);
-        tcg_out_ldst_r(s, is_ld ? I3312_LDRVQ : I3312_STRVQ, vec, TCG_REG_X28, TCG_TYPE_I64, TCG_REG_X3);
+        tcg_out_ldst_r(s, is_ld ? I3312_LDRVQ : I3312_STRVQ, site_reg, TCG_REG_X28, TCG_TYPE_I64, TCG_REG_X3);
         done = brov_direct_site_end(s, &direct);
+        brov_direct_note_move(done, TCG_TYPE_V128, vec, site_reg);
     }
     tcg_out_tlb_read(s, addr, MO_LEQ | BROV_MO_V128, &label_ptr, mem_index, is_ld);
     tcg_out_ldst_r(s, is_ld ? I3312_LDRVQ : I3312_STRVQ, vec, TCG_REG_X1, TCG_TYPE_I64, addr);

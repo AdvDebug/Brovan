@@ -95,6 +95,11 @@ insert-in-body|qemu/accel/tcg/tcg-runtime.c|void *HELPER(lookup_tb_ptr)(CPUArchS
 insert-after|qemu/accel/tcg/tcg-runtime.c|void HELPER(check_exit_request)(void *p, uint32_t in_delay_slot) {|    brov_budget_expired((struct uc_struct *)p);
 insert-after|qemu/accel/tcg/cpu-exec.c|#include "uc_priv.h"|#include "brovan_tcg_budget.inc.h"
 insert-before|qemu/accel/tcg/cpu-exec.c|insns_left = cpu_neg(cpu)->icount_decr.u32;|    brov_budget_expired(cpu->uc);
+
+# --- direct jumps link across pages while paging is off
+insert-after|qemu/accel/tcg/cpu-exec.c|#include "brovan_tcg_budget.inc.h"|#include "brovan_tb_flags.inc.h"
+replace-all|qemu/accel/tcg/cpu-exec.c|if (tb->page_addr[1] != -1) {|if (tb->page_addr[1] != -1 && !brov_tb_far_chain(tb->flags)) {
+insert-in-body|qemu/target/i386/translate.c|static inline bool use_goto_tb(DisasContext *s, target_ulong pc)|    if (brov_tb_far_chain(s->flags)) { return true; }
 insert-after|uc.c|uc->emu_count = count;|    brov_arm_budget(uc, count);
 
 # --- guest stores keep the inline TLB path unless a hook can see them --------
@@ -102,12 +107,13 @@ insert-before|qemu/include/exec/exec-all.h|static inline bool uc_mem_hook_instal
 insert-in-body|qemu/include/exec/exec-all.h|static inline bool uc_mem_hook_installed(struct uc_struct *uc, hwaddr paddr)|    return brov_mem_hook_needs_slow_path(uc, paddr);
 insert-after|qemu/accel/tcg/cputlb.c|#include <glib_compat.h>|#include "brovan_notdirty.inc.h"
 insert-in-body|qemu/accel/tcg/cputlb.c|static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,|    if (!brov_alias_store(cpu, mem_vaddr, size, retaddr, tlbe) && brov_notdirty_promote(cpu, mem_vaddr, tlbe)) { tlb_set_dirty(cpu, mem_vaddr); }
-# A store invalidates the blocks of a page that lost EXEC, not only of an executable one.
-replace-all|qemu/accel/tcg/cputlb.c|if (mr && (mr->perms & UC_PROT_EXEC) != 0) {|if (mr && brov_page_holds_code(cpu->uc, mr, ram_addr)) {
 
 # --- one host page mapped at several guest addresses shares its translated blocks
 insert-in-body|qemu/accel/tcg/cputlb.c|void tlb_protect_code(struct uc_struct *uc, ram_addr_t ram_addr)|    brov_alias_protect_code(uc, ram_addr);
 insert-before|uc.c|if (remove_exec) {|    uc->tcg_flush_tlb(uc); /* brov: a cached TLB entry may predate these perms */
+# Only translation checks EXEC, so a region piece that loses it drops its blocks.
+insert-after|uc.c|remove_exec = true;|                uc->uc_invalidate_tb(uc, mr->addr, int128_get64(mr->size));
+replace-all|uc.c|uc->uc_invalidate_tb(uc, addr, end - addr);|brov_invalidate_code_range(uc, addr, end);
 
 # --- a protect splits only regions whose permissions change, since regions never merge
 insert-before|uc.c|// Now we know entire region is mapped, so change permissions|    if (brov_mem_protect_unchanged(uc, address, size, perms)) { restore_jit_state(uc); return UC_ERR_OK; }
@@ -246,14 +252,11 @@ replace-all|qemu/softmmu/memory.c|address_space_dispatch_compact(fv->dispatch);|
 # --- a readonly flip changes its range and dispatch section in place --------
 insert-after|qemu/softmmu/memory.c|static bool brov_render_flat(FlatView *view, MemoryRegion *root);|static bool brov_set_readonly_in_place(MemoryRegion *mr, bool readonly);
 insert-in-body|qemu/softmmu/memory.c|void memory_region_set_readonly(MemoryRegion *mr, bool readonly)|    if (brov_set_readonly_in_place(mr, readonly)) { return; }
-insert-in-body|qemu/softmmu/memory.c|void memory_region_set_readonly(MemoryRegion *mr, bool readonly)|    if (mr->uc->brov_protect_batch && mr->ram_block) { brov_window_protect(mr->uc, mr->addr, int128_get64(mr->size), memory_region_get_ram_ptr(mr), memory_region_get_ram_addr(mr), mr->perms, mr->brov_was_exec); }
+insert-in-body|qemu/softmmu/memory.c|void memory_region_set_readonly(MemoryRegion *mr, bool readonly)|    if (mr->uc->brov_protect_batch && mr->ram_block) { brov_window_protect(mr->uc, mr->addr, int128_get64(mr->size), memory_region_get_ram_ptr(mr), mr->perms); }
 replace-all|qemu/softmmu/memory.c|    memory_region_add_subregion(uc->system_memory, begin, ram);|    memory_region_add_subregion(uc->system_memory, begin, ram); brov_window_view(uc, begin, size, ptr, perms);
 insert-in-body|qemu/softmmu/memory.c|void memory_unmap(struct uc_struct *uc, MemoryRegion *mr)|    if (mr->ram_block) { brov_window_unview(uc, mr->addr, int128_get64(mr->size), memory_region_get_ram_ptr(mr)); }
 insert-after|qemu/softmmu/memory.c|subregion->enabled = false;|        if (subregion->ram_block) { brov_window_unview(uc, subregion->addr, int128_get64(subregion->size), memory_region_get_ram_ptr(subregion)); }
 insert-after|uc.c|res = mem_map(uc, uc->memory_map_ptr(uc, address, size, perms, ptr));|    if (res != UC_ERR_OK) { brov_window_unview(uc, address, size, ptr); }
-insert-after|qemu/include/exec/memory.h|uint32_t perms;|    bool brov_was_exec;
-insert-after|qemu/softmmu/memory.c|ram->perms = perms;|    ram->brov_was_exec = (perms & UC_PROT_EXEC) != 0;
-insert-after|uc.c|mr->perms = perms;|            if ((perms & UC_PROT_EXEC) != 0) { mr->brov_was_exec = true; }
 replace-all|uc.c|uc->readonly_mem(mr, (perms & UC_PROT_WRITE) == 0);|uc->brov_protect_batch = true; uc->readonly_mem(mr, (perms & UC_PROT_WRITE) == 0); uc->brov_protect_batch = false;
 insert-after|uc.c|if (mr->perms != perms && !split_region(uc, mr, addr, len, false)) {|                uc->tcg_flush_tlb(uc); /* brov: readonly flips before a failed split deferred their flush */
 insert-after|uc.c|if (!split_mmio_region(uc, mr, addr, len, false)) {|                uc->tcg_flush_tlb(uc); /* brov: readonly flips before a failed mmio split deferred their flush */
@@ -267,7 +270,7 @@ replace-all|qemu/exec.c|if (!uc->ram_list.freed) {|{ ram_addr_t brov_off; if (br
 
 # --- SSE floating point arithmetic emitted as host vector instructions -------
 copy|brovan_fp_vec_opc.inc.h|include/brovan_fp_vec_opc.inc.h
-copy|brovan_fp_vec_state.inc.h|include/brovan_fp_vec_state.inc.h
+copy|brovan_tb_flags.inc.h|include/brovan_tb_flags.inc.h
 copy|brovan_fp_vec.inc.h|include/brovan_fp_vec.inc.h
 copy|brovan_fp_vec_arm64.inc.c|include/brovan_fp_vec_arm64.inc.c
 copy|brovan_fp_vec_i386.inc.c|include/brovan_fp_vec_i386.inc.c
@@ -284,7 +287,7 @@ insert-before|qemu/tcg/i386/tcg-target.inc.c|static inline void tcg_out_call(TCG
 insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static void tcg_out_vec_op(TCGContext *s, TCGOpcode opc,|    if (brov_fp_vec_out(s, opc, vecl, vece, args)) { return; }
 insert-in-body|qemu/tcg/i386/tcg-target.inc.c|int tcg_can_emit_vec_op(TCGContext *tcg_ctx, TCGOpcode opc, TCGType type, unsigned vece)|    if (brov_fp_vec_can_emit(opc, type, vece) >= 0) { return brov_fp_vec_can_emit(opc, type, vece); }
 insert-in-body|qemu/tcg/i386/tcg-target.inc.c|static const TCGTargetOpDef *tcg_target_op_def(TCGOpcode op)|    if (brov_fp_vec_op_def(op)) { return brov_fp_vec_op_def(op); }
-insert-before|qemu/target/i386/cpu.h|static inline void cpu_get_tb_cpu_state(CPUX86State *env, target_ulong *pc,|#include "brovan_fp_vec_state.inc.h"
+insert-before|qemu/target/i386/cpu.h|static inline void cpu_get_tb_cpu_state(CPUX86State *env, target_ulong *pc,|#include "brovan_tb_flags.inc.h"
 insert-in-body|qemu/target/i386/cpu.h|static inline void cpu_get_tb_cpu_state(CPUX86State *env, target_ulong *pc,|    brov_tb_cpu_state(env, pc, cs_base, flags); return;
 insert-before|qemu/target/i386/translate.c|static void gen_sse(CPUX86State *env, DisasContext *s, int b,|#include "brovan_fp_vec.inc.h"
 insert-before|qemu/target/i386/translate.c|static inline void gen_op_movo(DisasContext *s, int d_offset, int s_offset)|static bool brov_gen_movo(DisasContext *s, int d_offset, int s_offset);
@@ -342,20 +345,24 @@ copy|brovan_tcg_pin_arm64.inc.c|include/brovan_tcg_pin_arm64.inc.c
 insert-after|qemu/tcg/aarch64/tcg-target.h|#define TCG_TARGET_HAS_brov_inlinejmp   0|#define TCG_TARGET_HAS_brov_pin         1
 insert-before|qemu/tcg/tcg.c|#include "tcg-target.inc.c"|#include "brovan_tcg_pin.inc.h"
 insert-in-body|qemu/tcg/tcg.c|TCGTemp *tcg_global_mem_new_internal(TCGContext *s, TCGType type, TCGv_ptr base,|    { TCGTemp *brov_pin = brov_pin_global(s, type, base, offset, name); if (brov_pin) { return brov_pin; } }
+insert-after|qemu/tcg/tcg.c|s->cpu_env = temp_tcgv_ptr(s, ts);|    s->brov_budget = tcg_global_mem_new_i32(s, s->cpu_env, BROV_BUDGET_OFF, "brov_budget");
 insert-in-body|qemu/tcg/tcg.c|static void tcg_reg_alloc_do_movi(TCGContext *s, TCGTemp *ots,|    if (brov_pin_movi(s, ots, val)) { return; }
 insert-after|qemu/tcg/tcg.c|tcg_debug_assert(ts->val_type == TEMP_VAL_REG);|    if (brov_pin_mov(s, ots, ts, IS_DEAD_ARG(1))) { return; }
 insert-before|qemu/tcg/tcg.c|if ((arg_ct->ct & TCG_CT_ALIAS)|            if (ts->fixed_reg) { new_args[i] = brov_pin_out_reg(s, ts, arg_ct, const_args, new_args, i_allocated_regs, &o_allocated_regs, op->output_pref[k]); continue; }
 insert-after|qemu/tcg/tcg.c|/* move the outputs in the correct register if needed */|    brov_pin_out_moves(s, op, nb_oargs, new_args);
 insert-before|qemu/tcg/tcg.c|reg = tcg_target_call_oarg_regs[i];|        if (brov_pin_call_out(s, ts, tcg_target_call_oarg_regs[i])) { continue; }
-insert-before|qemu/tcg/tcg.c|tcg_out_call(s, func_addr);|    brov_pin_helper_call(s, flags);
+insert-before|qemu/tcg/tcg.c|tcg_out_call(s, func_addr);|    brov_pin_helper_call(s, flags, true);
 replace-all|qemu/tcg/tcg.c|tcg_debug_assert(!ots->fixed_reg);|tcg_debug_assert(!brov_pin_is_env(ots));
 replace-all|qemu/tcg/tcg.c|tcg_debug_assert(!ts->fixed_reg);|tcg_debug_assert(!brov_pin_is_env(ts));
 insert-before|qemu/tcg/aarch64/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *target)|#include "brovan_tcg_pin_arm64.inc.c"
 insert-in-body|qemu/tcg/aarch64/tcg-target.inc.c|static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *target)|    if (brov_pin_call(s, target)) { return; }
+# The pins need the XMM globals, so the gate is read before tcg_target_init picks them.
+# tcg_target_init sets TCG_TARGET_HAS_v128 on an x86-64 host, so later code tests it.
+insert-before|qemu/tcg/tcg.c|tcg_target_init(s);|    s->brov_xmm_on = !brov_switch_set(BROV_SWITCH_NO_XMM_GLOBALS);
 insert-after|qemu/tcg/aarch64/tcg-target.inc.c|tcg_regset_set_reg(s->reserved_regs, TCG_VEC_TMP);|    brov_pin_setup(s, brov_pin_host_regs, ARRAY_SIZE(brov_pin_host_regs));
-insert-before|qemu/tcg/aarch64/tcg-target.inc.c|tcg_out_insn(s, 3207, BR, tcg_target_call_iarg_regs[1]);|    brov_pin_emit(s, true);
+insert-before|qemu/tcg/aarch64/tcg-target.inc.c|tcg_out_insn(s, 3207, BR, tcg_target_call_iarg_regs[1]);|    brov_pin_emit(s, true, s->brov_pin_all);
 insert-after|qemu/tcg/aarch64/tcg-target.inc.c|tcg_out_insn(s, 3207, BR, tcg_target_call_iarg_regs[1]);|    brov_pin_stubs_emit(s);
-insert-after|qemu/tcg/aarch64/tcg-target.inc.c|s->tb_ret_addr = s->code_ptr;|    brov_pin_emit(s, false);
+insert-after|qemu/tcg/aarch64/tcg-target.inc.c|s->tb_ret_addr = s->code_ptr;|    brov_pin_emit(s, false, s->brov_pin_all);
 
 # --- x87 and SSE helpers that touch no global say so ---------------------------
 copy|brovan_helper_flags.inc.h|include/brovan_helper_flags.inc.h
@@ -392,6 +399,11 @@ replace-all|qemu/tcg/tcg.c|tcg_reg_free(s, i, i_allocated_regs);|if (brov_ldst_k
 insert-before|qemu/tcg/tcg.c|/* emit instruction */|    brov_ldst_keep_note(s, op, new_args);
 insert-after|qemu/tcg/tcg-ldst.inc.c|tcg_insn_unit *label_ptr[2]; /* label pointers to be updated */|    TCGRegSet brov_keep;
 insert-after|qemu/tcg/tcg-ldst.inc.c|TCGLabelQemuLdst *l = tcg_malloc(s, sizeof(*l));|    l->brov_keep = s->brov_ldst_live;
+insert-after|qemu/tcg/tcg-ldst.inc.c|TCGRegSet brov_keep;|    uint32_t brov_env_held;
+insert-after|qemu/tcg/tcg-ldst.inc.c|l->brov_keep = s->brov_ldst_live;|    l->brov_env_held = s->brov_pin_env_held;
+# A slow path syncs the pins that env does not hold where its op was.
+insert-after|qemu/tcg/tcg-ldst.inc.c|QSIMPLEQ_FOREACH(lb, &s->ldst_labels, next) {|        s->brov_pin_env_held = lb->brov_env_held;
+insert-before|qemu/tcg/tcg-ldst.inc.c|return 0;|    s->brov_pin_env_held = 0;
 insert-after|qemu/tcg/aarch64/tcg-target.inc.c|tcg_regset_set_reg(s->reserved_regs, TCG_VEC_TMP);|    brov_ldst_keep_setup(s);
 replace-all|qemu/tcg/aarch64/tcg-target.inc.c|+ CPU_TEMP_BUF_NLONGS * sizeof(long)|+ CPU_TEMP_BUF_NLONGS * sizeof(long) + BROV_LDST_KEEP_BYTES
 replace-all|qemu/tcg/aarch64/tcg-target.inc.c|tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);|brov_ldst_keep_emit(s, lb->brov_keep, true); tcg_out_mov(s, TCG_TYPE_PTR, TCG_REG_X0, TCG_AREG0);
@@ -415,6 +427,16 @@ insert-after|qemu/target/i386/translate.c|if (sse_fn_epp == SSE_SPECIAL) {|     
 insert-before|qemu/tcg/tcg.c|static void liveness_pass_1(TCGContext *s)|#include "brovan_tcg_xmm.inc.h"
 insert-after|qemu/tcg/tcg.c|TCGLifeData arg_life = 0;|        if (op->opc == INDEX_op_sync_xmm) { brov_xmm_liveness(s); continue; }
 insert-after|qemu/tcg/tcg.c|tcg_reg_alloc_call(s, op);|            break; case INDEX_op_sync_xmm: brov_xmm_alloc(s);
+insert-after|qemu/tcg/tcg.c|break; case INDEX_op_sync_xmm: brov_xmm_alloc(s);|            break; case INDEX_op_sync_xmm_end: brov_pin_env_end(s);
+# Kept after a call that does not return, so the span it ends never stays open.
+insert-after|qemu/tcg/tcg.c|/* Never remove -- we need to keep these for unwind.  */|        case INDEX_op_sync_xmm_end:
+insert-after|qemu/tcg/tcg.c|memset(s->reg_to_temp, 0, sizeof(s->reg_to_temp));|    s->brov_pin_env_held = 0; s->brov_pin_env_span = 0;
+insert-before|qemu/tcg/tcg.c|tcg_reg_alloc_op(s, op);|            brov_pin_before_op(s, op);
+insert-before|qemu/tcg/tcg.c|tcg_reg_alloc_mov(s, op);|            brov_pin_before_op(s, op); /* brov: mov */
+insert-before|qemu/tcg/tcg.c|tcg_reg_alloc_movi(s, op);|            brov_pin_before_op(s, op); /* brov: movi */
+insert-before|qemu/tcg/tcg.c|tcg_reg_alloc_dup(s, op);|            brov_pin_before_op(s, op); /* brov: dup */
+insert-before|qemu/tcg/tcg.c|tcg_reg_alloc_bb_end(s, s->reserved_regs);|            brov_pin_before_op(s, op); /* brov: label */
+insert-before|qemu/tcg/tcg.c|tcg_debug_assert(num_insns >= 0);|    brov_pin_env_check_end(s);
 insert-in-body|qemu/tcg/tcg.c|static void temp_allocate_frame(TCGContext *s, TCGTemp *ts)|    if (brov_vec_temp_slot(s, ts)) { return; }
 insert-before|qemu/tcg/optimize.c|if (opc == INDEX_op_call) {|        if (opc == INDEX_op_sync_xmm) { int brov_i; for (brov_i = 0; brov_i < s->brov_xmm_count; brov_i++) { if (test_bit(s->brov_xmm_first + brov_i, temps_used.l)) { reset_ts(&s->temps[s->brov_xmm_first + brov_i]); } } continue; }
 # These two write XMM registers in env.

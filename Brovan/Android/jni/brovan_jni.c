@@ -30,6 +30,7 @@ extern void brovan_set_spawn_sink(void *sink);
 extern void brovan_join_session(const char *sessionId, unsigned int spawnToken, int depth);
 extern void brovan_set_surface(void *nativeWindow, int width, int height, int densityDpi);
 extern void brovan_clear_surface(void);
+extern int brovan_top_levels_enabled(void);
 extern int brovan_start(const char *binaryPath, const char *guestCommandLine, const char *workingDirectory,
                         const char *commands, const char *settingsJson);
 extern int brovan_is_running(void);
@@ -708,6 +709,18 @@ JNIEXPORT void JNICALL METHOD(ClearSurface)(JNIEnv *env, jclass clazz) {
     (void)env;
     (void)clazz;
     brovan_clear_surface();
+}
+
+JNIEXPORT void JNICALL METHOD(SetDisplayMetrics)(JNIEnv *env, jclass clazz, jint width, jint height, jint densityDpi) {
+    (void)env;
+    (void)clazz;
+    brovan_set_surface(NULL, width, height, densityDpi);
+}
+
+JNIEXPORT jboolean JNICALL METHOD(TopLevelsEnabled)(JNIEnv *env, jclass clazz) {
+    (void)env;
+    (void)clazz;
+    return brovan_top_levels_enabled() != 0 ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jint JNICALL METHOD(Start)(JNIEnv *env, jclass clazz, jstring binaryPath, jstring guestCommandLine,

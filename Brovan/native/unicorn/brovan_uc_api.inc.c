@@ -837,7 +837,8 @@ uc_err brov_reg_ptr(uc_engine *uc, int regid, void **ptr, size_t *size, uint32_t
     return err;
 }
 
-/* The field never moves, because CPUState is allocated once. */
+/* The field never moves, because CPUState is allocated once. A host register can hold the budget while
+ * translated code runs, so a write counts only from a callback of the running slice or between slices. */
 UNICORN_EXPORT
 uc_err brov_budget_ptr(uc_engine *uc, int32_t **ptr)
 {
@@ -854,18 +855,13 @@ uc_err brov_budget_ptr(uc_engine *uc, int32_t **ptr)
  * once and never moved. */
 brov_jmp_entry *brov_jmp_ensure(struct uc_struct *uc)
 {
-    static int disabled = -1;
-
     if (!uc) {
         return NULL;
     }
     if (uc->brov_jmp) {
         return uc->brov_jmp;
     }
-    if (disabled < 0) {
-        disabled = getenv("BROVAN_NO_JMP_FAST") != NULL;
-    }
-    if (disabled || uc->brov_jmp_off) {
+    if (brov_switch_set(BROV_SWITCH_NO_JMP_FAST) || uc->brov_jmp_off) {
         uc->brov_jmp_off = 1;
         return NULL;
     }
@@ -945,4 +941,21 @@ bool brov_mem_protect_unchanged(struct uc_struct *uc, uint64_t address, uint64_t
         addr += len;
     }
     return true;
+}
+
+/* uc_invalidate_tb() takes one contiguous ram range, and each mapped region has its own RAMBlock. */
+void brov_invalidate_code_range(struct uc_struct *uc, uint64_t address, uint64_t end)
+{
+    uint32_t i;
+
+    for (i = (uint32_t)bsearch_mapped_blocks(uc, address);
+         i < uc->mapped_block_count && uc->mapped_blocks[i]->addr < end; i++) {
+        MemoryRegion *mr = uc->mapped_blocks[i];
+        uint64_t lo = MAX(address, mr->addr);
+        uint64_t hi = MIN(end, (uint64_t)mr->end);
+
+        if (lo < hi && mr->ram) {
+            uc->uc_invalidate_tb(uc, lo, hi - lo);
+        }
+    }
 }

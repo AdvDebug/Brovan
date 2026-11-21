@@ -10,8 +10,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
-#define BROV_ABI_VERSION 4u
+#define BROV_ABI_VERSION 5u
 #define BROV_BLOB_MAGIC 0x4356524Bu /* "KRVC" */
 
 /* The guest backing file exists only on a host whose TCG backend emits direct guest memory accesses. */
@@ -26,8 +27,7 @@
 struct uc_struct;
 void brov_window_view(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host, uint32_t perms);
 void brov_window_unview(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host);
-void brov_window_protect(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host, uint64_t ram,
-                         uint32_t perms, bool was_exec);
+void brov_window_protect(struct uc_struct *uc, uint64_t guest, uint64_t size, void *host, uint32_t perms);
 void brov_window_narrow(struct uc_struct *uc, uint64_t guest, void *host);
 void brov_window_widen(struct uc_struct *uc, uint64_t guest, void *host, uint32_t perms);
 uint64_t brov_window_emit_mask(void);
@@ -45,6 +45,41 @@ void brov_window_check_store(struct uc_struct *uc, uint64_t guest, void *host, u
 
 /* Blocks translated with the direct memory window hold its mask and need the window to run. */
 #define BROV_BLOB_FLAG_DIRECT 0x2u
+
+/* One flag from this bit up for each brov_switch, so a blob loads only into a run with the same switches. */
+#define BROV_BLOB_SWITCH_SHIFT 8
+#define BROV_BLOB_SWITCH_MASK (0xffffffu << BROV_BLOB_SWITCH_SHIFT)
+
+/* The kill switches that change translated code. BROVAN_NO_FAR_CHAIN changes it too, but it is a block flag. */
+#define BROV_SWITCHES(X)                                                       \
+    X(NO_FPVEC)                                                                \
+    X(NO_SSEVEC)                                                               \
+    X(NO_VECMEM)                                                               \
+    X(NO_REP_FAST)                                                             \
+    X(NO_LDST_KEEP)                                                            \
+    X(NO_JMP_INLINE)                                                           \
+    X(NO_JMP_STUB)                                                             \
+    X(NO_JMP_FAST)                                                             \
+    X(NO_XMM_GLOBALS)
+
+#define BROV_SWITCH_ID(name) BROV_SWITCH_##name,
+#define BROV_SWITCH_ENV(name) "BROVAN_" #name,
+
+typedef enum brov_switch {
+    BROV_SWITCHES(BROV_SWITCH_ID)
+    BROV_SWITCH_COUNT
+} brov_switch;
+
+static inline bool brov_switch_set(brov_switch id)
+{
+    static const char *const names[BROV_SWITCH_COUNT] = { BROV_SWITCHES(BROV_SWITCH_ENV) };
+    static signed char state[BROV_SWITCH_COUNT];
+
+    if (state[id] == 0) {
+        state[id] = getenv(names[id]) != NULL ? 2 : 1;
+    }
+    return state[id] == 2;
+}
 
 /* A guest spinning on pause makes no progress until another thread runs, so a
  * pause is charged against the slice budget, like PAUSE-loop exiting on a
@@ -92,6 +127,7 @@ typedef enum brov_reason {
     BROV_REASON_SLOT_UNRESOLVED,
     BROV_REASON_BUDGET,
     BROV_REASON_DIRECT,
+    BROV_REASON_SWITCHES,
     BROV_REASON_MAX
 } brov_reason;
 
@@ -319,8 +355,11 @@ static inline uint64_t brov_jmp_key(uint64_t pc, unsigned id)
     bool brov_protect_batch;                                                   \
     struct brov_ops brov;
 
-#define BROV_PIN_MAX 16
+#define BROV_PIN_MAX 32
 #define BROV_XMM_MAX 16
+
+#define BROV_BUDGET_OFF \
+    ((intptr_t)offsetof(ArchCPU, neg.brov_insn_budget) - (intptr_t)offsetof(ArchCPU, env))
 
 #define BROVAN_TCG_FIELDS                                                      \
     void **brov_slots;                                                         \
@@ -341,17 +380,25 @@ static inline uint64_t brov_jmp_key(uint64_t pc, unsigned id)
     struct TCGLabel *brov_exitreq_label;                                       \
     struct TCGOp *brov_budget_insns;                                           \
     void *brov_lookup_stub;                                                    \
-    void *brov_pin_spill_stub;                                                 \
-    void *brov_pin_reload_stub;                                                \
+    void *brov_pin_stub[2];                                                    \
     int32_t brov_pin_ofs[BROV_PIN_MAX];                                        \
     uint8_t brov_pin_reg[BROV_PIN_MAX];                                        \
+    uint8_t brov_pin_type[BROV_PIN_MAX];                                       \
+    uint32_t brov_pin_reg_mask[TCG_TARGET_NB_REGS];                            \
+    uint32_t brov_pin_all;                                                     \
+    uint32_t brov_pin_caller;                                                  \
+    uint32_t brov_pin_lazy_ok;                                                 \
+    uint32_t brov_pin_env_held;                                                \
+    uint32_t brov_pin_env_span;                                                \
     uint8_t brov_pin_count;                                                    \
-    uint8_t brov_pin_sync;                                                     \
+    uint16_t brov_pin_sync;                                                    \
+    TCGv_i32 brov_budget;                                                      \
     TCGRegSet brov_ldst_kept;                                                  \
     TCGRegSet brov_ldst_live;                                                  \
     TCGv_vec brov_xmm[BROV_XMM_MAX];                                           \
     uint16_t brov_xmm_first;                                                   \
-    uint8_t brov_xmm_count;
+    uint8_t brov_xmm_count;                                                    \
+    bool brov_xmm_on;
 
 /* The slot table is interned during code generation (inside the tcg.c
  * translation unit) and rebuilt after a load (inside translate-all.c). Both
@@ -428,5 +475,6 @@ uint32_t brov_budget_mode_wanted(struct uc_struct *uc);
 uint32_t brov_access_exit_check_elided(struct uc_struct *uc);
 uint64_t brov_tsc_now(struct uc_struct *uc);
 bool brov_mem_protect_unchanged(struct uc_struct *uc, uint64_t address, uint64_t size, uint32_t perms);
+void brov_invalidate_code_range(struct uc_struct *uc, uint64_t address, uint64_t end);
 
 #endif /* BROVAN_UC_H */

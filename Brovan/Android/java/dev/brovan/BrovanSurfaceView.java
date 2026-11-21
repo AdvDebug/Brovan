@@ -155,7 +155,7 @@ public class BrovanSurfaceView extends SurfaceView implements SurfaceHolder.Call
         return reportedDpi;
     }
 
-    private static int autoDpi(int width, int height, int densityDpi) {
+    public static int autoDpi(int width, int height, int densityDpi) {
         int longSide = Math.max(width, height);
         int shortSide = Math.min(width, height);
         int dpi = Math.min(longSide * BASE_DPI / DESKTOP_WIDTH, shortSide * BASE_DPI / DESKTOP_HEIGHT);

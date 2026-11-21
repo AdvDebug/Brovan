@@ -135,6 +135,20 @@ static uint64_t brov_layout_fingerprint(void)
     return brov_hash_bytes(v, (size_t)n * sizeof(uint64_t), 0x62726f76616eULL);
 }
 
+static uint32_t brov_blob_switches(void)
+{
+    uint32_t mask = 0;
+    int i;
+
+    QEMU_BUILD_BUG_ON(BROV_SWITCH_COUNT > 24);
+    for (i = 0; i < BROV_SWITCH_COUNT; i++) {
+        if (brov_switch_set((brov_switch)i)) {
+            mask |= 1u << (BROV_BLOB_SWITCH_SHIFT + i);
+        }
+    }
+    return mask;
+}
+
 static uint64_t brov_host_fingerprint(struct uc_struct *uc)
 {
     uint64_t v[6];
@@ -199,6 +213,22 @@ static bool brov_tb_src_hash(struct uc_struct *uc, TranslationBlock *tb, uint64_
 
     *out = brov_hash_bytes(buf, total, tb->pc ^ ((uint64_t)tb->flags << 32));
     return true;
+}
+
+/* A block stays pending outside an executable region, since only there does a store invalidate code. */
+static bool brov_tb_restorable_src(struct uc_struct *uc, TranslationBlock *tb, uint64_t *src)
+{
+    MemoryRegion *first, *last;
+
+    if (tb->size == 0) {
+        return false;
+    }
+    first = uc->memory_mapping(uc, tb->pc);
+    last = uc->memory_mapping(uc, tb->pc + tb->size - 1);
+    if (!first || !last || (first->perms & UC_PROT_EXEC) == 0 || (last->perms & UC_PROT_EXEC) == 0) {
+        return false;
+    }
+    return brov_tb_src_hash(uc, tb, src);
 }
 
 typedef struct {
@@ -651,7 +681,7 @@ static int brov_save_impl(struct uc_struct *uc, void **blob_out, size_t *len_out
     hdr.magic = BROV_BLOB_MAGIC;
     hdr.abi = BROV_ABI_VERSION;
     hdr.header_bytes = (uint32_t)sizeof(hdr);
-    hdr.flags = (uc->brov_budget_mode ? BROV_BLOB_FLAG_BUDGET : 0u) | (brov_window_code_has_sites() ? BROV_BLOB_FLAG_DIRECT : 0u);
+    hdr.flags = (uc->brov_budget_mode ? BROV_BLOB_FLAG_BUDGET : 0u) | (brov_window_code_has_sites() ? BROV_BLOB_FLAG_DIRECT : 0u) | brov_blob_switches();
     hdr.layout_fingerprint = brov_layout_fingerprint();
     hdr.host_fingerprint = brov_host_fingerprint(uc);
     hdr.target_arch = (uint32_t)uc->arch;
@@ -862,6 +892,10 @@ static int brov_load_impl(struct uc_struct *uc, const void *blob, size_t len)
         reason = BROV_REASON_BUDGET;
         goto reject;
     }
+    if ((hdr->flags & BROV_BLOB_SWITCH_MASK) != brov_blob_switches()) {
+        reason = BROV_REASON_SWITCHES;
+        goto reject;
+    }
     if (hdr->reservation_base != base || hdr->reservation_size != size ||
         hdr->slot_count != s->brov_slot_count || hdr->slots_used > s->brov_slot_count) {
         reason = BROV_REASON_BASE_MISMATCH;
@@ -935,7 +969,7 @@ static int brov_load_impl(struct uc_struct *uc, const void *blob, size_t len)
                 continue;
             }
             tb = (TranslationBlock *)((uint8_t *)s->code_gen_buffer + tb_section[i].offset);
-            if (!brov_tb_src_hash(uc, tb, &src)) {
+            if (!brov_tb_restorable_src(uc, tb, &src)) {
                 if (dump && unreadable < 4) {
                     fprintf(stderr, "[brov-load] unreadable pc=%llx size=%u\n",
                             (unsigned long long)tb->pc, (unsigned)tb->size);
@@ -1077,7 +1111,7 @@ static int brov_resolve_impl(struct uc_struct *uc, uint32_t *resolved, uint32_t 
             (TranslationBlock *)((uint8_t *)s->code_gen_buffer + pend[i].offset);
         uint64_t src;
 
-        if (!brov_tb_src_hash(uc, tb, &src)) {
+        if (!brov_tb_restorable_src(uc, tb, &src)) {
             pend[kept++] = pend[i];
             continue;
         }

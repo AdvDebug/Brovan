@@ -31,7 +31,8 @@ namespace Brovan.Android
 
         // GUI thread only.
         private readonly Dictionary<IntPtr, AndroidTopLevel> _topLevels = new();
-        private bool _firstLayerShown;
+        private bool _firstLayerCreated;
+        private bool _windowShown;
 
         public AndroidWinManager()
         {
@@ -64,15 +65,24 @@ namespace Brovan.Android
                 throw new PlatformNotSupportedException("No Android surface was attached; the host app must call brovan_set_surface before running a guest that draws.");
 
             AndroidHost.WindowTitle = options.Title ?? string.Empty;
-            _window = new AndroidWindow(options);
+            _window = new AndroidWindow(this, options);
 
             // Replay the size and focus the guest missed before its window existed. The surface size is
             // published only on change, and a guest can wait for its first size event before it presents.
             _publishedWidth = 0;
             _publishedHeight = 0;
             AndroidInput.ReplayFocus();
-            AndroidHost.NotifyPlayer(AndroidHost.PlayerWindowCreated);
             return _window;
+        }
+
+        // A host window also exists for a hidden guest window, so the app learns of a window only when one shows.
+        private void NoteWindowShown()
+        {
+            if (_windowShown)
+                return;
+
+            _windowShown = true;
+            AndroidHost.NotifyPlayer(AndroidHost.PlayerWindowShown);
         }
 
         public bool TopLevelsAvailable => AndroidHost.LayersAvailable;
@@ -99,11 +109,10 @@ namespace Brovan.Android
             AndroidTopLevel created = new(this, layer, native, frame, owner as AndroidTopLevel);
             _topLevels[native] = created;
 
-            if (!_firstLayerShown)
+            if (!_firstLayerCreated)
             {
-                _firstLayerShown = true;
+                _firstLayerCreated = true;
                 AndroidInput.ReplayFocus();
-                AndroidHost.NotifyPlayer(AndroidHost.PlayerWindowCreated);
             }
 
             created.Place();
@@ -490,6 +499,9 @@ namespace Brovan.Android
 
                 _applied = state;
                 AndroidHost.ApplyLayer(_layer, state.X, state.Y, state.Width, state.Height, state.Z, state.Shown, state.Alpha);
+
+                if (state.Shown)
+                    _manager.NoteWindowShown();
             }
 
             internal void Flush()
@@ -744,6 +756,7 @@ namespace Brovan.Android
 
         private sealed class AndroidWindow : IWindow
         {
+            private readonly AndroidWinManager _manager;
             private readonly bool _resizable;
 
             private bool _disposed;
@@ -752,10 +765,10 @@ namespace Brovan.Android
             private bool _decorated;
             private WindowState _state;
 
-            internal AndroidWindow(WindowOptions options)
+            internal AndroidWindow(AndroidWinManager manager, WindowOptions options)
             {
+                _manager = manager;
                 _title = options.Title ?? string.Empty;
-                _visible = options.Visible;
                 _decorated = options.Decorated;
                 _resizable = options.Resizable;
                 _state = options.State;
@@ -787,6 +800,7 @@ namespace Brovan.Android
                 set { }
             }
 
+            // Starts hidden whatever the options say, because the first visible present is what tells the app.
             public bool Visible
             {
                 get => _visible;
@@ -794,6 +808,8 @@ namespace Brovan.Android
                 {
                     EnsureAlive();
                     _visible = value;
+                    if (value)
+                        _manager.NoteWindowShown();
                 }
             }
 

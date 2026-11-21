@@ -26,9 +26,6 @@
 #ifndef BROVAN_TCG_EXITCHECK_H
 #define BROVAN_TCG_EXITCHECK_H
 
-#define BROV_BUDGET_OFF \
-    (offsetof(ArchCPU, neg.brov_insn_budget) - offsetof(ArchCPU, env))
-
 /* Patched to the real block length by brov_gen_exit_check_end, which is the
  * first point at which it is known. Any value that survives to execution is a
  * bug, so it is one that stands out in a disassembly. */
@@ -38,36 +35,24 @@
  * The entry check of the next block ends a slice that spent it. */
 static inline void brov_gen_pause_charge(TCGContext *tcg_ctx)
 {
-    TCGv_i32 budget = tcg_temp_new_i32(tcg_ctx);
-
-    tcg_gen_ld_i32(tcg_ctx, budget, tcg_ctx->cpu_env, BROV_BUDGET_OFF);
-    tcg_gen_subi_i32(tcg_ctx, budget, budget, BROV_PAUSE_BUDGET_COST);
-    tcg_gen_st_i32(tcg_ctx, budget, tcg_ctx->cpu_env, BROV_BUDGET_OFF);
-    tcg_temp_free_i32(tcg_ctx, budget);
+    tcg_gen_subi_i32(tcg_ctx, tcg_ctx->brov_budget, tcg_ctx->brov_budget, BROV_PAUSE_BUDGET_COST);
 }
 
+/* A block that exits at its entry check is still charged. Against a scheduling
+ * quantum of hundreds of thousands of instructions that is noise. */
 static inline void brov_gen_budget(TCGContext *tcg_ctx, TCGv_i32 exitreq)
 {
-    TCGv_i32 budget = tcg_temp_new_i32(tcg_ctx);
     TCGv_i32 insns = tcg_temp_new_i32(tcg_ctx);
 
-    tcg_gen_ld_i32(tcg_ctx, budget, tcg_ctx->cpu_env, BROV_BUDGET_OFF);
     tcg_gen_movi_i32(tcg_ctx, insns, BROV_BUDGET_INSNS_PLACEHOLDER);
     tcg_ctx->brov_budget_insns = tcg_last_op(tcg_ctx);
-    tcg_gen_sub_i32(tcg_ctx, budget, budget, insns);
+    tcg_gen_sub_i32(tcg_ctx, tcg_ctx->brov_budget, tcg_ctx->brov_budget, insns);
     tcg_temp_free_i32(tcg_ctx, insns);
-
-    /* Stored before the branch rather than after it, so the value does not have
-     * to survive a basic-block boundary in a plain temp. The cost is that a
-     * block which exits without running is still charged for; over a scheduling
-     * quantum of hundreds of thousands of instructions that is noise. */
-    tcg_gen_st_i32(tcg_ctx, budget, tcg_ctx->cpu_env, BROV_BUDGET_OFF);
 
     /* Either condition is "negative", so one branch tests both. */
     if (exitreq != NULL) {
-        tcg_gen_or_i32(tcg_ctx, exitreq, exitreq, budget);
+        tcg_gen_or_i32(tcg_ctx, exitreq, exitreq, tcg_ctx->brov_budget);
     }
-    tcg_temp_free_i32(tcg_ctx, budget);
 }
 
 static inline void brov_gen_exit_check_start(TCGContext *tcg_ctx, TCGv_ptr puc,

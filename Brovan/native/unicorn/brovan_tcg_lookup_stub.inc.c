@@ -22,16 +22,6 @@ QEMU_BUILD_BUG_ON(offsetof(brov_jmp_entry, tc_ptr) != 0 || offsetof(brov_jmp_ent
 QEMU_BUILD_BUG_ON(offsetof(brov_lookup_state, flags) != 0 || offsetof(brov_lookup_state, key) != 8 ||
                   offsetof(brov_lookup_state, table) != 16);
 
-static bool brov_lookup_stub_off(void)
-{
-    static int off = -1;
-
-    if (off < 0) {
-        off = getenv("BROVAN_NO_JMP_STUB") != NULL;
-    }
-    return off != 0;
-}
-
 /* X30 holds the return address into the block, so the helper returns there. */
 static void brov_lookup_stub_tail(TCGContext *s)
 {
@@ -49,7 +39,7 @@ static void brov_lookup_stub_emit(TCGContext *s)
     unsigned i;
 
     s->brov_lookup_stub = NULL;
-    if (brov_lookup_stub_off() || !brov_jmp_ensure(uc)) {
+    if (brov_switch_set(BROV_SWITCH_NO_JMP_STUB) || !brov_jmp_ensure(uc)) {
         return;
     }
 
@@ -86,7 +76,7 @@ static void brov_lookup_stub_emit(TCGContext *s)
     }
     /* A call, so that a pin has a point to come back to. */
     tcg_out_insn(s, 3314, STP, TCG_REG_FP, TCG_REG_LR, TCG_REG_SP, -16, 1, 1);
-    brov_pin_helper_call(s, TCG_CALL_NO_WG_SE);
+    brov_pin_helper_call(s, TCG_CALL_NO_WG_SE, false);
     tcg_out_call(s, (tcg_insn_unit *)helper_lookup_tb_ptr);
     tcg_out_insn(s, 3314, LDP, TCG_REG_FP, TCG_REG_LR, TCG_REG_SP, 16, 0, 1);
     tcg_out_insn(s, 3207, RET, TCG_REG_LR);

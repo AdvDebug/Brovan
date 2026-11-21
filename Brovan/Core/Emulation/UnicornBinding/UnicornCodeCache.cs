@@ -32,7 +32,7 @@ namespace Brovan.Core.Emulation
             "reservation-mismatch", "prologue-mismatch", "arena-mismatch",
             "code-hash-mismatch", "slot-table-full", "audit-failed",
             "too-many-stale-blocks", "empty", "mostly-dead-code", "slot-unresolved",
-            "budget-mode-mismatch", "direct-mode-mismatch",
+            "budget-mode-mismatch", "direct-mode-mismatch", "switch-mismatch",
         };
 
         // Off the managed heap: as large as the last run's translated code, and alive across image mapping.

@@ -8,7 +8,8 @@
  *
  * The fault handler resumes at site + 8, so every guest memory op must emit exactly this shape.
  * The masked offset keeps even a mispredicted access inside the window.
- * A load that faults leaves its destination undefined, so a load into its own address register goes through x2.
+ * A load that faults leaves its destination undefined, so a load into its own address register or into a fixed
+ * register goes through x2, or through the vector scratch for a vector register.
  * A store that may cross a page takes the probe, because x86 writes neither page when the second one faults. */
 
 typedef struct {
@@ -47,7 +48,24 @@ static struct {
     tcg_insn_unit *done;
     TCGType type;
     TCGReg data_reg;
+    TCGReg site_reg;
 } brov_direct_move;
+
+static TCGReg brov_direct_load_reg(TCGContext *s, TCGType type, TCGReg data_reg, TCGReg addr_reg)
+{
+    if (data_reg != addr_reg && !tcg_regset_test_reg(s->reserved_regs, data_reg)) {
+        return data_reg;
+    }
+    return type == TCG_TYPE_V128 ? TCG_VEC_TMP : TCG_REG_X2;
+}
+
+static void brov_direct_note_move(tcg_insn_unit *done, TCGType type, TCGReg data_reg, TCGReg site_reg)
+{
+    brov_direct_move.done = site_reg != data_reg ? done : NULL;
+    brov_direct_move.type = type;
+    brov_direct_move.data_reg = data_reg;
+    brov_direct_move.site_reg = site_reg;
+}
 
 static void brov_direct_check(TCGContext *s, TCGReg addr_reg, unsigned size, bool is_ld, brov_direct_points *p)
 {
@@ -94,7 +112,7 @@ static void brov_direct_done(TCGContext *s, tcg_insn_unit *done)
     skip = s->code_ptr;
     tcg_out_insn(s, 3206, B, 0);
     reloc_pc26(done, s->code_ptr);
-    tcg_out_mov(s, brov_direct_move.type, brov_direct_move.data_reg, TCG_REG_X2);
+    tcg_out_mov(s, brov_direct_move.type, brov_direct_move.data_reg, brov_direct_move.site_reg);
     reloc_pc26(skip, s->code_ptr);
     brov_direct_move.done = NULL;
 }
@@ -103,7 +121,7 @@ static tcg_insn_unit *brov_direct_emit(TCGContext *s, MemOp memop, TCGType ext, 
                                        bool is_ld)
 {
     brov_direct_points p;
-    bool moved = is_ld && data_reg == addr_reg;
+    TCGReg site_reg = is_ld ? brov_direct_load_reg(s, ext, data_reg, addr_reg) : data_reg;
     tcg_insn_unit *done;
 
     if (!brov_direct_may_emit(s, memop)) {
@@ -111,14 +129,12 @@ static tcg_insn_unit *brov_direct_emit(TCGContext *s, MemOp memop, TCGType ext, 
     }
     brov_direct_check(s, addr_reg, 1u << (memop & MO_SIZE), is_ld, &p);
     if (is_ld) {
-        tcg_out_qemu_ld_direct(s, memop, ext, moved ? TCG_REG_X2 : data_reg, TCG_REG_X28, TCG_TYPE_I64, TCG_REG_X3);
+        tcg_out_qemu_ld_direct(s, memop, ext, site_reg, TCG_REG_X28, TCG_TYPE_I64, TCG_REG_X3);
     } else {
         tcg_out_qemu_st_direct(s, memop, data_reg, TCG_REG_X28, TCG_TYPE_I64, TCG_REG_X3);
     }
     done = brov_direct_site_end(s, &p);
-    brov_direct_move.done = moved ? done : NULL;
-    brov_direct_move.type = ext;
-    brov_direct_move.data_reg = data_reg;
+    brov_direct_note_move(done, ext, data_reg, site_reg);
     return done;
 }
 
@@ -173,6 +189,22 @@ static void brov_direct_done(TCGContext *s, tcg_insn_unit *done)
 {
     (void)s;
     (void)done;
+}
+
+static TCGReg brov_direct_load_reg(TCGContext *s, TCGType type, TCGReg data_reg, TCGReg addr_reg)
+{
+    (void)s;
+    (void)type;
+    (void)addr_reg;
+    return data_reg;
+}
+
+static void brov_direct_note_move(tcg_insn_unit *done, TCGType type, TCGReg data_reg, TCGReg site_reg)
+{
+    (void)done;
+    (void)type;
+    (void)data_reg;
+    (void)site_reg;
 }
 
 #endif

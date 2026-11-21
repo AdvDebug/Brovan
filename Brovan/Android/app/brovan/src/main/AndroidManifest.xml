@@ -91,5 +91,26 @@
             android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|density|uiMode"
             android:screenOrientation="landscape"
             android:launchMode="singleTask" />
+
+        <!-- One per pool slot, in the slot's process, so a spawned guest can run with nothing on screen. -->
+        <service
+            android:name=".GuestService1"
+            android:process=":guest1"
+            android:exported="false" />
+
+        <service
+            android:name=".GuestService2"
+            android:process=":guest2"
+            android:exported="false" />
+
+        <service
+            android:name=".GuestService3"
+            android:process=":guest3"
+            android:exported="false" />
+
+        <service
+            android:name=".GuestService4"
+            android:process=":guest4"
+            android:exported="false" />
     </application>
 </manifest>

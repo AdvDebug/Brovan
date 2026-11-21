@@ -62,7 +62,11 @@ public final class BrovanNative {
 
         void onScreenChanged();
 
-        void onWindowCreated();
+        /** A guest window was shown for the first time. */
+        void onWindowShown();
+
+        /** The guest wrote text to its console for the first time. */
+        void onConsoleWritten();
     }
 
     public interface MessageListener {
@@ -113,7 +117,8 @@ public final class BrovanNative {
 
     private static final int PLAYER_CONSOLE_ATTACHED = 1;
     private static final int PLAYER_SCREEN_CHANGED = 2;
-    private static final int PLAYER_WINDOW_CREATED = 3;
+    private static final int PLAYER_WINDOW_SHOWN = 3;
+    private static final int PLAYER_CONSOLE_WRITTEN = 4;
 
     /** Progress of {@link #installWindows}. Reported from a worker thread, not the main thread. */
     public interface InstallListener {
@@ -151,6 +156,9 @@ public final class BrovanNative {
     private static volatile PlayerListener playerListener;
     private static volatile MessageListener messageListener;
     private static volatile MessageRequest openMessage;
+    private static volatile boolean consoleAttached;
+    private static volatile boolean windowShown;
+    private static volatile boolean consoleWritten;
 
     static {
         // .NET's crypto shim dlopens libssl.so, and Android provides none. Loading our bundled pair up front
@@ -181,8 +189,22 @@ public final class BrovanNative {
         spawnHandler = value;
     }
 
+    /** A listener set late is told what the guest already did, as {@link #setMessageListener} does. */
     public static void setPlayerListener(PlayerListener value) {
         playerListener = value;
+        if (value == null) {
+            return;
+        }
+
+        if (consoleAttached) {
+            value.onConsoleAttached();
+        }
+        if (windowShown) {
+            value.onWindowShown();
+        }
+        if (consoleWritten) {
+            value.onConsoleWritten();
+        }
     }
 
     /** A listener set while a request is open is shown that request, so a recreated activity shows it again. */
@@ -236,6 +258,16 @@ public final class BrovanNative {
     /** Call from surfaceCreated / surfaceChanged. */
     public static void setSurface(Surface surface, int densityDpi) {
         nativeSetSurface(surface, densityDpi);
+    }
+
+    /** The screen a guest without a surface yet will be shown on. */
+    public static void setDisplayMetrics(int width, int height, int densityDpi) {
+        nativeSetDisplayMetrics(width, height, densityDpi);
+    }
+
+    /** Whether guest windows get host windows of their own; valid only after {@link #init}. */
+    public static boolean topLevelsEnabled() {
+        return nativeTopLevelsEnabled();
     }
 
     /** Call from surfaceDestroyed. */
@@ -424,6 +456,20 @@ public final class BrovanNative {
 
     @SuppressWarnings("unused")
     private static void onNativePlayer(int event) {
+        switch (event) {
+            case PLAYER_CONSOLE_ATTACHED:
+                consoleAttached = true;
+                break;
+            case PLAYER_WINDOW_SHOWN:
+                windowShown = true;
+                break;
+            case PLAYER_CONSOLE_WRITTEN:
+                consoleWritten = true;
+                break;
+            default:
+                break;
+        }
+
         PlayerListener current = playerListener;
         if (current == null) {
             return;
@@ -436,8 +482,11 @@ public final class BrovanNative {
             case PLAYER_SCREEN_CHANGED:
                 current.onScreenChanged();
                 break;
-            case PLAYER_WINDOW_CREATED:
-                current.onWindowCreated();
+            case PLAYER_WINDOW_SHOWN:
+                current.onWindowShown();
+                break;
+            case PLAYER_CONSOLE_WRITTEN:
+                current.onConsoleWritten();
                 break;
             default:
                 break;
@@ -542,6 +591,10 @@ public final class BrovanNative {
     private static native void nativeSetSurface(Surface surface, int densityDpi);
 
     private static native void nativeClearSurface();
+
+    private static native void nativeSetDisplayMetrics(int width, int height, int densityDpi);
+
+    private static native boolean nativeTopLevelsEnabled();
 
     private static native int nativeStart(String binaryPath, String guestCommandLine, String workingDirectory,
                                           String debuggerCommands, String settingsJson);

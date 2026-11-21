@@ -12,7 +12,8 @@ namespace Brovan.Android
 
         public const int PlayerConsoleAttached = 1;
         public const int PlayerScreenChanged = 2;
-        public const int PlayerWindowCreated = 3;
+        public const int PlayerWindowShown = 3;
+        public const int PlayerConsoleWritten = 4;
 
         private static IntPtr _playerSink;
         private static IntPtr _messageSink;

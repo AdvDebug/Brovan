@@ -1879,7 +1879,8 @@ namespace Brovan.Core.Emulation
 
         /// <summary>
         /// The running slice's remaining instruction budget, or null when the engine keeps none. Negative once
-        /// exhausted. Storing a smaller value shortens the slice from the next block on.
+        /// exhausted. Storing a smaller value shortens the slice from the next block on. Write it only from a
+        /// callback of the running slice or between slices.
         /// </summary>
         internal unsafe int* BudgetPointer
         {
