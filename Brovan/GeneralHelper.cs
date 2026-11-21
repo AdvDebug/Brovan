@@ -2396,7 +2396,14 @@ namespace Brovan
             /// </remarks>
             public static string MountWindowsProgramDirectory(string HostImagePath, string GuestParentDirectory)
             {
-                if (string.IsNullOrWhiteSpace(HostImagePath) || IsWindowsRootedPath(HostImagePath))
+                if (string.IsNullOrWhiteSpace(HostImagePath))
+                    return HostImagePath;
+
+                string OnDrive = ToGuestDrivePath(HostImagePath);
+                if (OnDrive != null)
+                    return OnDrive;
+
+                if (IsWindowsRootedPath(HostImagePath))
                     return HostImagePath;
 
                 string HostDirectory;
@@ -2430,6 +2437,10 @@ namespace Brovan
                 if (string.IsNullOrWhiteSpace(HostPath))
                     return null;
 
+                string OnDrive = ToGuestDrivePath(HostPath);
+                if (OnDrive != null)
+                    return OnDrive;
+
                 if (IsWindowsRootedPath(HostPath))
                     return HostPath;
 
@@ -2446,8 +2457,6 @@ namespace Brovan
                 if (string.IsNullOrEmpty(Full))
                     return null;
 
-                StringComparison Comparison = IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-
                 string BestGuest = null;
                 string BestRoot = null;
 
@@ -2459,21 +2468,60 @@ namespace Brovan
                         if (BestRoot != null && Root.Length <= BestRoot.Length)
                             continue;
 
-                        if (string.Equals(Full, Root, Comparison) || Full.StartsWith(Root + Path.DirectorySeparatorChar, Comparison))
-                        {
-                            BestGuest = Pair.Key;
-                            BestRoot = Root;
-                        }
+                        string Rest = GuestPathUnderHostRoot(Full, Root);
+                        if (Rest == null)
+                            continue;
+
+                        BestGuest = Rest.Length == 0 ? Pair.Key : Pair.Key + "\\" + Rest;
+                        BestRoot = Root;
                     }
                 }
 
-                if (BestRoot == null)
+                return BestGuest;
+            }
+
+            /// <returns>The rest of the path with guest separators, empty for the root itself, or null outside the root.</returns>
+            private static string GuestPathUnderHostRoot(string FullHostPath, string HostRoot)
+            {
+                StringComparison Comparison = IsWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                if (!FullHostPath.StartsWith(HostRoot, Comparison))
                     return null;
 
-                if (Full.Length == BestRoot.Length)
-                    return BestGuest;
+                if (FullHostPath.Length == HostRoot.Length)
+                    return string.Empty;
 
-                return BestGuest + "\\" + Full.Substring(BestRoot.Length + 1).Replace(Path.DirectorySeparatorChar, '\\');
+                if (FullHostPath[HostRoot.Length] != Path.DirectorySeparatorChar)
+                    return null;
+
+                return FullHostPath.Substring(HostRoot.Length + 1).Replace(Path.DirectorySeparatorChar, '\\');
+            }
+
+            private static string ToGuestDrivePath(string HostPath)
+            {
+                string Full;
+                try
+                {
+                    Full = Path.GetFullPath(HostPath);
+                }
+                catch (ArgumentException)
+                {
+                    return null;
+                }
+
+                lock (DriveMapLock)
+                {
+                    foreach (KeyValuePair<char, string> Pair in DriveMappings)
+                    {
+                        if (string.IsNullOrWhiteSpace(Pair.Value))
+                            continue;
+
+                        string Rest = GuestPathUnderHostRoot(Full, Pair.Value.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                        if (Rest != null)
+                            return Pair.Key + ":\\" + Rest;
+                    }
+                }
+
+                return null;
             }
 
             /// <remarks>

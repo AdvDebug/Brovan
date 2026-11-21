@@ -811,7 +811,7 @@ namespace Brovan.Core.Emulation
 
             if (Handles == null || Handles.Count == 0 || WinHelper == null
                 || State.WorkerFactoryWaitActive || State.IoCompletionWaitActive || State.AlertByThreadIdWaitActive || State.IoRequest != null
-                || State.WaitMessageActive || State.GetMessageWaitActive || State.MsgWaitActive
+                || State.WaitMessageActive || State.GetMessageWaitActive || State.SendReplyWaitActive || State.MsgWaitActive
                 || State.RetrySyscallActive || State.PipeWaitHandle != 0 || State.WaitAlertable || State.ApcAlertable)
                 return;
 
@@ -1196,6 +1196,16 @@ namespace Brovan.Core.Emulation
                 State.WaitMessageActive = false;
                 Thread.WaitSatisfiedIndex = 1;
                 State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
+                return true;
+            }
+
+            if (State != null && State.SendReplyWaitActive)
+            {
+                if (!Win32kHelper.IsSendReplyReady(this, Thread, State))
+                    return false;
+
+                State.SendReplyWaitActive = false;
+                State.RetrySyscallActive = true;
                 return true;
             }
 

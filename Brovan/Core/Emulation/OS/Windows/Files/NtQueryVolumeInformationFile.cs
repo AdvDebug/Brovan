@@ -15,6 +15,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal const int MaximumInformationClass = (int)FileFsSectorSizeInformation;
         internal const int MaximumInformationBytes = 64;
+        private const int HostFailure = -1;
 
         private const uint FILE_DEVICE_DISK = 0x00000007;
         private const uint FILE_DEVICE_CONSOLE = 0x00000050;
@@ -52,6 +53,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             int Required = BuildInformation(Instance, FileObj, FsInfoClass, Data);
             if (Required == 0)
                 return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_INFO_CLASS, 0);
+            if (Required == HostFailure)
+                return WriteStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_UNSUCCESSFUL, 0);
 
             uint Minimum = FsInfoClass == FileFsVolumeInformation ? 0x18u : (uint)Required;
             if (Length < Minimum)
@@ -72,9 +75,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Result;
         }
 
+        internal static bool AnswersFromHost(uint InformationClass)
+            => InformationClass == FileFsSizeInformation || InformationClass == FileFsFullSizeInformation;
+
         internal static int BuildInformation(BinaryEmulator Instance, WinFile? FileObj, uint InformationClass, Span<byte> Data)
         {
             Data.Clear();
+            WindowsStorageDeviceSupport.VolumeSpace Space = default;
+            if (AnswersFromHost(InformationClass) && !WindowsStorageDeviceSupport.TryGetVolumeSpace(out Space))
+                return HostFailure;
+
             switch (InformationClass)
             {
                 case FileFsVolumeInformation:
@@ -84,8 +94,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return 0x12 + Encoding.Unicode.GetBytes(VolumeLabel.AsSpan(), Data.Slice(0x12));
 
                 case FileFsSizeInformation:
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data, WindowsStorageDeviceSupport.TotalClusters);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(8), WindowsStorageDeviceSupport.FreeClusters);
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data, Space.TotalClusters);
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(8), Space.CallerFreeClusters);
                     BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(16), (uint)WindowsStorageDeviceSupport.SectorsPerCluster);
                     BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(20), (uint)WindowsStorageDeviceSupport.BytesPerSector);
                     return 24;
@@ -118,9 +128,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return 12 + Encoding.Unicode.GetBytes(FileSystemName.AsSpan(), Data.Slice(12));
 
                 case FileFsFullSizeInformation:
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data, WindowsStorageDeviceSupport.TotalClusters);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(8), WindowsStorageDeviceSupport.FreeClusters);
-                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(16), WindowsStorageDeviceSupport.FreeClusters);
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data, Space.TotalClusters);
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(8), Space.CallerFreeClusters);
+                    BinaryPrimitives.WriteUInt64LittleEndian(Data.Slice(16), Space.FreeClusters);
                     BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(24), (uint)WindowsStorageDeviceSupport.SectorsPerCluster);
                     BinaryPrimitives.WriteUInt32LittleEndian(Data.Slice(28), (uint)WindowsStorageDeviceSupport.BytesPerSector);
                     return 32;

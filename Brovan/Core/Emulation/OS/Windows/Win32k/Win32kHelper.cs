@@ -3570,12 +3570,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             public readonly Win32kMessage Message;
             public readonly uint Sender;
             public readonly int Depth;
+            public readonly WinSentMessageReply Reply;
 
-            public Win32kSentNotification(in Win32kMessage Message, uint Sender, int Depth)
+            public Win32kSentNotification(in Win32kMessage Message, uint Sender, int Depth, WinSentMessageReply Reply)
             {
                 this.Message = Message;
                 this.Sender = Sender;
                 this.Depth = Depth;
+                this.Reply = Reply;
             }
         }
 
@@ -3613,13 +3615,88 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Instance.WakeSignal.Bump();
         }
 
-        private static void AddNotification(BinaryEmulator Instance, Win32kState State, ulong Hwnd, uint Message, ulong WParam, ulong LParam, bool WithoutSender)
+        private static void AddNotification(BinaryEmulator Instance, Win32kState State, ulong Hwnd, uint Message, ulong WParam, ulong LParam, bool WithoutSender,
+            WinSentMessageReply Reply = null)
         {
             Win32kMessage Notification = new Win32kMessage(Hwnd, Message, WParam, LParam, unchecked((uint)Instance.EmulatedTickCount64), State.CursorScreenX, State.CursorScreenY, 0, true);
 
             EmulatedThread Thread = Instance.CurrentThread;
             uint Sender = WithoutSender ? 0 : Thread?.ThreadId ?? 0;
-            State.SentNotifications.Add(new Win32kSentNotification(Notification, Sender, GetCallbackDepth(Thread)));
+            State.SentNotifications.Add(new Win32kSentNotification(Notification, Sender, GetCallbackDepth(Thread), Reply));
+        }
+
+        // While it waits, the sender runs sends addressed to itself, as NT does (xxxInterSendMsgEx).
+        // The syscall runs again after each one, and once more to return the result.
+        internal static NTSTATUS SendToOtherThread(BinaryEmulator Instance, WinWindow Target, uint Message, ulong WParam, ulong LParam, bool Ansi)
+        {
+            EmulatedThread Thread = Instance.CurrentThread;
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            int Depth = GetCallbackDepth(Thread);
+
+            WinSentMessageReply Send = State.InnermostSend;
+            if (Send == null || Send.Depth != Depth)
+            {
+                Send = new WinSentMessageReply(Thread, Depth, Target.Hwnd, Message, Ansi);
+                (State.PendingSends ??= new List<WinSentMessageReply>()).Add(Send);
+                AddNotification(Instance, GetState(Instance), Target.Hwnd, Message, WParam, LParam, WithoutSender: false, Send);
+                Instance.WakeSignal.Bump();
+            }
+            else if (Send.Replied)
+            {
+                State.PendingSends.RemoveAt(State.PendingSends.Count - 1);
+                Instance.SetRawSyscallReturn(Send.Result);
+                return NTSTATUS.STATUS_SUCCESS;
+            }
+
+            ulong SyscallRip = Instance.WinHelper.GetSyscallRip();
+            if (ReceiveNotification(Instance, SyscallRip) || TryDeliverWindowPosChanged(Instance, 0, SyscallRip))
+                return NTSTATUS.STATUS_SUCCESS;
+
+            State.RetrySyscallNumber = Instance.WinHelper.ReadSyscallNumber();
+            State.SendReplyWaitActive = true;
+            return Instance.WinHelper.ParkUntil(Thread, -1, Alertable: false);
+        }
+
+        internal static bool IsSendRerun(BinaryEmulator Instance)
+        {
+            EmulatedThread Thread = Instance.CurrentThread;
+            return WinEmulatedThread.TryGetState(Thread)?.InnermostSend is { } Send && Send.Depth == GetCallbackDepth(Thread);
+        }
+
+        internal static bool IsSendReplyReady(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
+        {
+            WinSentMessageReply Send = State.InnermostSend;
+            return Send == null || Send.Replied || HasSentMessageFor(Instance, Thread.ThreadId);
+        }
+
+        // NT ends a send that no thread has received with 0 when its window is destroyed.
+        internal static void ClearSendMessages(BinaryEmulator Instance, ulong Hwnd)
+        {
+            List<Win32kSentNotification> Pending = GetState(Instance).SentNotifications;
+            for (int i = Pending.Count - 1; i >= 0; i--)
+            {
+                if (Pending[i].Message.Hwnd != Hwnd)
+                    continue;
+
+                WinSentMessageReply Reply = Pending[i].Reply;
+                Pending.RemoveAt(i);
+                Reply?.EndDelivery(Instance, 0);
+            }
+        }
+
+        // NT never runs a send whose sender died before a thread received it (SenderDied).
+        internal static void DropSendsFrom(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            List<Win32kSentNotification> Pending = GetState(Instance).SentNotifications;
+            for (int i = Pending.Count - 1; i >= 0; i--)
+            {
+                WinSentMessageReply Reply = Pending[i].Reply;
+                if (Reply == null || Reply.Sender != Thread)
+                    continue;
+
+                Pending.RemoveAt(i);
+                Reply.EndDelivery(Instance, 0);
+            }
         }
 
         private static void QueueNotificationMessage(Win32kState State, in Win32kMessage Notification)
@@ -3639,7 +3716,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static bool SendNotifications(BinaryEmulator Instance, ulong Result)
         {
             Win32kState State = GetState(Instance);
-            while (TryTakeNotification(Instance, State, false, out Win32kMessage Notification))
+            while (TryTakeNotification(Instance, State, false, out Win32kSentNotification Notification))
             {
                 if (InvokeNotification(Instance, State, Notification, 0, Result))
                     return true;
@@ -3658,7 +3735,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal static bool ReceiveNotification(BinaryEmulator Instance, ulong SyscallRip)
         {
             Win32kState State = GetState(Instance);
-            while (TryTakeNotification(Instance, State, true, out Win32kMessage Notification))
+            while (TryTakeNotification(Instance, State, true, out Win32kSentNotification Notification))
             {
                 if (InvokeNotification(Instance, State, Notification, SyscallRip, null))
                     return true;
@@ -3668,7 +3745,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
 
         // A nested procedure never runs an outer send. Other sends wait for the owner to read its queue.
-        private static bool TryTakeNotification(BinaryEmulator Instance, Win32kState State, bool Reading, out Win32kMessage Notification)
+        private static bool TryTakeNotification(BinaryEmulator Instance, Win32kState State, bool Reading, out Win32kSentNotification Notification)
         {
             List<Win32kSentNotification> Pending = State.SentNotifications;
             EmulatedThread Thread = Instance.CurrentThread;
@@ -3678,9 +3755,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             for (int i = 0; i < Pending.Count;)
             {
                 Win32kSentNotification Candidate = Pending[i];
-                if (!IsDeliverable(Instance, Candidate.Message))
+                if (!IsDeliverable(Instance, Candidate))
                 {
                     Pending.RemoveAt(i);
+                    Candidate.Reply?.EndDelivery(Instance, 0);
                     continue;
                 }
 
@@ -3688,7 +3766,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 if (Eligible && OwnedByThread(Instance, Candidate.Message.Hwnd, ThreadId))
                 {
                     Pending.RemoveAt(i);
-                    Notification = Candidate.Message;
+                    Notification = Candidate;
                     return true;
                 }
 
@@ -3699,9 +3777,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return false;
         }
 
-        private static bool IsDeliverable(BinaryEmulator Instance, in Win32kMessage Notification)
+        // A send whose sender waits is never overtaken.
+        private static bool IsDeliverable(BinaryEmulator Instance, in Win32kSentNotification Notification)
         {
-            return Instance.WinHelper.GetWindow(Notification.Hwnd) != null && !IsOvertaken(Instance, Notification);
+            return Instance.WinHelper.GetWindow(Notification.Message.Hwnd) != null
+                && (Notification.Reply != null || !IsOvertaken(Instance, Notification.Message));
         }
 
         private static bool IsOwnSend(in Win32kSentNotification Notification, uint ThreadId)
@@ -3714,7 +3794,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             foreach (Win32kSentNotification Candidate in State.SentNotifications)
             {
                 if (!IsOwnSend(Candidate, ThreadId) && OwnedByThread(Instance, Candidate.Message.Hwnd, ThreadId)
-                    && IsDeliverable(Instance, Candidate.Message))
+                    && IsDeliverable(Instance, Candidate))
                 {
                     return true;
                 }
@@ -3723,16 +3803,23 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return false;
         }
 
-        private static bool InvokeNotification(BinaryEmulator Instance, Win32kState State, in Win32kMessage Notification, ulong SyscallRetryRip, ulong? Result)
+        private static bool InvokeNotification(BinaryEmulator Instance, Win32kState State, in Win32kSentNotification Entry, ulong SyscallRetryRip, ulong? Result)
         {
+            Win32kMessage Notification = Entry.Message;
             WinWindow Window = Instance.WinHelper.GetWindow(Notification.Hwnd);
-            if (InvokeWindowProc(Instance, Notification.Hwnd, Window.WndProc, Notification.Message, Notification.WParam, Notification.LParam,
-                SyscallRetryRip: SyscallRetryRip, DeferredSyscallResult: Result))
+            ulong WndProc = Entry.Reply is { Ansi: true }
+                ? Instance.WinHelper.GetAnsiWindowProc(Window.WndProc, Instance.WinHelper.GetWindowClassFunctionId(Window))
+                : Window.WndProc;
+            if (InvokeWindowProc(Instance, Notification.Hwnd, WndProc, Notification.Message, Notification.WParam, Notification.LParam,
+                SyscallRetryRip: SyscallRetryRip, DeferredSyscallResult: Result, ReceivedSend: Entry.Reply))
             {
                 return true;
             }
 
-            QueueNotificationMessage(State, Notification);
+            if (Entry.Reply != null)
+                Entry.Reply.EndDelivery(Instance, 0);
+            else
+                QueueNotificationMessage(State, Notification);
             return false;
         }
 
@@ -7023,14 +7110,15 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         // The syscall in progress does not answer. The procedure's result becomes its return value.
         internal static bool InvokeWindowProc(BinaryEmulator Instance, ulong Hwnd, ulong WndProc, uint Message, ulong WParam, ulong LParam,
-            WinCallbackContinuation Continuation = null, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, ulong? DeferredSyscallResult = null)
+            WinCallbackContinuation Continuation = null, ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, ulong? DeferredSyscallResult = null,
+            WinSentMessageReply ReceivedSend = null)
         {
             if (!TryBeginWindowProcCallback(Instance, WndProc, out ulong Callback, out ulong ArgumentBuffer))
                 return false;
 
             WriteWindowProcCallbackArguments(Instance, ArgumentBuffer, Hwnd, WndProc, Message, WParam, LParam);
             return Instance.WinHelper.EnterUserCallback(Callback, WindowProcCallbackIndex, ArgumentBuffer, Continuation, SyscallRetryRip, PaintRetryHwnd,
-                DeferredSyscallResult);
+                DeferredSyscallResult, ReceivedSend);
         }
 
         // True once, for the syscall that the returning WM_PAINT callback is re-running.
@@ -7562,7 +7650,8 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         internal const ushort FnidIme = 0x02A9;
         internal const ushort FnidGhost = 0x02AA;
 
-        private const ushort FnidSendMessageFirst = 0x02B1;
+        internal const ushort FnidSendMessage = 0x02B1;
+        private const ushort FnidSendMessageFirst = FnidSendMessage;
         internal const ushort FnidSendMessageCallProc = 0x02B4;
         internal const ushort FnidSendNotifyMessage = 0x02B7;
         internal const ushort FnidSendMessageCallback = 0x02B8;

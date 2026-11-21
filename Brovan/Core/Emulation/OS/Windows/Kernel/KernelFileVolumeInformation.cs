@@ -34,6 +34,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             byte[] Data = new byte[EntryCount * EntryBytes];
             for (uint Class = 0; Class < EntryCount; Class++)
             {
+                if (NtQueryVolumeInformationFile.AnswersFromHost(Class))
+                    continue;
+
                 Span<byte> Entry = Data.AsSpan((int)Class * EntryBytes, EntryBytes);
                 int Length = NtQueryVolumeInformationFile.BuildInformation(Instance, null, Class, Entry.Slice(sizeof(ulong)));
                 BinaryPrimitives.WriteUInt64LittleEndian(Entry, (ulong)Length);

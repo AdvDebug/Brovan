@@ -688,7 +688,8 @@ namespace Brovan.Core.Helpers
                 return true;
             }
 
-            if (RelativePath.StartsWith("\\Wow6432Node\\", StringComparison.OrdinalIgnoreCase))
+            // A hive with no Wow6432Node answers the 32-bit view from its root, as the writer does.
+            if (RelativePath.StartsWith("\\Wow6432Node\\", StringComparison.OrdinalIgnoreCase) && !TryTraverse(this, "\\Wow6432Node", out _))
             {
                 string Alt = "\\" + RelativePath.Substring("\\Wow6432Node\\".Length);
                 if (TryTraverse(this, Alt, out Found))

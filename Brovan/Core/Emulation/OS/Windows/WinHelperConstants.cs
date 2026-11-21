@@ -293,6 +293,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_PRIVILEGE_NOT_HELD = 0xC0000061,
         STATUS_UNKNOWN_REVISION = 0xC0000058,
         STATUS_NO_IMPERSONATION_TOKEN = 0xC000005C,
+        STATUS_NO_SUCH_LOGON_SESSION = 0xC000005F,
         STATUS_NONE_MAPPED = 0xC0000073,
         STATUS_INVALID_ACL = 0xC0000077,
         STATUS_INVALID_SID = 0xC0000078,
@@ -1262,7 +1263,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool IsAnonymous => User == User.Anonymous;
 
-        public bool IsElevated => User == User.Admin;
+        public bool IsElevated => User == FullHalf;
+
+        // The guest user is a UAC administrator, whose logon has a limited and a full token.
+        internal const User LimitedHalf = User.Standard;
+        internal const User FullHalf = User.Admin;
 
         public bool IsAppContainer => !AppContainerSid.IsDefaultOrEmpty;
 
@@ -1328,6 +1333,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinToken Duplicate(TokenType NewType, SecurityImpersonationLevel NewLevel, bool NewEffectiveOnly)
             => new WinToken(this) { Type = NewType, ImpersonationLevel = NewLevel, EffectiveOnly = NewEffectiveOnly };
+
+        // NT returns the linked token at identification level, with no package identity.
+        internal WinToken OtherHalf()
+            => new WinToken
+            {
+                User = User == FullHalf ? LimitedHalf : FullHalf,
+                SessionId = SessionId,
+                Type = TokenType.Impersonation,
+                ImpersonationLevel = SecurityImpersonationLevel.SecurityIdentification,
+                EffectiveOnly = false,
+            };
 
         // NT filters the attributes this way for each new process token (AuthzBasepDuplicateSecurityAttributes).
         public WinToken AssignPrimary(ulong ProcessId)

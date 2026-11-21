@@ -23,6 +23,10 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
+            // A waiting send runs again to collect its result, even after its window is gone.
+            if (FunctionId == Win32kHelper.FnidSendMessage && Win32kHelper.IsSendRerun(Instance))
+                return Win32kHelper.SendToOtherThread(Instance, null, Message, WParam, LParam, Ansi);
+
             if (Win32kHelper.IsSendMessageFunction(FunctionId))
             {
                 WinWindow Target = Hwnd == 0 ? null : Instance.WinHelper.GetWindow(Hwnd);
@@ -66,6 +70,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     {
                         return NTSTATUS.STATUS_SUCCESS;
                     }
+                }
+                else if (FunctionId == Win32kHelper.FnidSendMessage && Target != null && Target.OwnerThreadId != 0)
+                {
+                    if (Ansi && Instance.WinHelper.BeginClientPfnFetch())
+                        return NTSTATUS.STATUS_SUCCESS;
+
+                    return Win32kHelper.SendToOtherThread(Instance, Target, Message, WParam, LParam, Ansi);
                 }
             }
 

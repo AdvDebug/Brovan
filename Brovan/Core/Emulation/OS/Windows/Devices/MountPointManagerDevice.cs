@@ -18,6 +18,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const string DeviceNameValue = "\\Device\\HarddiskVolume1";
         private const string DriveSymbolicLink = "\\DosDevices\\C:";
 
+        // NT writes the drive letter without a backslash, then the folder mount points, which Brovan has none of.
+        private static readonly byte[] DosVolumePaths = Encoding.Unicode.GetBytes("C:\0\0");
+
         public string DeviceName => "\\Device\\MountPointManager";
 
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
@@ -32,8 +35,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return IOCTL switch
             {
                 IOCTL_MOUNTMGR_QUERY_POINTS => QueryPoints(ref Data, Instance),
-                IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH => QueryDosVolumePaths(ref Data, Instance, false),
-                IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATHS => QueryDosVolumePaths(ref Data, Instance, true),
+                IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATH or IOCTL_MOUNTMGR_QUERY_DOS_VOLUME_PATHS => QueryDosVolumePaths(ref Data, Instance),
                 IOCTL_MOUNTMGR_NEXT_DRIVE_LETTER => QueryNextDriveLetter(ref Data),
                 IOCTL_MOUNTMGR_QUERY_AUTO_MOUNT => QueryAutoMount(ref Data),
                 IOCTL_MOUNTMGR_CHANGE_NOTIFY => QueryChangeNotify(ref Data),
@@ -71,7 +73,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static NTSTATUS QueryDosVolumePaths(ref DeviceData Data, BinaryEmulator Instance, bool IncludeAll)
+        private static NTSTATUS QueryDosVolumePaths(ref DeviceData Data, BinaryEmulator Instance)
         {
             if (Data.InputBuffer == null || Data.InputLength < 2)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -83,18 +85,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!IsKnownDeviceName(DeviceName, Instance))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            string MultiSz = IncludeAll ? string.Concat("C:\\", '\0', Instance.WinHelper.SyntheticVolumeWin32GuidPath, '\0', '\0') : string.Concat("C:\\", '\0', '\0');
-            byte[] MultiSzBytes = Encoding.Unicode.GetBytes(MultiSz);
-            uint RequiredSize = checked((uint)(4 + MultiSzBytes.Length));
+            uint RequiredSize = (uint)(4 + DosVolumePaths.Length);
 
-            BinaryPrimitives.WriteUInt32LittleEndian(Data.OutputBuffer.AsSpan(0, 4), (uint)MultiSzBytes.Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(Data.OutputBuffer.AsSpan(0, 4), (uint)DosVolumePaths.Length);
             if (Data.OutputLength < RequiredSize)
             {
                 Data.Information = 4;
                 return NTSTATUS.STATUS_BUFFER_OVERFLOW;
             }
 
-            MultiSzBytes.CopyTo(Data.OutputBuffer.AsSpan(4));
+            DosVolumePaths.CopyTo(Data.OutputBuffer.AsSpan(4));
             Data.Information = RequiredSize;
             return NTSTATUS.STATUS_SUCCESS;
         }

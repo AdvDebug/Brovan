@@ -18,6 +18,9 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         private const uint ProcMap = 3;
         private const uint ProcMapAuth = 7;
 
+        // rpcepmap's ept_map_auth_async only calls ept_map_auth.
+        private const uint ProcMapAuthAsync = 8;
+
         private const uint EptSNotRegistered = 0x16C9A0D6;
         private const uint MaxTowers = 500;
 
@@ -39,10 +42,11 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
 
         internal static byte[] Handle(in LrpcMessage Message, BinaryEmulator Instance)
         {
-            if (Message.ProcNumber != ProcMap && Message.ProcNumber != ProcMapAuth)
+            bool Auth = Message.ProcNumber == ProcMapAuth || Message.ProcNumber == ProcMapAuthAsync;
+            if (Message.ProcNumber != ProcMap && !Auth)
                 return null;
 
-            if (!TryReadRequest(Message.StubData, Message.ProcNumber == ProcMapAuth, out ReadOnlySpan<byte> Tower, out ReadOnlySpan<byte> Sid, out uint Requested))
+            if (!TryReadRequest(Message.StubData, Auth, out ReadOnlySpan<byte> Tower, out ReadOnlySpan<byte> Sid, out uint Requested))
                 return LrpcPacket.BuildFault(Message, LrpcPacket.RpcXBadStubData);
 
             Entry Found = default;

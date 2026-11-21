@@ -514,6 +514,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.MsgWaitMask = 0;
             State.WaitMessageActive = false;
             State.GetMessageWaitActive = false;
+            State.SendReplyWaitActive = false;
             State.RetrySyscallActive = false;
             State.RetrySyscallNumber = 0;
             State.HostWorkWaitActive = false;
@@ -538,6 +539,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             Win32kHelper.DropThreadMessages(Emulator, Thread.ThreadId, DestroyThreadWindows(Thread.ThreadId));
+            Win32kHelper.DropSendsFrom(Emulator, Thread);
+            EndReceivedSends(Thread);
             Win32kQueuePort.ReleasePort(Emulator, WinEmulatedThread.TryGetState(Thread));
             NtTimerHelpers.RundownTimers(Emulator, Thread);
             AlpcMessaging.DeliverConnectReplies(Emulator, Thread.ThreadId);
@@ -551,17 +554,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Current)
                 Emulator.ReleaseThreadProcessor(Thread);
 
+            ReleaseThreadStack(Thread);
+            Warbird?.ReleaseThread(Thread.ThreadId);
+
             // NT keeps stacks and TEBs during process exit for pending wait blocks.
             bool ProcessExiting = OwnProcess.Exiting;
-            if (Thread.StackAddress != 0 && !ProcessExiting)
-            {
-                ForgetLockedPages(Thread.StackAddress, Thread.StackAddress + Thread.StackSize);
-                if (!Emulator.ReleaseMemory(Thread.StackAddress))
-                    Emulator.UnmapMemoryRegion(Thread.StackAddress);
-                Thread.StackAddress = 0;
-            }
-
-            Warbird?.ReleaseThread(Thread.ThreadId);
 
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
             if (State != null)
@@ -577,6 +574,45 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             ForgetThreadIfUnreferenced(Thread);
+        }
+
+        // A receiver reads a send's data from the sender's stack, so the stack stays until every send has its reply.
+        internal void ReleaseThreadStack(EmulatedThread Thread)
+        {
+            if (Thread.StackAddress == 0 || Thread.State != EmulatedThreadState.Terminated || OwnProcess.Exiting)
+                return;
+
+            if (Emulator.CurrentThreadId != (int)Thread.ThreadId && Thread.HostWorker != -1)
+                return;
+
+            List<WinSentMessageReply> Sends = WinEmulatedThread.TryGetState(Thread)?.PendingSends;
+            if (Sends != null)
+            {
+                foreach (WinSentMessageReply Send in Sends)
+                {
+                    if (!Send.Replied)
+                        return;
+                }
+            }
+
+            ForgetLockedPages(Thread.StackAddress, Thread.StackAddress + Thread.StackSize);
+            if (!Emulator.ReleaseMemory(Thread.StackAddress))
+                Emulator.UnmapMemoryRegion(Thread.StackAddress);
+            Thread.StackAddress = 0;
+        }
+
+        // NT replies 0 to the sends a dying thread was running (xxxReceiverDied).
+        private void EndReceivedSends(EmulatedThread Thread)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State == null)
+                return;
+
+            foreach (WinUserCallbackFrame Frame in State.UserCallbackFrames)
+            {
+                Frame.ReceivedSend?.EndDelivery(Emulator, 0);
+                Frame.ReceivedSend = null;
+            }
         }
 
         public void ForgetThreadIfUnreferenced(EmulatedThread Thread)
@@ -2371,8 +2407,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         // A process that another member launched runs with the token it was given, or not at all.
         private WinToken TakeLaunchToken(byte[] Identity)
         {
+            // The first program runs elevated, as with Run as administrator. This grants no host rights.
             if (!ProcessInheritance.IsLaunched)
-                return WinToken.CreatePrimary(User.Standard, PID);
+                return WinToken.CreatePrimary(WinToken.FullHalf, PID);
 
             if (Identity != null && TokenTransfer.TryRead(Identity, PID, out WinToken Token))
                 return Token;
@@ -2596,6 +2633,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return State.PrioritySaturation != 0 ? 16 * State.PrioritySaturation : Thread.BasePriority - (int)CurrentPriority;
         }
         public User CurrentUser => OwnProcess?.GetPrimaryToken().User ?? User.Standard;
+
+        // Integrity lets the full half open the limited half's processes, but not the other way round.
+        internal bool OwnsAccountOf(User RunningUser)
+        {
+            User Holder = CurrentUser;
+            return RunningUser == Holder || (Holder == WinToken.FullHalf && RunningUser == WinToken.LimitedHalf);
+        }
         public string CurrentUserSid => NtQueryInformationToken.InteractiveUserSidText;
         public const string CurrentUserName = "User";
         public const string CurrentUserProfile = @"C:\Users\" + CurrentUserName;
@@ -3015,6 +3059,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint DeskInfoComposited = 0x1;
         private const int Win32ClientInfoActiveWindowSlot = 8;
         private const int Win32ClientInfoThreadInfoSlot = 35;
+
+        // The SysWOW64 user32 reads this pointer 4 bytes below the x64 slot in the native TEB (ClientThreadSetup).
+        private const ulong Win32ClientInfoWow64ThreadInfoOffset = 0x114;
         private const int Win32ClientInfoFocusInfoSlot = 12;
         private const uint ClientFocusInfoSize = 0x40;
         private const ulong ClientFocusInfoFocusOffset = 0x20;
@@ -4732,8 +4779,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <param name="ArgumentBuffer">Must lie in a frame that <see cref="TryMapUserCallbackFrame"/> accepted.</param>
-        public bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinCallbackContinuation Continuation = null,
-            ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, ulong? DeferredSyscallResult = null)
+        internal bool EnterUserCallback(ulong Callback, uint CallbackIndex, ulong ArgumentBuffer, WinCallbackContinuation Continuation = null,
+            ulong SyscallRetryRip = 0, ulong PaintRetryHwnd = 0, ulong? DeferredSyscallResult = null, WinSentMessageReply ReceivedSend = null)
         {
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null || Callback == 0)
@@ -4755,6 +4802,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Frame.PaintRetryHwnd = PaintRetryHwnd;
             Frame.Continuation = Continuation;
             Frame.DeferredSyscallResult = DeferredSyscallResult;
+            Frame.ReceivedSend = ReceivedSend;
 
             ulong DispatcherSp = UserCallbackDispatcherSp(ArgumentBuffer);
             if (PointerSize == 4)
@@ -5179,6 +5227,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ResultValue = 0;
             if (ResultAddress != 0 && ResultLength >= (uint)PointerSize)
                 TryReadPointer(ResultAddress, out ResultValue);
+
+            Frame.ReceivedSend?.EndDelivery(Emulator, ResultValue);
 
             if (PointerSize == 4)
                 RestoreUserCallbackContext32(Thread, Frame);
@@ -7097,7 +7147,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 State.ClientThreadInfo = Block;
             }
 
-            WriteWin32ClientInfoSlot(State, Win32ClientInfoThreadInfoSlot, State.ClientThreadInfo);
+            WriteWin32ClientInfo(State, (ulong)Win32ClientInfoThreadInfoSlot * 8UL, 8, (ulong)Win32ClientInfoThreadInfoSlot * 4UL, 4, State.ClientThreadInfo,
+                Win32ClientInfoWow64ThreadInfoOffset);
 
             // A thread that starts after the activation still has to see it.
             if (State.ClientFocusInfo == 0 && (PublishedFocusHwnd != 0 || PublishedActiveHwnd != 0))
@@ -7168,7 +7219,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteWin32ClientInfo(State, X64Offset, 4, X86Offset, 4, Value);
         }
 
-        private void WriteWin32ClientInfo(WindowsThreadState State, ulong X64Offset, uint X64Size, ulong X86Offset, uint X86Size, ulong Value)
+        private void WriteWin32ClientInfo(WindowsThreadState State, ulong X64Offset, uint X64Size, ulong X86Offset, uint X86Size, ulong Value,
+            ulong? Wow64Offset = null)
         {
             if (State == null || State.Teb == 0)
                 return;
@@ -7183,7 +7235,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             // The SysWOW64 user32 reads CLIENTINFO out of the native TEB, where the 32-bit one keeps its OpenGL dispatch table.
             ulong NativeTeb = State.NativeTeb != 0 ? State.NativeTeb : State.Teb;
-            Emulator._emulator.WriteMemory(NativeTeb + Win32ClientInfoX64Base + X64Offset, Value, X64Size);
+            // A field that the SysWOW64 user32 moves keeps its 32-bit size.
+            Emulator._emulator.WriteMemory(NativeTeb + Win32ClientInfoX64Base + (Wow64Offset ?? X64Offset), Value, Wow64Offset.HasValue ? X86Size : X64Size);
         }
 
         // NT: RtlGetExpWinVer on the process image. A subsystem version of 1.x reads as 3.10.
@@ -9216,6 +9269,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong Hwnd = Window.Hwnd;
 
             UnlinkDestroyedWindow(Window);
+            Win32kHelper.ClearSendMessages(Emulator, Hwnd);
 
             if (ActiveWindow == Hwnd)
                 ActiveWindow = 0;
@@ -10090,7 +10144,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         /// <summary>
-        /// Rewrites an HKLM/HKCU SOFTWARE key into its WOW6432Node view for 32-bit guests
+        /// Rewrites an HKLM SOFTWARE key into its WOW6432Node view for 32-bit guests
         /// </summary>
         private static bool TryApplyWow64RegistryRedirect(string NtPath, out string Redirected)
         {
@@ -10098,27 +10152,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(NtPath))
                 return false;
 
-            const string SoftwareSegment = "\\SOFTWARE";
-            int SoftwareStart;
-
-            if (NtPath.StartsWith("\\Registry\\Machine" + SoftwareSegment, StringComparison.OrdinalIgnoreCase))
-            {
-                SoftwareStart = "\\Registry\\Machine".Length;
-            }
-            else if (NtPath.StartsWith("\\Registry\\User\\", StringComparison.OrdinalIgnoreCase))
-            {
-                int UserRootLength = "\\Registry\\User\\".Length;
-                int Index = NtPath.IndexOf(SoftwareSegment, UserRootLength, StringComparison.OrdinalIgnoreCase);
-                if (Index < 0 || NtPath.IndexOf('\\', UserRootLength) != Index)
-                    return false;
-                SoftwareStart = Index;
-            }
-            else
-            {
+            // NT shares HKCU\Software between the 32-bit and 64-bit views.
+            const string SoftwareRoot = "\\Registry\\Machine\\SOFTWARE";
+            if (!NtPath.StartsWith(SoftwareRoot, StringComparison.OrdinalIgnoreCase))
                 return false;
-            }
 
-            int SoftwareEnd = SoftwareStart + SoftwareSegment.Length;
+            int SoftwareEnd = SoftwareRoot.Length;
             if (NtPath.Length != SoftwareEnd && (NtPath.Length <= SoftwareEnd || NtPath[SoftwareEnd] != '\\'))
                 return false;
 
@@ -10596,6 +10635,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(NtPath))
                 return false;
 
+            // NT creates a key of the 32-bit view under Wow6432Node, even when the 64-bit view has it.
+            if (Wow64View && TryApplyWow64RegistryRedirect(NtPath, out string Redirected))
+            {
+                NtPath = Redirected;
+                Wow64View = false;
+            }
+
             if (RegistryKeyExists(NtPath, Wow64View, out Hive Existing, out _, out _, out string ResolvedPath))
             {
                 // A key on disk still needs its memory side, or a volatile write would reach the hive.
@@ -10635,19 +10681,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        public bool DeleteRegistryKeyPath(string NtPath, out RegistryDeleteStatus Status)
+        internal bool DeleteRegistryKey(WinRegKey Key, out RegistryDeleteStatus Status)
         {
             Status = RegistryDeleteStatus.NotFound;
 
-            NtPath = NormalizeNtRegistryPath(NtPath);
-            if (string.IsNullOrEmpty(NtPath))
-                return false;
-
-            WinRegKey RegKey = ResolveRegistryKey(NtPath);
+            WinRegKey RegKey = ResolveNativeRegistryKey(Key.FullPath);
             if (RegKey == null)
                 return false;
 
-            NtPath = RegKey.FullPath;
+            string NtPath = RegKey.FullPath;
 
             if (HasRegistrySubKeys(RegKey, NtPath))
             {
@@ -10698,6 +10740,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal bool SetNativeRegistryValue(string NtPath, string ValueName, int Type, byte[] Data)
         {
             return SetRegistryValue(NtPath, ValueName, Type, Data, false);
+        }
+
+        internal bool SetRegistryValue(WinRegKey Key, string ValueName, int Type, byte[] Data)
+        {
+            // A key handle's path is already in its caller's view.
+            return SetRegistryValue(Key.FullPath, ValueName, Type, Data, false);
         }
 
         private bool SetRegistryValue(string NtPath, string ValueName, int Type, byte[] Data, bool Wow64View)
@@ -10755,6 +10803,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool DeleteRegistryValue(string NtPath, string ValueName)
         {
             return DeleteRegistryValue(NtPath, ValueName, Emulator.IsX86Guest);
+        }
+
+        internal bool DeleteRegistryValue(WinRegKey Key, string ValueName)
+        {
+            return DeleteRegistryValue(Key.FullPath, ValueName, false);
         }
 
         private bool DeleteRegistryValue(string NtPath, string ValueName, bool Wow64View)

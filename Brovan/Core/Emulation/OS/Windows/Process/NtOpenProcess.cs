@@ -49,7 +49,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
             uint LimitedRights = (uint)(AccessMask.ProcessQueryLimitedInformation | AccessMask.Synchronize);
-            bool Limited = !Own && (Instance.WinHelper.IsProtectedStatus(TargetProcess.Status) || TargetProcess.RunningUser != Instance.WinHelper.CurrentUser);
+            bool Limited = !Own && (Instance.WinHelper.IsProtectedStatus(TargetProcess.Status) || !Instance.WinHelper.OwnsAccountOf(TargetProcess.RunningUser));
 
             uint Granted = MapGenericRights(DesiredAccess);
             if ((DesiredAccess & (uint)AccessMask.MaximumAllowed) != 0)

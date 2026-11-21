@@ -185,7 +185,8 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         // server the client's package claims on top.
         internal static WinToken ServerToken(BinaryEmulator Instance, LocalServer Server, WinToken Client, string PackageFullName)
         {
-            WinToken Token = Server.RunsAsInteractiveUser ? WinToken.CreatePrimary(Client.User, 0) : Client;
+            // RunAs Interactive User gets the limited token, even for an elevated client.
+            WinToken Token = Server.RunsAsInteractiveUser ? WinToken.CreatePrimary(WinToken.LimitedHalf, 0) : Client;
             if (Server.PerPackage && PackageFullName.Length != 0)
             {
                 AppxPackage Package = Instance.WindowsGuest?.PackageIdentity?.Package;

@@ -2162,8 +2162,10 @@ namespace Brovan.Core.Emulation.Guests
 
             bool Root = !ProcessInheritance.IsLaunched;
             WinToken PackageToken = null;
+
+            // NT never starts a packaged application elevated, so its root takes the limited half.
             AppxProcessIdentity Identity = Root
-                ? AppxPackageModel.TryCreate(Instance, WinHelper, Instance.GuestImagePath, Own.PrimaryToken, out PackageToken)
+                ? AppxPackageModel.TryCreate(Instance, WinHelper, Instance.GuestImagePath, WinToken.CreatePrimary(WinToken.LimitedHalf, Own.PID), out PackageToken)
                 : AppxPackageModel.TryCreateFromToken(Instance, WinHelper, Own.PrimaryToken);
             if (Identity == null)
                 return null;

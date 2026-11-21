@@ -124,6 +124,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong ClientFocusInfo { get; set; }
         public bool WaitMessageActive { get; set; }
         public bool GetMessageWaitActive { get; set; }
+        public bool SendReplyWaitActive { get; set; }
+
+        // Innermost last. The rerun of a send finds its record by callback depth.
+        internal List<WinSentMessageReply> PendingSends { get; set; }
+        internal WinSentMessageReply InnermostSend => PendingSends is { Count: > 0 } Sends ? Sends[^1] : null;
         public bool RetrySyscallActive { get; set; }
         public uint RetrySyscallNumber { get; set; }
         public ulong PipeWaitHandle { get; set; }
@@ -192,6 +197,41 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinCallbackContinuation Continuation;
         public ulong? DeferredSyscallResult;
+
+        internal WinSentMessageReply ReceivedSend;
+    }
+
+    internal sealed class WinSentMessageReply
+    {
+        internal readonly EmulatedThread Sender;
+        internal readonly int Depth;
+        internal readonly ulong Hwnd;
+        internal readonly uint Message;
+        internal readonly bool Ansi;
+        internal ulong Result;
+        internal bool Replied;
+
+        internal WinSentMessageReply(EmulatedThread Sender, int Depth, ulong Hwnd, uint Message, bool Ansi)
+        {
+            this.Sender = Sender;
+            this.Depth = Depth;
+            this.Hwnd = Hwnd;
+            this.Message = Message;
+            this.Ansi = Ansi;
+        }
+
+        // A terminated sender keeps its stack until this runs.
+        internal void EndDelivery(BinaryEmulator Emulator, ulong Value)
+        {
+            if (Replied)
+                return;
+
+            Result = Value;
+            Replied = true;
+            Emulator.WakeSignal.Bump();
+            if (Sender.State == EmulatedThreadState.Terminated)
+                Emulator.WinHelper.ReleaseThreadStack(Sender);
+        }
     }
 
     // Runs when the callback returns, on the caller's stack. True when it entered another callback.

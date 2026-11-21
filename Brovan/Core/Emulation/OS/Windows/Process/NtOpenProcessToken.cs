@@ -22,7 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
-            if (DesiredAccess == AccessMask.None || TargetProcess.RunningUser != Instance.WinHelper.CurrentUser)
+            if (DesiredAccess == AccessMask.None || !Instance.WinHelper.OwnsAccountOf(TargetProcess.RunningUser))
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(TargetProcess.GetPrimaryToken(), MapDesiredTokenAccess(DesiredAccess));

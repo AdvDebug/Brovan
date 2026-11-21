@@ -2568,6 +2568,9 @@ namespace Brovan
                 if (WindowsState.IoRequest != null)
                     return WindowsState.IoRequest.WaitLabel;
 
+                if (WindowsState.SendReplyWaitActive && WindowsState.InnermostSend is { } Send)
+                    return $"send-reply hwnd 0x{Send.Hwnd:X} msg 0x{Send.Message:X}";
+
                 if (WindowsState.SyncIo is WinPendingIo SyncIo)
                     return $"sync-io iosb=0x{SyncIo.IoStatusBlock:X}{(WindowsState.SyncIoCancelled ? " cancelled" : "")}";
 

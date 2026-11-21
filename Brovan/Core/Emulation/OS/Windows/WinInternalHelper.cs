@@ -436,6 +436,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public uint SharedDataFlags { get; private set; }
 
+        internal const uint DbgElevationEnabled = 0x2;
+        internal const uint DbgVirtEnabled = 0x4;
+        internal const uint DbgInstallerDetectEnabled = 0x8;
         internal const uint DbgMultiSessionSku = 0x100;
         internal const uint DbgMultiUsersInSessionSku = 0x200;
 
@@ -770,6 +773,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(OffsetTickCountMultiplier, 4), TickCountMultiplier);
             BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(OffsetSuiteMask, 4), WindowsVersionInfo.SuiteMask);
+
+            // UAC is on in the guest, whatever the host has.
+            uint SharedFlags = BinaryPrimitives.ReadUInt32LittleEndian(Page.AsSpan(OffsetSharedDataFlags, 4));
+            BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(OffsetSharedDataFlags, 4),
+                SharedFlags | DbgElevationEnabled | DbgVirtEnabled | DbgInstallerDetectEnabled);
 
             BinaryPrimitives.WriteUInt32LittleEndian(Page.AsSpan(OffsetActiveConsoleId, 4), WinToken.InteractiveSessionId);
 

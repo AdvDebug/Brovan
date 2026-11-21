@@ -36,7 +36,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                 Instance.TriggerEventMessage($"[+] NtSetValueKey Running with the FullPath: {RegKey.FullPath}, ValueName: {ValueName}", LogFlags.Syscall);
 
-            if (!Instance.WinHelper.SetRegistryValue(RegKey.FullPath, ValueName, (int)Type, Data))
+            if (!Instance.WinHelper.SetRegistryValue(RegKey, ValueName, (int)Type, Data))
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
 
             _ = TitleIndex;

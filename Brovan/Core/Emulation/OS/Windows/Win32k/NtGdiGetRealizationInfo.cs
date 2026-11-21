@@ -1,42 +1,35 @@
+using System.Buffers.Binary;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows.Win32k
 {
     internal class NtGdiGetRealizationInfo : IWinSyscall
     {
-        private const int RealizationInfoShortSize = 16;
+        // The sizes of FONT_REALIZATION_INFO, its 24-byte form and FONT_REALIZATION_INFO2.
+        private const uint RealizationInfoShortSize = 16;
+        private const uint RealizationInfoSize = 24;
+        private const uint RealizationInfo2Size = 0x32C;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
-
-            ulong Hdc = Instance.WinHelper.GetArg(0);
             ulong InfoPtr = Instance.WinHelper.GetArg(1);
 
-            if (InfoPtr == 0 || !Instance.IsRegionMapped(InfoPtr, RealizationInfoShortSize))
+            Instance.SetRawSyscallReturn(0);
+            if (InfoPtr == 0)
+                return NTSTATUS.STATUS_SUCCESS;
+
+            if (!Instance.WinHelper.TryReadUInt32(InfoPtr, out uint Size)
+                || Size is not (RealizationInfoShortSize or RealizationInfoSize or RealizationInfo2Size))
             {
-                Instance.SetRawSyscallReturn(0);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(RealizationInfoShortSize);
-            if (!Instance.ReadMemory(InfoPtr, Buffer.Slice(0, RealizationInfoShortSize), (uint)RealizationInfoShortSize))
-            {
-                Instance.SetRawSyscallReturn(0);
-                return NTSTATUS.STATUS_SUCCESS;
-            }
-
-            int SizeField = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(Buffer.Slice(0, 4));
-            if (SizeField <= 0 || SizeField > RealizationInfoShortSize)
-                SizeField = RealizationInfoShortSize;
-
+            Span<byte> Buffer = Instance.WinHelper.Shared.GetSpan(Size).Slice(0, (int)Size);
             Buffer.Clear();
-            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(Buffer.Slice(0, 4), SizeField);
+            BinaryPrimitives.WriteUInt32LittleEndian(Buffer, Size);
 
-            if (!Instance.WriteMemory(InfoPtr, Buffer.Slice(0, RealizationInfoShortSize)))
-            {
-                Instance.SetRawSyscallReturn(0);
+            if (!Instance.WriteMemory(InfoPtr, Buffer))
                 return NTSTATUS.STATUS_SUCCESS;
-            }
 
             Instance.SetRawSyscallReturn(1);
             return NTSTATUS.STATUS_SUCCESS;

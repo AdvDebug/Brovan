@@ -90,7 +90,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         };
 
         // A native token lists its groups in this order, with the integrity label last.
-        private static readonly TokenGroup[] InteractiveGroups =
+        private static readonly TokenGroup[] UserGroups =
         {
             new TokenGroup(DomainUsersSid, SeGroupStandard),
             new TokenGroup(EveryoneSid, SeGroupStandard),
@@ -105,12 +105,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             new TokenGroup(NtlmAuthenticationSid, SeGroupStandard),
         };
 
+        // NT keeps the administrator groups in the limited token, for deny only.
+        private static readonly TokenGroup[] InteractiveGroups =
+        [
+            .. UserGroups.AsSpan(0, 2),
+            new TokenGroup(LocalAccountAndAdministratorSid, SeGroupUseForDenyOnly),
+            new TokenGroup(AdministratorsSid, SeGroupUseForDenyOnly),
+            .. UserGroups.AsSpan(2),
+        ];
+
         private static readonly TokenGroup[] ElevatedInteractiveGroups =
         [
-            .. InteractiveGroups.AsSpan(0, 2),
+            .. UserGroups.AsSpan(0, 2),
             new TokenGroup(LocalAccountAndAdministratorSid, SeGroupStandard),
             new TokenGroup(AdministratorsSid, SeGroupStandard | SeGroupOwner),
-            .. InteractiveGroups.AsSpan(2),
+            .. UserGroups.AsSpan(2),
         ];
 
         private static readonly TokenGroup[] ServiceGroups =
@@ -404,7 +413,27 @@ namespace Brovan.Core.Emulation.OS.Windows
                     }
 
                 case TOKEN_INFORMATION_CLASS.TokenElevationType:
-                    return WriteUInt32Info(Token.IsElevated ? 2u : 1u);
+                    return WriteUInt32Info(ElevationTypeOf(Token));
+
+                case TOKEN_INFORMATION_CLASS.TokenLinkedToken:
+                    {
+                        if (ElevationTypeOf(Token) == ElevationTypeDefault)
+                            return NTSTATUS.STATUS_NO_SUCH_LOGON_SESSION;
+
+                        uint RequiredSize = (uint)PointerSize;
+                        WriteReturnLength(RequiredSize);
+                        if (TokenInformationLength < RequiredSize)
+                            return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
+
+                        WinHandle Linked = Instance.WinHelper.HandleManager.AddHandle(Token.OtherHalf(), AccessMask.TokenAllAccess);
+                        if (!Instance.WinHelper.WritePointer(TokenInformation, Linked.Handle))
+                        {
+                            Instance.WinHelper.CloseHandle(Linked.Handle);
+                            return NTSTATUS.STATUS_ACCESS_VIOLATION;
+                        }
+
+                        return NTSTATUS.STATUS_SUCCESS;
+                    }
 
                 case TOKEN_INFORMATION_CLASS.TokenHasRestrictions:
                 case TOKEN_INFORMATION_CLASS.TokenVirtualizationAllowed:
@@ -580,6 +609,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                 LogonKind.Anonymous => AnonymousLogonSid,
                 LogonKind.Service => LocalSystemSid,
                 _ => DomainUsersSid,
+            };
+        }
+
+        private const uint ElevationTypeDefault = 1;
+        private const uint ElevationTypeFull = 2;
+        private const uint ElevationTypeLimited = 3;
+
+        private static uint ElevationTypeOf(WinToken Token)
+        {
+            return KindOf(Token) switch
+            {
+                LogonKind.Elevated => ElevationTypeFull,
+                LogonKind.Interactive => ElevationTypeLimited,
+                _ => ElevationTypeDefault,
             };
         }
 

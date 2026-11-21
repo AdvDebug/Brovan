@@ -1,6 +1,9 @@
 using System;
 using System.Buffers.Binary;
+using System.Runtime.InteropServices;
 using System.Text;
+using Brovan.Core.Helpers;
+using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
@@ -31,15 +34,68 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal const uint AlignmentRequirement = 3;
         internal const ulong SectorsPerCluster = 8;
         internal const ulong BytesPerCluster = BytesPerSector * SectorsPerCluster;
-        internal const ulong TotalClusters = 0x01000000UL;
-        internal const ulong FreeClusters = 0x00800000UL;
-        internal const ulong TotalSectors = TotalClusters * SectorsPerCluster;
-        internal const ulong DiskSize = TotalSectors * BytesPerSector;
         internal const ulong VolumeSerialNumber = 0xB10A0001UL;
         private const ulong UsnJournalId = 0xB10A000100000001UL;
         private const ulong NextUsn = 0x1000UL;
         private const ulong RootFileReferenceNumber = 0x0005000000000005UL;
         private static readonly byte[] MountDevDeviceName = Encoding.Unicode.GetBytes(VolumeDeviceName);
+
+        internal readonly record struct VolumeSpace(ulong TotalClusters, ulong CallerFreeClusters, ulong FreeClusters)
+        {
+            internal ulong TotalSectors => TotalClusters * SectorsPerCluster;
+            internal ulong DiskSize => TotalClusters * BytesPerCluster;
+        }
+
+        internal static unsafe bool TryGetVolumeSpace(out VolumeSpace Space)
+        {
+            Space = default;
+            string Root = GeneralHelper.IO.ResolveVirtualHostPath("C:\\", BinaryFormat.PE);
+            if (string.IsNullOrEmpty(Root))
+                return false;
+
+            ulong Total, CallerFree, Free;
+            if (OperatingSystem.IsWindows())
+            {
+                fixed (char* Directory = Root)
+                {
+                    if (GetDiskFreeSpaceExW(Directory, &CallerFree, &Total, &Free) == 0)
+                    {
+                        Utils.LogError($"[Storage] Cannot read the free space of {Root}: error {Marshal.GetLastPInvokeError()}");
+                        return false;
+                    }
+                }
+            }
+            else
+            {
+                byte[] Directory = Encoding.UTF8.GetBytes(Root + "\0");
+
+                // struct statvfs on LP64 glibc and bionic starts with f_bsize, f_frsize, f_blocks, f_bfree, f_bavail, 8 bytes each.
+                ulong* Info = stackalloc ulong[32];
+                fixed (byte* Path = Directory)
+                {
+                    if (statvfs(Path, Info) != 0)
+                    {
+                        Utils.LogError($"[Storage] Cannot read the free space of {Root}: errno {Marshal.GetLastPInvokeError()}");
+                        return false;
+                    }
+                }
+
+                ulong Fragment = Info[1];
+                Total = Info[2] * Fragment;
+                Free = Info[3] * Fragment;
+                CallerFree = Info[4] * Fragment;
+            }
+
+            Space = new VolumeSpace(Total / BytesPerCluster, CallerFree / BytesPerCluster, Free / BytesPerCluster);
+            return true;
+        }
+
+        [DllImport("kernel32", SetLastError = true)]
+        private static extern unsafe int GetDiskFreeSpaceExW(char* DirectoryName, ulong* FreeBytesAvailableToCaller, ulong* TotalNumberOfBytes,
+            ulong* TotalNumberOfFreeBytes);
+
+        [DllImport("libc", SetLastError = true)]
+        private static extern unsafe int statvfs(byte* Path, ulong* Buffer);
 
         internal static bool IsStorageDevicePath(string Path)
         {
@@ -207,34 +263,44 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS QueryDriveGeometry(ref DeviceData Data)
         {
+            if (!TryGetVolumeSpace(out VolumeSpace Space))
+                return NTSTATUS.STATUS_UNSUCCESSFUL;
+
             byte[] Output = new byte[32];
-            ulong Cylinders = Math.Max(1, TotalSectors / (255 * 63));
+            ulong Cylinders = Math.Max(1, Space.TotalSectors / (255 * 63));
             BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(0, 8), Cylinders);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(8, 4), FixedMedia);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(12, 4), 255);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(16, 4), 63);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(20, 4), (uint)BytesPerSector);
-            BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(24, 8), DiskSize);
+            BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(24, 8), Space.DiskSize);
             return WriteOutput(ref Data, Output, AllowOverflow: false);
         }
 
         private static NTSTATUS QueryVolumeDiskExtents(ref DeviceData Data)
         {
+            if (!TryGetVolumeSpace(out VolumeSpace Space))
+                return NTSTATUS.STATUS_UNSUCCESSFUL;
+
             byte[] Output = new byte[32];
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(0, 4), 1);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(8, 4), 0);
             BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(16, 8), 0);
-            BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(24, 8), DiskSize);
+            BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(24, 8), Space.DiskSize);
             return WriteOutput(ref Data, Output, AllowOverflow: true);
         }
 
         private static NTSTATUS QueryNtfsVolumeData(ref DeviceData Data)
         {
+            if (!TryGetVolumeSpace(out VolumeSpace Space))
+                return NTSTATUS.STATUS_UNSUCCESSFUL;
+
+            ulong TotalClusters = Space.TotalClusters;
             byte[] Output = new byte[96];
             BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(0, 8), VolumeSerialNumber);
-            BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(8, 8), TotalSectors);
+            BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(8, 8), Space.TotalSectors);
             BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(16, 8), TotalClusters);
-            BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(24, 8), FreeClusters);
+            BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(24, 8), Space.FreeClusters);
             BinaryPrimitives.WriteUInt64LittleEndian(Output.AsSpan(32, 8), 0);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(40, 4), (uint)BytesPerSector);
             BinaryPrimitives.WriteUInt32LittleEndian(Output.AsSpan(44, 4), (uint)BytesPerCluster);
