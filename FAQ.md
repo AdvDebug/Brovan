@@ -63,7 +63,7 @@ Yes. Windows programs need the real Windows system files, and Brovan does not in
 
 ### Is it safe to run programs I do not trust?
 
-Programs cannot change your files or reach the internet unless you allow it, but on a Windows host they can still **read** your files. [The sandbox answer](#how-does-brovan-sandbox-programs) below has the details.
+Programs cannot change your files or reach the internet unless you allow it, but on a Windows host they can still **read** your files. Brovan itself is mostly written in memory-safe C#. [The sandbox answer](#how-does-brovan-sandbox-programs) below has the details.
 
 ### Where are my saves?
 
@@ -134,6 +134,7 @@ Each has its place. Qiling offers a Python API and many CPU architectures. Brova
 | **Processes** | When a Windows program starts another program, that one runs in its own Brovan instance, in the same sandbox. Linux programs cannot start new processes yet. |
 | **Drivers** | Brovan does not load kernel drivers, so a program cannot install one. |
 | **Console** | Escape sequences that could take over your terminal are filtered. Normal colors and text styling still work. |
+| **Memory safety** | Brovan's kernel, its services and the host side of the Vulkan bridge are written in C#. The .NET runtime checks every array index, cast and object reference, so buffer overflows and use-after-free bugs, the kind that often break sandboxes written in C or C++, are very unlikely there. A small share of the code works with memory directly for speed, as does the CPU emulator, Unicorn, which is written in C. The Vulkan bridge and the file parsers are also fuzz-tested every night. |
 
 > [!TIP]
 > Studying real malware? Analysts usually add a second layer to any sandbox, such as a virtual machine or a spare PC. That is standard practice, and it works with Brovan too.
