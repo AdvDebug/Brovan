@@ -319,10 +319,42 @@ namespace Brovan.Core.Emulation
         public static bool IsCanonical(ulong address) => Canonicalize(address) == address;
     }
 
+    public interface IBackendHost
+    {
+        // Held around a slice only on WholePass, and a hypervisor backend lets go of it while a processor is in the guest.
+        RankedLock RunLock { get; }
+
+        // Taken by every mapping change, and by every page record reader except a worker the deferred frees wait for.
+        RankedLock MappingLock { get; }
+
+        // True while workers copy through pages found without the mapping lock, so host memory outlives its unmap.
+        bool DefersHostFrees { get; }
+
+        // True on a worker outside the guest and outside every quiescent wait.
+        bool MayReadPagesWithoutLock { get; }
+
+        // Taken after the pages were made unreachable. It orders every worker's earlier stores before it reads them.
+        QuiescenceSnapshot TakeQuiescence();
+
+        bool HasPassed(QuiescenceSnapshot snapshot);
+
+        // The freeing worker waits later, where it holds no ranked lock.
+        void RequestQuiescentWait();
+
+        void EnteringGuest();
+
+        void LeftGuest();
+    }
+
     public static class InternalPages
     {
+        // Internal pages grow up from the base, and guest kernel views start this far above it.
+        public const ulong ViewWindowOffset = 0x4_0000_0000UL;
+
         public static bool IsGuestRange(ulong address, ulong size, ulong internalBase)
             => address < internalBase && size <= internalBase - address;
+
+        public static ulong PageLimit(ulong internalBase) => internalBase + ViewWindowOffset;
     }
 
     public static class SyscallTrapPage
@@ -343,12 +375,15 @@ namespace Brovan.Core.Emulation
         bool TryMapView(IntPtr host, ulong size, out ulong address);
 
         /// <summary>
-        /// Returns only after every processor has left the guest. A false entry in <paramref name="unmapped"/> is a view
-        /// the guest can still read, so its host memory must stay alive.
+        /// Returns only after every kernel call that started before it has left the guest. A false entry in
+        /// <paramref name="unmapped"/> is a view the guest can still read, so its host memory must stay alive.
         /// </summary>
         void UnmapViews(ReadOnlySpan<ulong> addresses, Span<bool> unmapped);
 
-        /// <summary>Returns only after every processor has left the guest, so no kernel call still runs.</summary>
+        /// <summary>
+        /// Returns only after every kernel call that started before it has left the guest. A call may start at once
+        /// after, so the caller makes what it retires unreachable first.
+        /// </summary>
         void EvictProcessors();
 
         bool Enabled { get; set; }
@@ -953,7 +988,7 @@ namespace Brovan.Core.Emulation
         }
     }
 
-    internal interface IGuestKernelBackend
+    internal interface IGuestKernelBackend : IGuestPagingBackend
     {
         bool DisposedCheck();
 
@@ -963,19 +998,15 @@ namespace Brovan.Core.Emulation
 
         bool UnmapKernelView(ulong address, ulong size);
 
-        IntPtr EnsureKernelPageDirectory(ulong address);
-
-        void EvictProcessors();
+        // A 2 MB page of a kernel view, read-only and not executable.
+        bool MapKernelLargePage(ulong address);
     }
 
     internal sealed class GuestKernelHost : IGuestKernel
     {
         private const ulong PageSize = 0x1000;
         private const ulong PageMask = PageSize - 1;
-        private const ulong Present = GuestPageEntries.Present;
-        private const ulong LargePage = GuestPageEntries.LargePage;
-        private const ulong NoExecute = GuestPageEntries.NoExecute;
-        private const ulong ViewWindowOffset = 0x4_0000_0000UL;
+        private const ulong ViewWindowOffset = InternalPages.ViewWindowOffset;
         private const ulong ViewChunk = 2UL << 20;
 
         // 32 GB covers the largest MemoryBudget view budget and ends below the 512 GB of a 39-bit physical address.
@@ -984,6 +1015,7 @@ namespace Brovan.Core.Emulation
         private readonly record struct StubPages(ulong Code, IntPtr CodeHost, ulong Spill, IntPtr SpillHost);
 
         private readonly IGuestKernelBackend _backend;
+        private readonly GuestEntryGate _gate;
         private readonly ulong _internalBase;
         private readonly ushort _userCodeSelector;
         private readonly ushort _userDataSelector;
@@ -996,13 +1028,15 @@ namespace Brovan.Core.Emulation
         private StubPages[] _stubs = Array.Empty<StubPages>();
         private ulong _tableAddress;
         private IntPtr _tableHost;
+        private GuestSyscallStub _layout;
         private bool _sealed;
         private bool _enabled = true;
 
-        public GuestKernelHost(IGuestKernelBackend backend, ulong internalBase, ushort userCodeSelector, ushort userDataSelector,
+        public GuestKernelHost(IGuestKernelBackend backend, GuestEntryGate gate, ulong internalBase, ushort userCodeSelector, ushort userDataSelector,
             bool smap, bool alwaysSpill, GuestSyscallEntry entry = GuestSyscallEntry.Syscall)
         {
             _backend = backend;
+            _gate = gate;
             _internalBase = internalBase;
             _userCodeSelector = userCodeSelector;
             _userDataSelector = userDataSelector;
@@ -1011,7 +1045,7 @@ namespace Brovan.Core.Emulation
             _entry = entry;
         }
 
-        public GuestSyscallStub Layout { get; private set; }
+        public GuestSyscallStub Layout => Volatile.Read(ref _layout);
 
         public void AddProcessor(ulong code, IntPtr codeHost, ulong spill, IntPtr spillHost)
         {
@@ -1023,14 +1057,14 @@ namespace Brovan.Core.Emulation
         // Every guest run calls this, so the flag is written only once to keep its cache line shared.
         public void Seal()
         {
-            if (!_sealed)
-                _sealed = true;
+            if (!Volatile.Read(ref _sealed))
+                Volatile.Write(ref _sealed, true);
         }
 
         public bool RegisterSyscall(uint number, string name, Action<GuestKernelCallBuilder> emit, GuestKernelFinish finish)
         {
             number = GuestSyscallStub.TableIndex(number, _entry);
-            if (_backend.DisposedCheck() || _sealed || emit == null || number >= GuestSyscallStub.MaxNumber
+            if (_backend.DisposedCheck() || Volatile.Read(ref _sealed) || emit == null || number >= GuestSyscallStub.MaxNumber
                 || _calls.Count >= GuestSyscallStub.MaxCalls || IsCallNumber(number))
                 return false;
 
@@ -1090,7 +1124,7 @@ namespace Brovan.Core.Emulation
                 throw new InvalidOperationException("The syscall stub does not fit in its page.");
 
             code.AsSpan().CopyTo(new Span<byte>((void*)stub.CodeHost, code.Count));
-            Layout = layout;
+            Volatile.Write(ref _layout, layout);
 
             // Only a stub that spills returns through this frame, so other spill pages stay demand-zero.
             if (_alwaysSpill || _calls.Count != 0)
@@ -1165,7 +1199,7 @@ namespace Brovan.Core.Emulation
             if (_backend.DisposedCheck() || addresses.IsEmpty)
                 return;
 
-            _backend.EvictProcessors();
+            _gate.EvictProcessors();
             for (int i = 0; i < addresses.Length; i++)
             {
                 if (!_views.TryGetValue(addresses[i], out ulong mapSize))
@@ -1185,7 +1219,7 @@ namespace Brovan.Core.Emulation
         public void EvictProcessors()
         {
             if (!_backend.DisposedCheck())
-                _backend.EvictProcessors();
+                _gate.EvictProcessors();
         }
 
         public unsafe IReadOnlyList<GuestKernelCallStats> Stats
@@ -1241,15 +1275,7 @@ namespace Brovan.Core.Emulation
         }
 
         // The view can end inside the 2 MB page, and kernel calls never read past its length.
-        private unsafe bool TryMapChunk(ulong address)
-        {
-            ulong* directory = (ulong*)_backend.EnsureKernelPageDirectory(address);
-            if (directory == null)
-                return false;
-
-            Volatile.Write(ref directory[(address >> 21) & 0x1FF], address | Present | LargePage | NoExecute);
-            return true;
-        }
+        private bool TryMapChunk(ulong address) => _backend.MapKernelLargePage(address);
     }
 
     public interface IEmulationBackend : IDisposable
@@ -1334,6 +1360,10 @@ namespace Brovan.Core.Emulation
 
         bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write) => false;
 
+        /// <summary>
+        /// The pointer stays valid while the caller holds the mapping lock, or, on a worker, until it next enters the guest
+        /// or a quiescent wait. A worker that runs deferred frees counts itself among the workers they wait for.
+        /// </summary>
         IntPtr GetHostPointer(ulong address, ulong size) => IntPtr.Zero;
 
         IntPtr PinBacking(IntPtr hostPointer, ulong size) => IntPtr.Zero;
@@ -1428,11 +1458,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         bool TryLimitSlice(int microseconds) => false;
 
-        /// <summary>
-        /// The lock the caller holds around <see cref="Emulate"/>. A backend releases it only for the time
-        /// the guest runs.
-        /// </summary>
-        void UseRunLock(object runLock)
+        void UseHost(IBackendHost host)
         {
         }
 
@@ -1445,10 +1471,19 @@ namespace Brovan.Core.Emulation
         {
         }
 
-        /// <summary>No processor is in the guest on return, until the caller releases the run lock.</summary>
-        void HoldProcessorsOutOfGuest()
+        /// <summary>Returns once every processor that was in the guest has left it. Any may enter again at once.</summary>
+        void EvictProcessors()
         {
         }
+
+        ProcessorHold HoldProcessorsOutOfGuest() => ProcessorHold.None;
+
+        bool HasDeferredFrees => false;
+
+        /// <summary>
+        /// The caller holds no pointer into guest memory. True while what stays deferred is over its budget.
+        /// </summary>
+        bool CompleteDeferredFrees(bool all) => false;
 
         IGuestKernel GuestKernel => null;
 

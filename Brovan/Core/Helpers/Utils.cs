@@ -382,34 +382,106 @@ namespace Brovan.Core.Helpers
         }
     }
 
-    // The counters are plain fields, so every caller holds the lock that guards them.
     internal sealed class PeriodicStats
     {
-        private const int ReportInterval = 256;
+        private const int DefaultInterval = 256;
 
         private readonly string _title;
         private readonly Action<StringBuilder> _describe;
+        private readonly int _interval;
+        private readonly object _reportSync = new();
         private int _sinceReport;
 
         internal readonly bool Enabled;
 
-        internal PeriodicStats(string variable, string title, Action<StringBuilder> describe)
+        internal PeriodicStats(string variable, string title, Action<StringBuilder> describe, int interval = DefaultInterval)
         {
             Enabled = string.Equals(Environment.GetEnvironmentVariable(variable), "1", StringComparison.Ordinal);
             _title = title;
             _describe = describe;
+            _interval = interval;
         }
 
+        // For counters that one lock guards. Counters that several host threads write go through TickSlot.
         internal void Tick()
         {
-            if (++_sinceReport < ReportInterval)
+            if (++_sinceReport < _interval)
                 return;
 
             _sinceReport = 0;
-            StringBuilder sb = new StringBuilder(_title);
-            _describe(sb);
-            Utils.LogError(sb.ToString());
-            Utils.FlushLog();
+            Report();
         }
+
+        internal void TickSlot(ref long Ticks)
+        {
+            if (++Ticks % _interval == 0)
+                Report();
+        }
+
+        internal void Report()
+        {
+            if (!Monitor.TryEnter(_reportSync))
+                return;
+
+            try
+            {
+                StringBuilder sb = new StringBuilder(_title);
+                _describe(sb);
+                Utils.LogError(sb.ToString());
+                Utils.FlushLog();
+            }
+            finally
+            {
+                Monitor.Exit(_reportSync);
+            }
+        }
+    }
+
+    internal sealed class StatsSlots : IDisposable
+    {
+        internal sealed class Slot
+        {
+            // Only the owning host thread writes these.
+            internal readonly long[] Values;
+            internal readonly string Thread;
+            private readonly long[] _reported;
+
+            internal Slot(int Count)
+            {
+                Values = new long[Count];
+                _reported = new long[Count];
+                Thread = System.Threading.Thread.CurrentThread.Name ?? $"thread {Environment.CurrentManagedThreadId}";
+            }
+
+            // The change since the last report. Only the reporting thread calls it, under the report lock.
+            internal long TakeDelta(int Index)
+            {
+                long Value = Volatile.Read(ref Values[Index]);
+                long Change = Value - _reported[Index];
+                _reported[Index] = Value;
+                return Change;
+            }
+        }
+
+        private readonly ThreadLocal<Slot> _slots;
+
+        internal StatsSlots(int Count)
+        {
+            _slots = new ThreadLocal<Slot>(() => new Slot(Count), trackAllValues: true);
+        }
+
+        internal Slot Current => _slots.Value;
+
+        internal IList<Slot> All => _slots.Values;
+
+        internal long Sum(int Index)
+        {
+            long Total = 0;
+            foreach (Slot Slot in _slots.Values)
+                Total += Volatile.Read(ref Slot.Values[Index]);
+            return Total;
+        }
+
+        public void Dispose() => _slots.Dispose();
     }
 }

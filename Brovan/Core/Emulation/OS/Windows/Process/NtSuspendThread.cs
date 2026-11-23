@@ -37,8 +37,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (PreviousSuspendCountPtr != 0)
                 Instance.WinHelper.WriteUInt32(PreviousSuspendCountPtr, (uint)TargetThread.SuspendCount);
 
-            TargetThread.SuspendCount++;
-            TargetThread.State = EmulatedThreadState.Suspended;
+            using (Instance.SchedulerLock.EnterScope())
+            {
+                TargetThread.SuspendCount++;
+                TargetThread.State = EmulatedThreadState.Suspended;
+            }
 
             if (Instance.CurrentThread != null && TargetThread.ThreadId == (uint)Instance.CurrentThreadId)
             {

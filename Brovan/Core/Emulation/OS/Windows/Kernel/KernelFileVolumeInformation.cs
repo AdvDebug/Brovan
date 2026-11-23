@@ -47,7 +47,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Data.AsSpan().CopyTo(new Span<byte>((void*)Host, Data.Length));
 
             KernelFileVolumeInformation Information = new KernelFileVolumeInformation(Instance, Table, Address, Data);
-            return Table.Kernel.RegisterSyscall(Number, nameof(NtQueryVolumeInformationFile), Information.EmitQuery, Information.FinishQuery) ? Information : null;
+            return Instance.RegisterGuestKernelSyscall(Table.Kernel, Number, nameof(NtQueryVolumeInformationFile), Information.EmitQuery, Information.FinishQuery) ? Information : null;
         }
 
         private void EmitQuery(GuestKernelCallBuilder Builder)

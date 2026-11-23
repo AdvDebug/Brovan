@@ -15,8 +15,11 @@ namespace Brovan.Core.Emulation
         public const ulong Accessed = 1UL << 5;
         public const ulong Dirty = 1UL << 6;
         public const ulong LargePage = 1UL << 7;
+        // A software bit, set on a not-present PDE that still names its page table.
+        public const ulong Withheld = 1UL << 9;
         public const ulong NoExecute = 1UL << 63;
         public const ulong AddressMask = 0x000FFFFFFFFFF000UL;
+        public const ulong TableFlags = Present | Writable | User;
 
         public const ulong FaultPresent = 1UL << 0;
         public const ulong FaultWrite = 1UL << 1;

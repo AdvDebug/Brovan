@@ -432,7 +432,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static NTSTATUS AssociateCompletionPort(BinaryEmulator Instance, WinPort Port, ulong CompletionKey, ulong CompletionHandle)
         {
             NTSTATUS Status = AssociateCompletionPort(Instance, Port.Queue, CompletionKey, CompletionHandle);
-            if (Status == NTSTATUS.STATUS_SUCCESS && Instance.WinHelper.PendingConnectReplies.Count != 0)
+            if (Status == NTSTATUS.STATUS_SUCCESS && Instance.WinHelper.HasPendingConnectReplies)
                 DeliverConnectReplyForRoute(Instance, Port, Port.Queue.CompletionPort);
             return Status;
         }
@@ -2030,13 +2030,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Connection = Connection,
             };
             Connection.PendingReplyThread = (uint)Instance.CurrentThreadId;
-            Instance.WinHelper.PendingConnectReplies.Add(Connection);
+            Instance.WinHelper.AddPendingConnectReply(Connection);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
         internal static void DeliverConnectReplies(BinaryEmulator Instance, uint ThreadId)
         {
-            List<AlpcConnection> Pending = Instance.WinHelper.PendingConnectReplies;
+            IReadOnlyList<AlpcConnection> Pending = Instance.WinHelper.PendingConnectReplies;
             for (int Index = 0; Index < Pending.Count;)
             {
                 AlpcConnection Connection = Pending[Index];
@@ -2046,14 +2046,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
                 }
 
-                Pending.RemoveAt(Index);
+                Instance.WinHelper.RemovePendingConnectReplyAt(Index);
                 DeliverConnectReply(Instance, Connection);
             }
         }
 
         internal static void DeliverConnectRepliesTo(BinaryEmulator Instance, EmulatedThread Thread)
         {
-            List<AlpcConnection> Pending = Instance.WinHelper.PendingConnectReplies;
+            IReadOnlyList<AlpcConnection> Pending = Instance.WinHelper.PendingConnectReplies;
             for (int Index = 0; Index < Pending.Count;)
             {
                 AlpcConnection Connection = Pending[Index];
@@ -2063,14 +2063,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
                 }
 
-                Pending.RemoveAt(Index);
+                Instance.WinHelper.RemovePendingConnectReplyAt(Index);
                 DeliverConnectReply(Instance, Connection);
             }
         }
 
         internal static void DeliverConnectReplyForRoute(BinaryEmulator Instance, WinPort Port, WinIoCompletion Completion)
         {
-            List<AlpcConnection> Pending = Instance.WinHelper.PendingConnectReplies;
+            IReadOnlyList<AlpcConnection> Pending = Instance.WinHelper.PendingConnectReplies;
             for (int Index = 0; Index < Pending.Count; Index++)
             {
                 AlpcConnection Connection = Pending[Index];
@@ -2079,7 +2079,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Instance.HasParkedTaker(Completion))
                 {
-                    Pending.RemoveAt(Index);
+                    Instance.WinHelper.RemovePendingConnectReplyAt(Index);
                     DeliverConnectReply(Instance, Connection);
                 }
 
@@ -2123,7 +2123,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Connection.PendingConnectReply == null)
                 return;
 
-            Instance.WinHelper.PendingConnectReplies.Remove(Connection);
+            Instance.WinHelper.RemovePendingConnectReply(Connection);
             DeliverConnectReply(Instance, Connection);
         }
 
@@ -2133,7 +2133,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             Connection.PendingConnectReply = null;
-            Instance.WinHelper.PendingConnectReplies.Remove(Connection);
+            Instance.WinHelper.RemovePendingConnectReply(Connection);
         }
 
         // The reply and the connect answer write the length they produce.

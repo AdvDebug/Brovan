@@ -103,7 +103,19 @@ namespace Brovan.Core.Emulation
 
         public ulong StartAddress;
         public ulong Parameter;
-        public EmulatedThreadState State;
+
+        // No wake bump here: the sites that make a thread runnable bump at their choke point.
+        public EmulatedThreadState State
+        {
+            get => _state;
+            set
+            {
+                if (RankedLock.OrderChecked)
+                    Owner?.CheckStateWrite(this, value);
+                _state = value;
+            }
+        }
+        private EmulatedThreadState _state;
 
         public int BasePriority = 8;
         public int DynamicBoost;
@@ -113,6 +125,7 @@ namespace Brovan.Core.Emulation
         public long LastReadyTick;
         public long LastRunTick = -1;
         public int HostWorker = -1;
+        internal BinaryEmulator Owner;
         public bool ParkWaiting;
         public EmulatedThread ParkTarget;
         public bool Unreferenced;
@@ -167,6 +180,8 @@ namespace Brovan.Core.Emulation
         public long WaitDeadline;
         public bool WaitTimedOut;
         public int WaitSatisfiedIndex = -1;
+        // Satisfied by a waker while another worker ran the thread. That worker completes it.
+        public bool WaitClaimed;
         public bool SwitchingContext;
         public object GuestState { get; set; }
     }

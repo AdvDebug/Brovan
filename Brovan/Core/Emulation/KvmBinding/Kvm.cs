@@ -26,7 +26,7 @@ namespace Brovan.Core.Emulation
         public KvmException() : base("KVM backend exception occurred.") { }
     }
 
-    public sealed class Kvm : IDisposable, IGuestKernelBackend
+    public sealed class Kvm : IDisposable, IGuestKernelBackend, IGuestPagingBackend, IGuestEntryBackend
     {
         private int _systemFd = -1;
         private int _partitionFd = -1;
@@ -47,7 +47,6 @@ namespace Brovan.Core.Emulation
         private bool _avxEnabled;
         private ulong _cr4Protection;
         private int _ymmHighOffset = 576;
-        private byte[] _xsaveImage;
         private bool _populateUnavailable;
         private const ulong PopulateLimitBytes = 32UL * 1024 * 1024;
         private const ulong PopulateMinBytes = 64UL * 1024;
@@ -58,26 +57,18 @@ namespace Brovan.Core.Emulation
         private readonly List<int> _freeSlotIds = new();
         private readonly Dictionary<ulong, InstalledSlot> _activeSlots = new();
 
-        private readonly Dictionary<ulong, MappedPage> _mappedPages = new();
-        private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
-        private readonly List<long> _backingStarts = new();
-        private readonly List<IntPtr> _releasedBackings = new();
-        private readonly HostDiscardRuns _discardRuns = new();
+        private readonly GuestPageMap _mappedPages = new(InternalPages.PageLimit(KvmConstants.InternalPageTableBase));
+        private readonly BackingTable<BackingAllocation> _backings = new();
+        private readonly BackingFrees<BackingAllocation> _frees;
 
         // Slots KVM refused to delete. Their host memory is freed only with the partition.
         private readonly List<InstalledSlot> _stillMappedBacking = new();
         private ulong _backingBytes;
         // A page watched for writes only keeps a read-only memslot, so its reads run natively.
         private readonly Dictionary<ulong, bool> _trappedPages = new();
-        private readonly Dictionary<ulong, IntPtr> _pageTableViews = new();
 
-        private ulong[] _sortedPageKeys = Array.Empty<ulong>();
-        private bool _sortedPageKeysDirty = true;
         private bool _mappingsDirty;
-        private ulong _lastLookupPageBase = ulong.MaxValue;
-        private MappedPage _lastLookupPage;
-        private int _watchedPages;
-        private int _untouchedPages;
+        private readonly GuestPaging _paging;
         private readonly Dictionary<ulong, InstalledSlot> _desiredSlots = new();
         private readonly List<ulong> _staleSlotKeys = new();
         private readonly List<DirtyRange> _deletedSlotRanges = new();
@@ -88,7 +79,6 @@ namespace Brovan.Core.Emulation
         private bool _fullRebuildRequired = true;
         private readonly List<DirtyRange> _dirtyRanges = new();
         private const int MaxDirtyRanges = 16;
-        private ulong _pml4Gpa;
         private ulong _nextInternalGpa = KvmConstants.InternalPageTableBase;
 
         private IntPtr _internalPoolPtr = IntPtr.Zero;
@@ -105,16 +95,16 @@ namespace Brovan.Core.Emulation
         private ulong _gdtPageGpa;
         private const ulong ExceptionStackPages = 2;
 
-        private readonly object _vcpuLock = new();
-
         private readonly record struct UserReturnState(ulong Rip, ulong Rsp, ulong Rflags, LinuxKvmSegment Cs, LinuxKvmSegment Ss);
 
-        private sealed class VirtualProcessor
+        private sealed class VirtualProcessor : GuestProcessor
         {
             public Kvm Owner;
             public int Index;
             public int Fd = -1;
             public IntPtr RunPtr;
+            public readonly object RegisterLock = new();
+            public byte[] XsaveImage;
             public uint ThreadId;
             public ulong GdtPageGpa;
             public ulong TssPageGpa;
@@ -149,9 +139,6 @@ namespace Brovan.Core.Emulation
 
             public volatile bool StopRequested;
             public volatile bool Running;
-            public volatile bool InGuest;
-            public long TlbGeneration;
-            public bool TlbFlushPending;
             public bool TlbFlushOnSyscallReturn;
             public int HostThreadId;
             public int HostTid;
@@ -178,8 +165,6 @@ namespace Brovan.Core.Emulation
             { 0x41, 0x0F, 0x20, 0xDA, 0x41, 0x0F, 0x22, 0xDA, 0x45, 0x31, 0xD2, 0x48, 0x0F, 0x07 };
         private const ulong FlushingSysretOffset = FlushingSyscallReturnOffset + 11;
 
-        private long _tlbGeneration;
-
         private readonly bool _guest64;
         private readonly ushort _userCodeSelector;
 
@@ -202,7 +187,7 @@ namespace Brovan.Core.Emulation
                 VirtualProcessor vp = t_vp;
                 return vp != null && ReferenceEquals(vp.Owner, this) && vp.Binding == t_vpBinding
                     ? vp
-                    : _processors[0];
+                    : Volatile.Read(ref _processorSnapshot)[0];
             }
         }
 
@@ -212,7 +197,7 @@ namespace Brovan.Core.Emulation
             t_vpBinding = vp.Binding;
         }
 
-        private object _runLock;
+        private readonly GuestEntryGate _gate;
 
         // KVM cannot end a run after a set instruction count, so a slice is bounded by wall clock.
         private const int BoundedSliceMilliseconds = 10;
@@ -236,6 +221,9 @@ namespace Brovan.Core.Emulation
         private static readonly long MmioRefreshIntervalTicks = Stopwatch.Frequency / 4000;
         private long _lastMmioRefreshTimestamp;
 
+        // A leaf lock. Take it inside the mapping lock, never around it.
+        private readonly object _mmioLock = new();
+
         private int _disposed;
         private int _disposing;
 
@@ -248,18 +236,6 @@ namespace Brovan.Core.Emulation
 
         [ThreadStatic]
         private static KvmErrors _error;
-
-        private sealed class MappedPage
-        {
-            public IntPtr HostPage;
-            public IntPtr OwnedBacking;
-            public bool IsAlias;
-            public KvmMemoryPermission Permissions;
-            public bool WriteRetained;
-            public bool WriteWatched;
-            public bool Written;
-            public bool Untouched;
-        }
 
         private sealed class BackingAllocation : BackingBlock
         {
@@ -330,6 +306,9 @@ namespace Brovan.Core.Emulation
             if (arch != Arch.X86 || (mode != Mode.MODE_64 && mode != Mode.MODE_32))
                 throw new KvmException("KVM backend only supports x86 32-bit and x86-64 guests.");
 
+            _gate = new GuestEntryGate(this);
+            _paging = new GuestPaging(this, _gate, _mappedPages, KvmConstants.InternalPageTableBase);
+            _frees = new BackingFrees<BackingAllocation>(_backings, new FreeSite(this));
             _guest64 = mode == Mode.MODE_64;
             _userCodeSelector = _guest64 ? KvmConstants.UserCodeSelector : KvmConstants.UserCodeSelector32;
 
@@ -383,6 +362,7 @@ namespace Brovan.Core.Emulation
 
         public bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, IntPtr hostPointer)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck() || hostPointer == IntPtr.Zero) return false;
 
             if (!IsGuestPageRange(address, size))
@@ -391,7 +371,7 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            KvmMemoryPermission perm = TranslateProtection(protection);
+            GuestPagePermission perm = TranslateProtection(protection);
             long backingAddr = hostPointer.ToInt64();
             IntPtr backing = IntPtr.Zero;
             BackingAllocation allocation = null;
@@ -404,8 +384,8 @@ namespace Brovan.Core.Emulation
 
                 if (allocation == null || (ulong)(hostPage.ToInt64() - backing.ToInt64()) >= allocation.Size)
                 {
-                    backing = FindBackingAllocation(hostPage);
-                    if (backing == IntPtr.Zero || !_backingAllocations.TryGetValue(backing, out allocation))
+                    backing = _backings.Find(hostPage);
+                    if (backing == IntPtr.Zero || !_backings.TryGet(backing, out allocation))
                     {
                         backing = IntPtr.Zero;
                         allocation = null;
@@ -416,21 +396,21 @@ namespace Brovan.Core.Emulation
                 if (allocation != null)
                     allocation.AliasPages++;
 
-                if (_mappedPages.TryGetValue(guest, out MappedPage previous))
+                if (_mappedPages.TryGetValue(guest, out GuestPage previous))
                     ReleaseBacking(previous);
 
-                SetMappedPage(guest, new MappedPage
+                SetGuestPage(guest, new GuestPage
                 {
                     HostPage = hostPage,
                     OwnedBacking = backing,
                     IsAlias = true,
                     Permissions = perm,
                 });
-                accessRemoved |= EnsureVirtualMapping(guest, perm);
+                accessRemoved |= _paging.SetLeaf(guest, perm);
             }
 
             if (accessRemoved)
-                ShootDownGuestTlbs();
+                _gate.ShootDownGuestTlbs();
             RebuildMappings();
             FreeReleasedBackings();
             _error = KvmErrors.Ok;
@@ -439,6 +419,7 @@ namespace Brovan.Core.Emulation
 
         public IntPtr AllocateSharedStorage(ulong size)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return IntPtr.Zero;
 
             if (size == 0 || (size & KvmConstants.PageMask) != 0)
@@ -454,38 +435,43 @@ namespace Brovan.Core.Emulation
                 return IntPtr.Zero;
             }
 
-            AddBackingAllocation(backing, new BackingAllocation { Size = size, Held = true });
+            _backings.Add(backing, new BackingAllocation { Size = size, Held = true });
             _error = KvmErrors.Ok;
             return backing;
         }
 
         public IntPtr AdoptSharedStorage(IntPtr hostPointer, ulong size, IDisposable owner)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return IntPtr.Zero;
 
             if (hostPointer == IntPtr.Zero || owner == null || size == 0 || (size & KvmConstants.PageMask) != 0
-                || ((ulong)hostPointer.ToInt64() & KvmConstants.PageMask) != 0 || FindBackingAllocation(hostPointer) != IntPtr.Zero)
+                || ((ulong)hostPointer.ToInt64() & KvmConstants.PageMask) != 0 || _backings.Find(hostPointer) != IntPtr.Zero)
             {
                 _error = KvmErrors.InvalidArgument;
                 return IntPtr.Zero;
             }
 
-            AddBackingAllocation(hostPointer, new BackingAllocation { Size = size, Held = true, Owner = owner });
+            _backings.Add(hostPointer, new BackingAllocation { Size = size, Held = true, Owner = owner });
             _error = KvmErrors.Ok;
             return hostPointer;
         }
 
         public void ReleaseSharedStorage(IntPtr storage)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return;
-            if (!_backingAllocations.TryGetValue(storage, out BackingAllocation? allocation) || !allocation.Held) return;
+            BackingAllocation allocation = _backings.TakeHold(storage);
+            if (allocation == null)
+                return;
 
-            allocation.Held = false;
-            FreeIfUnreferenced(storage, allocation);
+            _frees.FreeIfUnreferenced(storage, allocation);
+            _frees.Settle();
         }
 
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return false;
 
             if (!IsGuestPageRange(address, size))
@@ -494,12 +480,12 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            KvmMemoryPermission perm = TranslateProtection(protection);
+            GuestPagePermission perm = TranslateProtection(protection);
 
             bool canBatch = true;
             for (ulong off = 0; off < size; off += KvmConstants.PageSize)
             {
-                if (_mappedPages.TryGetValue(address + off, out MappedPage existing) && existing.HostPage != IntPtr.Zero)
+                if (_mappedPages.TryGetValue(address + off, out GuestPage existing) && existing.HostPage != IntPtr.Zero)
                 {
                     canBatch = false;
                     break;
@@ -515,7 +501,7 @@ namespace Brovan.Core.Emulation
                 }
 
                 long backingAddr = backing.ToInt64();
-                AddBackingAllocation(backing, new BackingAllocation
+                _backings.Add(backing, new BackingAllocation
                 {
                     Size = size,
                     LivePages = (int)(size / KvmConstants.PageSize),
@@ -526,18 +512,18 @@ namespace Brovan.Core.Emulation
                 for (ulong off = 0; off < size; off += KvmConstants.PageSize)
                 {
                     ulong guest = address + off;
-                    MappedPage page = new MappedPage
+                    GuestPage page = new GuestPage
                     {
                         HostPage = new IntPtr(backingAddr + (long)off),
                         OwnedBacking = backing,
                         Permissions = perm,
                     };
-                    SetMappedPage(guest, page);
-                    EnsureVirtualMapping(guest, perm);
+                    SetGuestPage(guest, page);
+                    _paging.SetLeaf(guest, perm);
                 }
 
                 RebuildMappings();
-                if (perm != KvmMemoryPermission.None)
+                if (perm != GuestPagePermission.None)
                     PopulateRange(address, size, backing);
                 _error = KvmErrors.Ok;
                 return true;
@@ -547,40 +533,50 @@ namespace Brovan.Core.Emulation
             for (ulong off = 0; off < size; off += KvmConstants.PageSize)
             {
                 ulong guest = address + off;
-                if (!_mappedPages.TryGetValue(guest, out MappedPage page))
-                {
-                    page = new MappedPage();
-                    SetMappedPage(guest, page);
-                }
-
-                if (page.HostPage == IntPtr.Zero)
+                _mappedPages.TryGetValue(guest, out GuestPage current);
+                IntPtr host = current?.HostPage ?? IntPtr.Zero;
+                IntPtr owned = current?.OwnedBacking ?? IntPtr.Zero;
+                if (host == IntPtr.Zero)
                 {
                     if (!TryAllocateBackingMemory(KvmConstants.PageSize, out IntPtr backing))
                     {
                         if (accessRemoved)
-                            ShootDownGuestTlbs();
+                            _gate.ShootDownGuestTlbs();
                         RebuildMappings();
                         _error = KvmErrors.NoMemory;
                         return false;
                     }
 
-                    AddBackingAllocation(backing, new BackingAllocation
+                    _backings.Add(backing, new BackingAllocation
                     {
                         Size = KvmConstants.PageSize,
                         LivePages = 1,
                     });
-                    page.HostPage = backing;
-                    page.OwnedBacking = backing;
+                    host = backing;
+                    owned = backing;
                 }
 
-                page.Permissions = perm;
-                page.WriteRetained = false;
+                GuestPage page = new GuestPage
+                {
+                    HostPage = host,
+                    OwnedBacking = owned,
+                    IsAlias = current?.IsAlias ?? false,
+                    Permissions = perm,
+                    WriteRetained = false,
+                    WriteWatched = current?.WriteWatched ?? false,
+                    Written = current?.Written ?? false,
+                    Untouched = current?.Untouched ?? false,
+                };
+                if (current == null)
+                    SetGuestPage(guest, page);
+                else
+                    _paging.ReplacePage(guest, page);
                 MarkSpanDirty(guest, KvmConstants.PageSize);
-                accessRemoved |= EnsureVirtualMapping(guest, perm);
+                accessRemoved |= _paging.SetLeaf(guest, perm);
             }
 
             if (accessRemoved)
-                ShootDownGuestTlbs();
+                _gate.ShootDownGuestTlbs();
             RebuildMappings();
             _error = KvmErrors.Ok;
             return true;
@@ -588,6 +584,7 @@ namespace Brovan.Core.Emulation
 
         public bool UnmapMemory(ulong address, ulong size)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return false;
 
             if (!IsGuestPageRange(address, size))
@@ -601,28 +598,31 @@ namespace Brovan.Core.Emulation
             {
                 ulong guest = address + off;
                 if (_mappedPages.ContainsKey(guest))
-                    accessRemoved |= EnsureVirtualMapping(guest, KvmMemoryPermission.None);
+                    accessRemoved |= _paging.SetLeaf(guest, GuestPagePermission.None);
             }
 
             // Shoot down before the backing is freed.
             if (accessRemoved)
-                ShootDownGuestTlbs();
+                _gate.ShootDownGuestTlbs();
 
             for (ulong off = 0; off < size; off += KvmConstants.PageSize)
             {
                 ulong guest = address + off;
-                if (_mappedPages.TryGetValue(guest, out MappedPage page))
+                if (_mappedPages.TryGetValue(guest, out GuestPage page))
                 {
                     ReleaseBacking(page);
-                    RemoveMappedPage(guest);
+                    RemoveGuestPage(guest);
                 }
             }
 
-            for (int i = _mmioRegions.Count - 1; i >= 0; i--)
+            lock (_mmioLock)
             {
-                MmioRegion region = _mmioRegions[i];
-                if (region.Address >= address && region.Address < address + size)
-                    _mmioRegions.RemoveAt(i);
+                for (int i = _mmioRegions.Count - 1; i >= 0; i--)
+                {
+                    MmioRegion region = _mmioRegions[i];
+                    if (region.Address >= address && region.Address < address + size)
+                        _mmioRegions.RemoveAt(i);
+                }
             }
 
             RebuildMappings();
@@ -633,6 +633,7 @@ namespace Brovan.Core.Emulation
 
         public bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return false;
 
             if (read == null || write == null ||
@@ -653,16 +654,20 @@ namespace Brovan.Core.Emulation
                 WriteCallback = write,
             };
 
-            _mmioRegions.RemoveAll(r => r.Address == address);
-            _mmioRegions.Add(region);
+            lock (_mmioLock)
+            {
+                _mmioRegions.RemoveAll(r => r.Address == address);
+                _mmioRegions.Add(region);
+                RefreshMmioRegion(region);
+            }
 
-            RefreshMmioRegion(region);
             _error = KvmErrors.Ok;
             return true;
         }
 
         public bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return false;
             if (!IsGuestRange(address, size))
             {
@@ -670,36 +675,34 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            KvmMemoryPermission perm = TranslateProtection(protection);
-            bool writable = (perm & KvmMemoryPermission.Write) != 0;
+            GuestPagePermission perm = TranslateProtection(protection);
+            bool writable = (perm & GuestPagePermission.Write) != 0;
             bool accessRemoved = false;
             bool writeAdded = false;
 
             for (ulong off = 0; off < size; off += KvmConstants.PageSize)
             {
                 ulong guest = address + off;
-                if (!_mappedPages.TryGetValue(guest, out MappedPage page) || page.Permissions == perm)
+                if (!_mappedPages.TryGetValue(guest, out GuestPage page) || page.Permissions == perm)
                     continue;
 
-                KvmMemoryPermission old = page.Permissions;
-                bool wasWritable = (old & KvmMemoryPermission.Write) != 0;
+                GuestPagePermission old = page.Permissions;
+                bool wasWritable = (old & GuestPagePermission.Write) != 0;
 
-                if (old == KvmMemoryPermission.None || perm == KvmMemoryPermission.None || (writable && !MapsWritable(page)))
+                if (old == GuestPagePermission.None || perm == GuestPagePermission.None || (writable && !MapsWritable(page)))
                     MarkSpanDirty(guest, KvmConstants.PageSize);
 
-                if (wasWritable)
-                    page.WriteRetained = true;
-                page.Permissions = perm;
+                _paging.ReplacePage(guest, page.WithPermissions(perm, page.WriteRetained || wasWritable));
 
-                if (wasWritable == writable && (old == KvmMemoryPermission.None) == (perm == KvmMemoryPermission.None))
+                if (wasWritable == writable && (old == GuestPagePermission.None) == (perm == GuestPagePermission.None))
                     continue;
 
-                accessRemoved |= EnsureVirtualMapping(guest, perm);
-                writeAdded |= old != KvmMemoryPermission.None && writable;
+                accessRemoved |= _paging.SetLeaf(guest, perm);
+                writeAdded |= old != GuestPagePermission.None && writable;
             }
 
             if (accessRemoved)
-                ShootDownGuestTlbs();
+                _gate.ShootDownGuestTlbs();
             RebuildMappings();
 
             // Granting write needs no shootdown. A stale read-only entry costs one retried fault.
@@ -712,220 +715,55 @@ namespace Brovan.Core.Emulation
 
         // A memslot stays writable once write is granted and the guest PTE holds the current write bit.
         // Removing write then needs no slot split, which deletes and refaults the slot.
-        private static bool MapsWritable(MappedPage page)
-            => (page.Permissions & KvmMemoryPermission.Write) != 0 || page.WriteRetained;
+        private static bool MapsWritable(GuestPage page)
+            => (page.Permissions & GuestPagePermission.Write) != 0 || page.WriteRetained;
 
-        private static uint SlotFlags(MappedPage page)
+        private static uint SlotFlags(GuestPage page)
             => MapsWritable(page) ? 0 : KvmConstants.MemSlotReadOnly;
 
-        // NT: write watch uses the PTE dirty bit, which the processor sets here with no exit.
-        public unsafe bool WatchWrites(ulong address, ulong size)
+        public bool WatchWrites(ulong address, ulong size)
         {
-            if (DisposedCheck()) return false;
-
-            if ((address & KvmConstants.PageMask) != 0 || (size & KvmConstants.PageMask) != 0)
-            {
-                _error = KvmErrors.InvalidArgument;
-                return false;
-            }
-
-            if (!IsRangeMapped(address, size))
-            {
-                _error = KvmErrors.MemoryWriteUnmapped;
-                return false;
-            }
-
-            ulong* table = null;
-            ulong tableRange = ulong.MaxValue;
-            for (ulong off = 0; off < size; off += KvmConstants.PageSize)
-            {
-                ulong pageBase = address + off;
-                MappedPage page = _mappedPages[pageBase];
-                if (page.WriteWatched)
-                    continue;
-
-                page.WriteWatched = true;
-                page.Written = false;
-                page.Untouched = true;
-                _watchedPages++;
-                _untouchedPages++;
-
-                // x86 sets the accessed bit before it caches a translation.
-                ulong* entry = FindLeafEntry(pageBase, ref table, ref tableRange);
-                if (entry != null && (Interlocked.Exchange(ref *entry, 0) & KvmConstants.PageTableEntryAccessed) != 0)
-                    TouchWatchedPage(pageBase, page);
-            }
-
-            _error = KvmErrors.Ok;
-            return true;
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return !DisposedCheck() && SetWatchStatus(_paging.WatchWrites(address, size));
         }
 
-        // NT: the first access of a writable untouched page counts as a write.
-        private void TouchWatchedPage(ulong pageBase, MappedPage page)
+        public bool QueryWrites(ulong address, ulong pageCount, Span<ulong> written)
         {
-            page.Untouched = false;
-            _untouchedPages--;
-            if ((page.Permissions & KvmMemoryPermission.Write) != 0)
-                page.Written = true;
-            EnsureVirtualMapping(pageBase, page.Permissions);
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return !DisposedCheck() && SetWatchStatus(_paging.QueryWrites(address, pageCount, written));
         }
 
-        private bool TryTouchWatchedPage(ulong errorCode)
+        public bool ResetWrites(ulong address, ulong pageCount, ReadOnlySpan<ulong> pages)
         {
-            if (_untouchedPages == 0 || (errorCode & GuestPageEntries.FaultPresent) != 0)
-                return false;
-
-            ulong pageBase = ReadRegister(Registers.UC_X86_REG_CR2) & ~KvmConstants.PageMask;
-            if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || !page.Untouched || page.Permissions == KvmMemoryPermission.None ||
-                ((errorCode & GuestPageEntries.FaultWrite) != 0 && (page.Permissions & KvmMemoryPermission.Write) == 0))
-                return false;
-
-            TouchWatchedPage(pageBase, page);
-            return true;
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return !DisposedCheck() && SetWatchStatus(_paging.ResetWrites(address, pageCount, pages));
         }
 
-        private void RecordHostAccess(ulong address, ulong length, bool write)
+        private bool SetWatchStatus(WriteWatchStatus status)
         {
-            if (length == 0) return;
-
-            ulong end = address + length;
-            for (ulong pageBase = address & ~KvmConstants.PageMask; pageBase < end; pageBase += KvmConstants.PageSize)
+            _error = status switch
             {
-                if (!TryLookupPage(pageBase, out MappedPage page) || !page.WriteWatched)
-                    continue;
-
-                if (page.Untouched && page.Permissions != KvmMemoryPermission.None)
-                    TouchWatchedPage(pageBase, page);
-                if (write)
-                    page.Written = true;
-            }
+                WriteWatchStatus.Ok => KvmErrors.Ok,
+                WriteWatchStatus.InvalidArgument => KvmErrors.InvalidArgument,
+                _ => KvmErrors.MemoryWriteUnmapped,
+            };
+            return status == WriteWatchStatus.Ok;
         }
 
-        private void ForgetWatchedPage(MappedPage page)
+        public void EvictProcessors()
         {
-            if (page.WriteWatched)
-                _watchedPages--;
-            if (page.Untouched)
-                _untouchedPages--;
+            if (!DisposedCheck())
+                _gate.EvictProcessors();
         }
 
-        public unsafe bool QueryWrites(ulong address, ulong pageCount, Span<ulong> written)
+        public ProcessorHold HoldProcessorsOutOfGuest() => DisposedCheck() ? ProcessorHold.None : _gate.HoldProcessorsOutOfGuest();
+
+        GuestProcessor[] IGuestEntryBackend.Processors => Volatile.Read(ref _processorSnapshot);
+
+        void IGuestEntryBackend.Kick(GuestProcessor processor)
         {
-            if (DisposedCheck()) return false;
-
-            if ((address & KvmConstants.PageMask) != 0 || pageCount > (ulong)written.Length * 64)
-            {
-                _error = KvmErrors.InvalidArgument;
-                return false;
-            }
-
-            written.Slice(0, (int)((pageCount + 63) / 64)).Clear();
-
-            ulong* table = null;
-            ulong tableRange = ulong.MaxValue;
-            for (ulong index = 0; index < pageCount; index++)
-            {
-                ulong pageBase = address + (index << 12);
-                if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || !page.WriteWatched)
-                    continue;
-
-                bool dirty = page.Written;
-                if (!dirty)
-                {
-                    ulong* entry = FindLeafEntry(pageBase, ref table, ref tableRange);
-                    dirty = entry != null && (Volatile.Read(ref *entry) & KvmConstants.PageTableEntryDirty) != 0;
-                }
-
-                if (dirty)
-                    written[(int)(index >> 6)] |= 1UL << (int)(index & 63);
-            }
-
-            _error = KvmErrors.Ok;
-            return true;
-        }
-
-        public unsafe bool ResetWrites(ulong address, ulong pageCount, ReadOnlySpan<ulong> pages)
-        {
-            if (DisposedCheck()) return false;
-
-            if ((address & KvmConstants.PageMask) != 0 || pageCount > (ulong)pages.Length * 64)
-            {
-                _error = KvmErrors.InvalidArgument;
-                return false;
-            }
-
-            ulong* table = null;
-            ulong tableRange = ulong.MaxValue;
-            bool cleared = false;
-            int words = (int)((pageCount + 63) / 64);
-
-            for (int word = 0; word < words; word++)
-            {
-                for (ulong bits = pages[word]; bits != 0; bits &= bits - 1)
-                {
-                    ulong index = (ulong)word * 64 + (ulong)BitOperations.TrailingZeroCount(bits);
-                    if (index >= pageCount)
-                        break;
-
-                    ulong pageBase = address + (index << 12);
-                    if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || !page.WriteWatched)
-                        continue;
-
-                    cleared |= page.Written;
-                    page.Written = false;
-                    ulong* entry = FindLeafEntry(pageBase, ref table, ref tableRange);
-                    if (entry != null && (Interlocked.And(ref *entry, ~KvmConstants.PageTableEntryDirty) & KvmConstants.PageTableEntryDirty) != 0)
-                        cleared = true;
-                }
-            }
-
-            // x86: a cached dirty translation writes without setting the bit again.
-            if (cleared)
-                ShootDownGuestTlbs();
-
-            _error = KvmErrors.Ok;
-            return true;
-        }
-
-        // NT flushes every processor before a protect that removes access returns.
-        private void ShootDownGuestTlbs()
-        {
-            Interlocked.Increment(ref _tlbGeneration);
-            EvictProcessors();
-        }
-
-        public void HoldProcessorsOutOfGuest()
-        {
-            if (DisposedCheck()) return;
-            EvictProcessors();
-        }
-
-        private void EvictProcessors()
-        {
-            VirtualProcessor[] processors = Volatile.Read(ref _processorSnapshot);
-            bool kicked = false;
-            for (int i = 0; i < processors.Length; i++)
-            {
-                if (!processors[i].InGuest)
-                    continue;
-
-                if (!kicked)
-                {
-                    EnsureKickSignal();
-                    kicked = true;
-                }
-                KickProcessor(processors[i]);
-            }
-
-            if (!kicked)
-                return;
-
-            for (int i = 0; i < processors.Length; i++)
-            {
-                SpinWait spin = default;
-                while (processors[i].InGuest)
-                    spin.SpinOnce(-1);
-            }
+            EnsureKickSignal();
+            KickProcessor((VirtualProcessor)processor);
         }
 
         // KVM flushes the guest TLB on a CR4.PGE change, not on an unchanged CR3 write. No page is global.
@@ -1507,7 +1345,7 @@ namespace Brovan.Core.Emulation
                 MarkRegistersDirty();
             }
 
-            bool releaseRunLock = _runLock != null && Monitor.IsEntered(_runLock);
+            bool releaseRunLock = _gate.HoldsRunLock;
 
             try
             {
@@ -1529,8 +1367,7 @@ namespace Brovan.Core.Emulation
 
                     RefreshMmioBackedRegions();
 
-                    long tlbGeneration = Volatile.Read(ref _tlbGeneration);
-                    bool flushTlb = vp.TlbFlushPending || vp.TlbGeneration != tlbGeneration;
+                    bool flushTlb = _gate.NeedsTlbFlush(vp, out long tlbGeneration);
 
                     if ((run.DirtyRegs & KvmConstants.SyncGeneralRegisters) != 0)
                         run.Regs.Rflags = UserModeFlags.Clamp(run.Regs.Rflags);
@@ -1543,8 +1380,7 @@ namespace Brovan.Core.Emulation
                     if (flushTlb)
                     {
                         if (!vp.InSyscallStub) FlushGuestTlbOnEntry(ref run);
-                        vp.TlbFlushPending = false;
-                        vp.TlbGeneration = tlbGeneration;
+                        GuestEntryGate.TlbFlushed(vp, tlbGeneration);
                     }
 
                     int rc = RunProcessor(vp, releaseRunLock, out int errno);
@@ -1651,8 +1487,11 @@ namespace Brovan.Core.Emulation
         {
             int rc;
             vp.Running = true;
-            vp.InGuest = true;
-            if (releaseRunLock) Monitor.Exit(_runLock);
+            // A run that may not enter goes through KVM_RUN with immediate_exit, so KVM takes the dirty registers and
+            // the loop sees an interrupted run, the same as a kick before entry.
+            bool entered = _gate.TryEnterGuest(vp, releaseRunLock);
+            if (!entered)
+                Volatile.Write(ref GetRunRef(vp).ImmediateExit, 1);
             try
             {
                 rc = KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoRun, IntPtr.Zero);
@@ -1660,8 +1499,8 @@ namespace Brovan.Core.Emulation
             }
             finally
             {
-                vp.InGuest = false;
-                if (releaseRunLock) Monitor.Enter(_runLock);
+                if (entered)
+                    _gate.LeaveGuest(vp, releaseRunLock);
                 vp.Running = false;
             }
             return rc;
@@ -1694,11 +1533,17 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        public void UseRunLock(object runLock) => _runLock = runLock;
+        public void UseHost(IBackendHost host)
+        {
+            _gate.UseHost(host);
+            _paging.UseHost(host);
+            _frees.UseHost(host);
+        }
 
         public void StopThread(uint threadId)
         {
             if (Disposed || Disposing) return;
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (!_threadProcessors.TryGetValue(threadId, out VirtualProcessor vp)) return;
 
             vp.StopRequested = true;
@@ -1722,16 +1567,17 @@ namespace Brovan.Core.Emulation
 
         private void EnsureMaintenanceThread()
         {
-            if (_maintenanceThread != null)
+            if (Volatile.Read(ref _maintenanceThread) != null)
                 return;
 
             EnsureKickSignal();
-            _maintenanceThread = new Thread(MaintenanceLoop)
+            Thread maintenance = new Thread(MaintenanceLoop)
             {
                 IsBackground = true,
                 Name = "KvmMaintenance"
             };
-            _maintenanceThread.Start();
+            if (Interlocked.CompareExchange(ref _maintenanceThread, maintenance, null) == null)
+                maintenance.Start();
         }
 
         private void MaintenanceLoop()
@@ -1818,6 +1664,7 @@ namespace Brovan.Core.Emulation
 
         private static bool IsUnboundedRange(ulong begin, ulong end) => end == 0 || end < begin;
 
+        // Hooks change only while no worker runs a slice, so the exits read the hook lists without a lock.
         public IntPtr AddMemoryHook(ulong begin, ulong end, BackendHookType hookType, MemoryHookCallback callback)
         {
             if (callback == null) return IntPtr.Zero;
@@ -1857,6 +1704,7 @@ namespace Brovan.Core.Emulation
 
         private void RefreshTrappedPages()
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             _trappedPages.Clear();
 
             for (int i = 0; i < _memoryHooks.Count; i++)
@@ -1988,24 +1836,7 @@ namespace Brovan.Core.Emulation
         {
             if (size == 0) return true;
             if (Volatile.Read(ref _disposing) != 0 || Volatile.Read(ref _disposed) != 0) return false;
-            if (!IsGuestRange(address, size)) return false;
-
-            ulong current = address;
-            ulong remaining = size;
-            while (remaining > 0)
-            {
-                ulong pageBase = current & ~KvmConstants.PageMask;
-                if (!TryLookupPage(pageBase, out MappedPage page))
-                    return false;
-                ulong runEnd = TryGetIntactBackingEnd(page, pageBase, out ulong backingEnd)
-                    ? backingEnd
-                    : pageBase + KvmConstants.PageSize;
-                ulong chunk = runEnd - current;
-                if (chunk > remaining) chunk = remaining;
-                current += chunk;
-                remaining -= chunk;
-            }
-            return true;
+            return _paging.IsRangeMapped(address, size);
         }
 
         public void Dispose()
@@ -2040,13 +1871,13 @@ namespace Brovan.Core.Emulation
                 _idleProcessors.Clear();
                 _threadProcessors.Clear();
 
-                foreach (KeyValuePair<IntPtr, BackingAllocation> kv in _backingAllocations)
+                using (_paging.LockMappings())
+                    _frees.CompletePassed(true);
+                foreach (KeyValuePair<IntPtr, BackingAllocation> kv in _backings)
                     FreeAllocation(kv.Key, kv.Value);
-                _backingAllocations.Clear();
-                _backingStarts.Clear();
-                _mappedPages.Clear();
-                _lastLookupPageBase = ulong.MaxValue;
-                _lastLookupPage = null;
+                _backings.Clear();
+                _paging.Clear();
+                _gate.Dispose();
 
                 if (_internalPoolPtr != IntPtr.Zero)
                 {
@@ -2069,12 +1900,12 @@ namespace Brovan.Core.Emulation
 
         ~Kvm() { Dispose(); }
 
-        private static KvmMemoryPermission TranslateProtection(MemoryProtection protection)
+        private static GuestPagePermission TranslateProtection(MemoryProtection protection)
         {
-            KvmMemoryPermission perm = KvmMemoryPermission.None;
-            if ((protection & MemoryProtection.Read) != 0) perm |= KvmMemoryPermission.Read;
-            if ((protection & MemoryProtection.Write) != 0) perm |= KvmMemoryPermission.Write;
-            if ((protection & MemoryProtection.Execute) != 0) perm |= KvmMemoryPermission.Execute;
+            GuestPagePermission perm = GuestPagePermission.None;
+            if ((protection & MemoryProtection.Read) != 0) perm |= GuestPagePermission.Read;
+            if ((protection & MemoryProtection.Write) != 0) perm |= GuestPagePermission.Write;
+            if ((protection & MemoryProtection.Execute) != 0) perm |= GuestPagePermission.Execute;
             return perm;
         }
 
@@ -2136,7 +1967,7 @@ namespace Brovan.Core.Emulation
             if (pointer == KvmNative.MAP_FAILED)
             {
                 pointer = IntPtr.Zero;
-                Utils.LogError($"[Kvm] Host backing mapping of 0x{size:X} bytes failed with {Marshal.GetLastWin32Error()}. Live backing 0x{_backingBytes:X} bytes in {_backingAllocations.Count} allocations.");
+                Utils.LogError($"[Kvm] Host backing mapping of 0x{size:X} bytes failed with {Marshal.GetLastWin32Error()}. Live backing 0x{_backingBytes:X} bytes in {_backings.Count} allocations.");
                 return false;
             }
 
@@ -2279,10 +2110,10 @@ namespace Brovan.Core.Emulation
             _backingBytes -= size;
         }
 
-        private void ReleaseBacking(MappedPage page)
+        private void ReleaseBacking(GuestPage page)
         {
             if (page.OwnedBacking == IntPtr.Zero) return;
-            if (!_backingAllocations.TryGetValue(page.OwnedBacking, out BackingAllocation allocation)) return;
+            if (!_backings.TryGet(page.OwnedBacking, out BackingAllocation allocation)) return;
 
             if (page.IsAlias)
                 allocation.AliasPages--;
@@ -2290,36 +2121,49 @@ namespace Brovan.Core.Emulation
                 allocation.LivePages--;
 
             if (!allocation.IsReferenced)
-                _releasedBackings.Add(page.OwnedBacking);
+                _frees.Released(page.OwnedBacking);
             else if (!page.IsAlias && allocation.IsDiscardable)
-                _discardRuns.Add(page.OwnedBacking, page.HostPage, KvmConstants.PageSize);
+                _frees.Discards.Add(page.OwnedBacking, page.HostPage, KvmConstants.PageSize);
         }
 
         // Only after the rebuild deletes the slots. Until then other processors can reach the backing.
         private void FreeReleasedBackings()
         {
-            for (int i = 0; i < _releasedBackings.Count; i++)
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            _frees.Flush();
+        }
+
+        public bool HasDeferredFrees => _frees.HasDeferred;
+
+        public bool CompleteDeferredFrees(bool all)
+        {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return _frees.CompletePassed(all);
+        }
+
+        private sealed class FreeSite : IBackingFreeSite<BackingAllocation>
+        {
+            private readonly Kvm _owner;
+
+            public FreeSite(Kvm owner) => _owner = owner;
+
+            public bool IsBackingStillMapped(IntPtr start, ulong size) => _owner.IsBackingStillMapped(start, size);
+
+            public void ForgetBlock(IntPtr backing, BackingAllocation allocation) => _owner._paging.AssertMappingsHeld(nameof(ForgetBlock));
+
+            public void FreeBlock(IntPtr backing, BackingAllocation allocation)
             {
-                if (_backingAllocations.TryGetValue(_releasedBackings[i], out BackingAllocation allocation))
-                    FreeIfUnreferenced(_releasedBackings[i], allocation);
+                _owner._paging.AssertMappingsHeld(nameof(FreeBlock));
+                _owner.FreeAllocation(backing, allocation);
             }
 
-            _releasedBackings.Clear();
-
-            for (int i = 0; i < _discardRuns.Count; i++)
+            public void DiscardRun(HostDiscardRuns.Run run, BackingAllocation allocation)
             {
-                HostDiscardRuns.Run run = _discardRuns[i];
-                if (!_backingAllocations.TryGetValue(run.Key, out BackingAllocation allocation) || !allocation.IsDiscardable
-                    || IsBackingStillMapped(run.Start, run.Size))
-                    continue;
-
                 if (allocation.HugePages)
-                    DiscardFreeSpans(run, allocation);
+                    _owner.DiscardFreeSpans(run, allocation);
                 else
                     HostDiscard.Release(run.Start, run.Size);
             }
-
-            _discardRuns.Clear();
         }
 
         // Linux keeps a partly discarded huge page until reclaim.
@@ -2351,7 +2195,7 @@ namespace Brovan.Core.Emulation
             ulong guest = allocation.GuestBase + spanOffset;
             for (ulong off = 0; off < KvmConstants.HugePageSize; off += KvmConstants.PageSize)
             {
-                if (_mappedPages.TryGetValue(guest + off, out MappedPage page) && page.OwnedBacking == backing && !page.IsAlias)
+                if (_mappedPages.TryGetValue(guest + off, out GuestPage page) && page.OwnedBacking == backing && !page.IsAlias)
                     return true;
             }
 
@@ -2360,11 +2204,11 @@ namespace Brovan.Core.Emulation
 
         public IntPtr PinBacking(IntPtr hostPointer, ulong size)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return IntPtr.Zero;
 
-            IntPtr backing = FindBackingAllocation(hostPointer);
-            if (backing == IntPtr.Zero || size == 0 || !_backingAllocations.TryGetValue(backing, out BackingAllocation allocation)
-                || size > allocation.Size - (ulong)(hostPointer.ToInt64() - backing.ToInt64()))
+            IntPtr backing = _backings.FindRange(hostPointer, size, out BackingAllocation allocation);
+            if (backing == IntPtr.Zero)
                 return IntPtr.Zero;
 
             allocation.Pins++;
@@ -2373,23 +2217,13 @@ namespace Brovan.Core.Emulation
 
         public void UnpinBacking(IntPtr pin)
         {
-            if (DisposedCheck() || !_backingAllocations.TryGetValue(pin, out BackingAllocation allocation) || allocation.Pins == 0)
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            if (DisposedCheck() || !_backings.TryGet(pin, out BackingAllocation allocation) || allocation.Pins == 0)
                 return;
 
             allocation.Pins--;
-            FreeIfUnreferenced(pin, allocation);
-        }
-
-        private void FreeIfUnreferenced(IntPtr backing, BackingAllocation allocation)
-        {
-            if (allocation.IsReferenced || IsBackingStillMapped(backing, allocation.Size)) return;
-
-            FreeAllocation(backing, allocation);
-            _backingAllocations.Remove(backing);
-
-            int index = _backingStarts.BinarySearch(backing.ToInt64());
-            if (index >= 0)
-                _backingStarts.RemoveAt(index);
+            _frees.FreeIfUnreferenced(pin, allocation);
+            _frees.Settle();
         }
 
         private bool IsBackingStillMapped(IntPtr backing, ulong size)
@@ -2410,31 +2244,6 @@ namespace Brovan.Core.Emulation
                 allocation.Owner.Dispose();
             else
                 FreeBackingMemory(backing, allocation.Size);
-        }
-
-        private void AddBackingAllocation(IntPtr backing, BackingAllocation allocation)
-        {
-            _backingAllocations[backing] = allocation;
-
-            int index = _backingStarts.BinarySearch(backing.ToInt64());
-            if (index < 0)
-                _backingStarts.Insert(~index, backing.ToInt64());
-        }
-
-        private IntPtr FindBackingAllocation(IntPtr hostPointer)
-        {
-            long target = hostPointer.ToInt64();
-            int index = _backingStarts.BinarySearch(target);
-            if (index < 0)
-                index = ~index - 1;
-
-            if (index < 0)
-                return IntPtr.Zero;
-
-            IntPtr start = new IntPtr(_backingStarts[index]);
-            return _backingAllocations.TryGetValue(start, out BackingAllocation allocation) && (ulong)(target - start.ToInt64()) < allocation.Size
-                ? start
-                : IntPtr.Zero;
         }
 
         private unsafe ref LinuxKvmRun GetRunRef()
@@ -2556,6 +2365,7 @@ namespace Brovan.Core.Emulation
 
         private VirtualProcessor CreateProcessor(int index)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             int fd = KvmNative.ioctl(_partitionFd, KvmConstants.KvmIoCreateVcpu, index);
             if (fd < 0)
                 throw new KvmException("KVM_CREATE_VCPU failed", Marshal.GetLastWin32Error());
@@ -2592,19 +2402,19 @@ namespace Brovan.Core.Emulation
 
         private unsafe void AllocateProcessorTables(VirtualProcessor vp)
         {
-            vp.GdtPageGpa = AllocateInternalPage(KvmMemoryPermission.Read);
+            vp.GdtPageGpa = AllocateInternalPage(GuestPagePermission.Read);
             vp.TssPageGpa = AllocateInternalPage();
             ulong stackSize = ExceptionStackPages * KvmConstants.PageSize;
-            ulong stackBase = AllocateInternalRange(stackSize, KvmMemoryPermission.ReadWrite, out IntPtr stackHost);
+            ulong stackBase = AllocateInternalRange(stackSize, GuestPagePermission.ReadWrite, out IntPtr stackHost);
             ulong stackTop = stackBase + stackSize;
             vp.InterruptFrameGpa = GuestInterruptGates.InterruptFrame(stackTop);
             vp.InterruptFrameHost = stackHost + (nint)(vp.InterruptFrameGpa - stackBase);
             vp.DebugFrameGpa = GuestInterruptGates.DebugFrame(stackTop);
             vp.DebugFrameHost = stackHost + (nint)(vp.DebugFrameGpa - stackBase);
 
-            if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage template)
-                || !_mappedPages.TryGetValue(vp.GdtPageGpa, out MappedPage gdtPage)
-                || !_mappedPages.TryGetValue(vp.TssPageGpa, out MappedPage tssPage))
+            if (!_mappedPages.TryGetValue(_gdtPageGpa, out GuestPage template)
+                || !_mappedPages.TryGetValue(vp.GdtPageGpa, out GuestPage gdtPage)
+                || !_mappedPages.TryGetValue(vp.TssPageGpa, out GuestPage tssPage))
                 throw new KvmException("Failed to allocate the processor tables.");
 
             byte* gdt = (byte*)gdtPage.HostPage;
@@ -2726,7 +2536,7 @@ namespace Brovan.Core.Emulation
         {
             ref LinuxKvmRun run = ref GetRunRef(vp);
 
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 if (KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoGetRegisters, ref run.Regs) < 0)
                     throw new KvmException("KVM_GET_REGS failed", Marshal.GetLastWin32Error());
@@ -2743,7 +2553,7 @@ namespace Brovan.Core.Emulation
             sregs.Gs = MakeSegment(KvmConstants.UserDataSelector, false, true);
             sregs.Cr0 = 0x80010033UL;
             sregs.Cr4 = 0x620UL | (_avxEnabled ? ControlRegister4.Osxsave : 0) | _cr4Protection;
-            sregs.Cr3 = _pml4Gpa;
+            sregs.Cr3 = _paging.Root;
             sregs.Efer = (1UL << 8) | (1UL << 10) | (1UL << 11) | (_guest64 ? 1UL << 0 : 0);
             sregs.Gdt.Base = vp.GdtPageGpa;
             sregs.Gdt.Limit = KvmConstants.GdtLimit;
@@ -2800,10 +2610,15 @@ namespace Brovan.Core.Emulation
 
         public int ProcessorLimit => _processorLimit;
 
-        public bool IsThreadResident(uint threadId) => _threadProcessors.ContainsKey(threadId);
+        public bool IsThreadResident(uint threadId)
+        {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return _threadProcessors.ContainsKey(threadId);
+        }
 
         public bool TryBindThread(uint threadId)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck() || threadId == 0)
                 return false;
 
@@ -2840,6 +2655,7 @@ namespace Brovan.Core.Emulation
 
         public void UnbindThread(uint threadId)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (!_threadProcessors.Remove(threadId, out VirtualProcessor vp))
                 return;
 
@@ -2850,6 +2666,7 @@ namespace Brovan.Core.Emulation
 
         public void SelectThread(uint threadId)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             VirtualProcessor vp = _threadProcessors.TryGetValue(threadId, out VirtualProcessor bound) ? bound : _processors[0];
             if (vp.ThreadId != threadId)
             {
@@ -2863,10 +2680,10 @@ namespace Brovan.Core.Emulation
         {
             if (!_guest64) return;
 
-            _syscallTrapPageGpa = AllocateInternalPage(KvmMemoryPermission.ReadExecute);
+            _syscallTrapPageGpa = AllocateInternalPage(GuestPagePermission.ReadExecute);
             unsafe
             {
-                if (_mappedPages.TryGetValue(_syscallTrapPageGpa, out MappedPage page))
+                if (_mappedPages.TryGetValue(_syscallTrapPageGpa, out GuestPage page))
                 {
                     byte* code = (byte*)page.HostPage;
                     code[SyscallReturnOffset] = 0x48;
@@ -2882,9 +2699,9 @@ namespace Brovan.Core.Emulation
         // The syscall registers reach the host through the run page, so the stub spills them only for kernel calls.
         private void AllocateSyscallStub(VirtualProcessor vp)
         {
-            vp.SyscallStubGpa = AllocateInternalRange(KvmConstants.PageSize, KvmMemoryPermission.ReadExecute, out IntPtr code);
-            ulong spillGpa = AllocateInternalRange(KvmConstants.PageSize, KvmMemoryPermission.ReadWrite, out vp.SyscallSpill);
-            _guestKernel ??= new GuestKernelHost(this, KvmConstants.InternalPageTableBase, KvmConstants.UserCodeSelector,
+            vp.SyscallStubGpa = AllocateInternalRange(KvmConstants.PageSize, GuestPagePermission.ReadExecute, out IntPtr code);
+            ulong spillGpa = AllocateInternalRange(KvmConstants.PageSize, GuestPagePermission.ReadWrite, out vp.SyscallSpill);
+            _guestKernel ??= new GuestKernelHost(this, _gate, KvmConstants.InternalPageTableBase, KvmConstants.UserCodeSelector,
                 KvmConstants.UserDataSelector, smap: (_cr4Protection & ControlRegister4.Smap) != 0, alwaysSpill: false);
             _guestKernel.AddProcessor(vp.SyscallStubGpa, code, spillGpa, vp.SyscallSpill);
         }
@@ -2895,9 +2712,10 @@ namespace Brovan.Core.Emulation
 
         bool IGuestKernelBackend.TryAllocateKernelRange(ulong size, bool writable, out ulong address, out IntPtr host)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             try
             {
-                address = AllocateInternalRange(size, writable ? KvmMemoryPermission.ReadWrite : KvmMemoryPermission.Read, out host);
+                address = AllocateInternalRange(size, writable ? GuestPagePermission.ReadWrite : GuestPagePermission.Read, out host);
                 RebuildMappings();
                 return true;
             }
@@ -2912,6 +2730,7 @@ namespace Brovan.Core.Emulation
 
         bool IGuestKernelBackend.MapKernelView(IntPtr host, ulong address, ulong size)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (!HasSlotHeadroom)
                 return false;
 
@@ -2935,6 +2754,7 @@ namespace Brovan.Core.Emulation
 
         bool IGuestKernelBackend.UnmapKernelView(ulong address, ulong size)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (!_kernelViewSlots.TryGetValue(address, out int slot))
                 return true;
 
@@ -2945,29 +2765,31 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        IntPtr IGuestKernelBackend.EnsureKernelPageDirectory(ulong address)
+        // A new table page enters the memslots before the entry that points through it.
+        bool IGuestKernelBackend.MapKernelLargePage(ulong address)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             try
             {
-                ulong pdptGpa = EnsureChildTable(_pml4Gpa, (int)((address >> 39) & 0x1FF));
-                ulong pdGpa = EnsureChildTable(pdptGpa, (int)((address >> 30) & 0x1FF));
+                _paging.EnsureDirectoryTable(address);
                 if (_mappingsDirty)
                     RebuildMappings();
-                return _pageTableViews.TryGetValue(pdGpa, out IntPtr pd) ? pd : IntPtr.Zero;
+                return _paging.SetKernelLargePage(address);
             }
             catch (KvmException ex)
             {
                 Utils.LogError($"[Kvm] No page table for a kernel view at 0x{address:X}: {ex.Message}");
-                return IntPtr.Zero;
+                return false;
             }
         }
 
-        void IGuestKernelBackend.EvictProcessors() => EvictProcessors();
+
+        ulong IGuestPagingBackend.AllocateTablePage() => AllocateInternalPage(mapIntoGuest: false);
 
         private void InitializeGdt()
         {
-            _gdtPageGpa = AllocateInternalPage(KvmMemoryPermission.Read);
-            if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage gdtPage) || gdtPage.HostPage == IntPtr.Zero)
+            _gdtPageGpa = AllocateInternalPage(GuestPagePermission.Read);
+            if (!_mappedPages.TryGetValue(_gdtPageGpa, out GuestPage gdtPage) || gdtPage.HostPage == IntPtr.Zero)
                 throw new KvmException("Failed to allocate GDT page.");
 
             unsafe
@@ -2998,12 +2820,12 @@ namespace Brovan.Core.Emulation
 
         private void InitializeExceptionHandling()
         {
-            _exceptionStubPageGpa = AllocateInternalPage(KvmMemoryPermission.ReadExecute);
-            _exceptionIdtPageGpa = AllocateInternalPage(KvmMemoryPermission.Read);
+            _exceptionStubPageGpa = AllocateInternalPage(GuestPagePermission.ReadExecute);
+            _exceptionIdtPageGpa = AllocateInternalPage(GuestPagePermission.Read);
 
             unsafe
             {
-                if (_mappedPages.TryGetValue(_exceptionStubPageGpa, out MappedPage stubPage))
+                if (_mappedPages.TryGetValue(_exceptionStubPageGpa, out GuestPage stubPage))
                 {
                     byte* stubs = (byte*)stubPage.HostPage;
                     for (uint vector = 0; vector < KvmConstants.ExceptionVectorCount; vector++)
@@ -3012,7 +2834,7 @@ namespace Brovan.Core.Emulation
                     stubs[IretStubOffset + 1] = 0xCF;
                 }
 
-                if (_mappedPages.TryGetValue(_exceptionIdtPageGpa, out MappedPage idtPage))
+                if (_mappedPages.TryGetValue(_exceptionIdtPageGpa, out GuestPage idtPage))
                 {
                     byte* idt = (byte*)idtPage.HostPage;
                     for (uint vector = 0; vector < KvmConstants.ExceptionVectorCount; vector++)
@@ -3026,14 +2848,11 @@ namespace Brovan.Core.Emulation
 
         public unsafe void SetUserInterruptGates(Func<uint, bool> raisableFromUserMode)
         {
-            if (_mappedPages.TryGetValue(_exceptionIdtPageGpa, out MappedPage idtPage) && idtPage.HostPage != IntPtr.Zero)
+            if (_mappedPages.TryGetValue(_exceptionIdtPageGpa, out GuestPage idtPage) && idtPage.HostPage != IntPtr.Zero)
                 GuestInterruptGates.SetUserGates((byte*)idtPage.HostPage, KvmConstants.ExceptionVectorCount, raisableFromUserMode);
         }
 
-        private void InitializeLongModePageTables()
-        {
-            _pml4Gpa = AllocateInternalPage(mapIntoGuest: false);
-        }
+        private void InitializeLongModePageTables() => _paging.CreateRoot();
 
         private void AllocateInternalPool()
         {
@@ -3041,16 +2860,18 @@ namespace Brovan.Core.Emulation
             _internalPoolOffset = 0;
         }
 
-        private ulong AllocateInternalPage(KvmMemoryPermission permissions = KvmMemoryPermission.ReadWrite, bool mapIntoGuest = true)
+        private ulong AllocateInternalPage(GuestPagePermission permissions = GuestPagePermission.ReadWrite, bool mapIntoGuest = true)
             => AllocateInternalRange(KvmConstants.PageSize, permissions, mapIntoGuest);
 
-        private ulong AllocateInternalRange(ulong size, KvmMemoryPermission permissions, bool mapIntoGuest = true)
+        private ulong AllocateInternalRange(ulong size, GuestPagePermission permissions, bool mapIntoGuest = true)
             => AllocateInternalRange(size, permissions, out _, mapIntoGuest);
 
-        private ulong AllocateInternalRange(ulong size, KvmMemoryPermission permissions, out IntPtr host, bool mapIntoGuest = true)
+        private ulong AllocateInternalRange(ulong size, GuestPagePermission permissions, out IntPtr host, bool mapIntoGuest = true)
         {
             if ((size & KvmConstants.PageMask) != 0)
                 size = (size + KvmConstants.PageMask) & ~KvmConstants.PageMask;
+            if (size > InternalPages.PageLimit(KvmConstants.InternalPageTableBase) - _nextInternalGpa)
+                throw new KvmException($"No internal guest address space for 0x{size:X} bytes");
 
             IntPtr backing;
             if (_internalPoolPtr != IntPtr.Zero &&
@@ -3073,7 +2894,7 @@ namespace Brovan.Core.Emulation
             for (ulong off = 0; off < size; off += KvmConstants.PageSize)
             {
                 ulong pageGpa = baseGpa + off;
-                MappedPage page = new MappedPage
+                GuestPage page = new GuestPage
                 {
                     HostPage = new IntPtr(backingBase + (long)off),
                     OwnedBacking = IntPtr.Zero,
@@ -3081,171 +2902,32 @@ namespace Brovan.Core.Emulation
                     // The PTE protects an internal page. Its memslot keeps the flags of the pages around it.
                     WriteRetained = true,
                 };
-                SetMappedPage(pageGpa, page);
-                _pageTableViews[pageGpa] = page.HostPage;
+                SetGuestPage(pageGpa, page);
 
                 if (mapIntoGuest)
-                    EnsureVirtualMapping(pageGpa, permissions);
+                    _paging.SetLeaf(pageGpa, permissions);
             }
 
             return baseGpa;
         }
 
-        // No access maps as not present, so the fault is a #PF at the faulting RIP.
-        // Returns true when access was removed and a shootdown is needed.
-        private bool EnsureVirtualMapping(ulong guestAddress, KvmMemoryPermission permissions)
+        private void SetGuestPage(ulong guestAddress, GuestPage page)
         {
-            ulong pageBase = guestAddress & ~KvmConstants.PageMask;
-            int pml4Index = (int)((pageBase >> 39) & 0x1FF);
-            int pdptIndex = (int)((pageBase >> 30) & 0x1FF);
-            int pdIndex = (int)((pageBase >> 21) & 0x1FF);
-            int ptIndex = (int)((pageBase >> 12) & 0x1FF);
-
-            ulong pdptGpa = EnsureChildTable(_pml4Gpa, pml4Index);
-            ulong pdGpa = EnsureChildTable(pdptGpa, pdptIndex);
-            ulong ptGpa = EnsureChildTable(pdGpa, pdIndex);
-
-            if (!_pageTableViews.TryGetValue(ptGpa, out IntPtr ptPtr) || ptPtr == IntPtr.Zero) return false;
-            unsafe
-            {
-                ulong* pt = (ulong*)ptPtr;
-                ulong entry = GuestPageEntries.Leaf(pageBase, permissions != KvmMemoryPermission.None,
-                    (permissions & KvmMemoryPermission.Write) != 0, (permissions & KvmMemoryPermission.Execute) != 0,
-                    KvmConstants.InternalPageTableBase);
-
-                ulong old;
-                if (_watchedPages == 0)
-                {
-                    old = pt[ptIndex];
-                    Volatile.Write(ref pt[ptIndex], entry);
-                }
-                else
-                {
-                    _mappedPages.TryGetValue(pageBase, out MappedPage page);
-
-                    // NT: an untouched page has no valid PTE until its first access.
-                    if (page != null && page.Untouched)
-                        entry = 0;
-
-                    // Another processor can set the dirty bit until the swap.
-                    old = Interlocked.Exchange(ref pt[ptIndex], entry);
-                    if ((old & KvmConstants.PageTableEntryDirty) != 0 && page != null && page.WriteWatched)
-                        page.Written = true;
-                }
-
-                return GuestPageEntries.RemovesAccess(old, entry);
-            }
-        }
-
-        private unsafe ulong* FindLeafEntry(ulong pageBase, ref ulong* table, ref ulong tableRange)
-        {
-            if (pageBase >> 21 != tableRange)
-            {
-                table = FindLeafTable(pageBase);
-                tableRange = pageBase >> 21;
-            }
-
-            return table == null ? null : table + ((pageBase >> 12) & 0x1FF);
-        }
-
-        private unsafe ulong* FindLeafTable(ulong pageBase)
-        {
-            ulong table = _pml4Gpa;
-            for (int shift = 39; shift >= 21; shift -= 9)
-            {
-                if (!_pageTableViews.TryGetValue(table, out IntPtr view) || view == IntPtr.Zero)
-                    return null;
-
-                ulong entry = ((ulong*)view)[(pageBase >> shift) & 0x1FF];
-                if ((entry & KvmConstants.PageTableEntryPresent) == 0)
-                    return null;
-                table = entry & KvmConstants.PageTableEntryAddressMask;
-            }
-
-            return _pageTableViews.TryGetValue(table, out IntPtr leaf) && leaf != IntPtr.Zero ? (ulong*)leaf : null;
-        }
-
-        private ulong EnsureChildTable(ulong tableGpa, int index)
-        {
-            if (!_pageTableViews.TryGetValue(tableGpa, out IntPtr tablePtr) || tablePtr == IntPtr.Zero)
-                return 0;
-            unsafe
-            {
-                ulong* entries = (ulong*)tablePtr;
-                ulong entry = entries[index];
-                if ((entry & KvmConstants.PageTableEntryPresent) == 0)
-                {
-                    ulong childGpa = AllocateInternalPage(mapIntoGuest: false);
-                    entries[index] = childGpa
-                        | KvmConstants.PageTableEntryPresent
-                        | KvmConstants.PageTableEntryWritable
-                        | KvmConstants.PageTableEntryUser;
-                    return childGpa;
-                }
-                return entry & KvmConstants.PageTableEntryAddressMask;
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool TryLookupPage(ulong pageBase, out MappedPage page)
-        {
-            if (pageBase == _lastLookupPageBase)
-            {
-                page = _lastLookupPage;
-                return true;
-            }
-
-            if (_mappedPages.TryGetValue(pageBase, out page) && page != null && page.HostPage != IntPtr.Zero)
-            {
-                _lastLookupPageBase = pageBase;
-                _lastLookupPage = page;
-                return true;
-            }
-
-            page = null;
-            return false;
-        }
-
-        private void SetMappedPage(ulong guestAddress, MappedPage page)
-        {
-            if (_watchedPages != 0 && _mappedPages.TryGetValue(guestAddress, out MappedPage replaced))
-                ForgetWatchedPage(replaced);
-
-            _mappedPages[guestAddress] = page;
-            _sortedPageKeysDirty = true;
+            _paging.SetPage(guestAddress, page);
             _mappingsDirty = true;
             MarkSpanDirty(guestAddress, KvmConstants.PageSize);
-            _lastLookupPageBase = ulong.MaxValue;
-            _lastLookupPage = null;
         }
 
-        private void RemoveMappedPage(ulong guestAddress)
+        private void RemoveGuestPage(ulong guestAddress)
         {
-            if (!_mappedPages.Remove(guestAddress, out MappedPage removed)) return;
-            ForgetWatchedPage(removed);
-            _sortedPageKeysDirty = true;
+            if (!_paging.RemovePage(guestAddress)) return;
             _mappingsDirty = true;
             MarkSpanDirty(guestAddress, KvmConstants.PageSize);
-            _lastLookupPageBase = ulong.MaxValue;
-            _lastLookupPage = null;
-        }
-
-        private ulong[] GetSortedPageKeys()
-        {
-            if (!_sortedPageKeysDirty) return _sortedPageKeys;
-
-            int count = _mappedPages.Count;
-            if (_sortedPageKeys.Length < count)
-                _sortedPageKeys = new ulong[Math.Max(count, _sortedPageKeys.Length * 2)];
-
-            _mappedPages.Keys.CopyTo(_sortedPageKeys, 0);
-            Array.Sort(_sortedPageKeys, 0, count);
-            _sortedPageKeysDirty = false;
-            return _sortedPageKeys;
         }
 
         private void RebuildMappings()
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             _mappingsDirty = false;
 
             if (!_fullRebuildRequired)
@@ -3355,10 +3037,10 @@ namespace Brovan.Core.Emulation
             for (ulong address = from; address < to; address += KvmConstants.PageSize)
             {
                 ulong off = address - start;
-                if (!_mappedPages.TryGetValue(address, out MappedPage page)
+                if (!_mappedPages.TryGetValue(address, out GuestPage page)
                     || page == null
                     || page.HostPage == IntPtr.Zero
-                    || page.Permissions == KvmMemoryPermission.None)
+                    || page.Permissions == GuestPagePermission.None)
                     return false;
                 if (page.HostPage.ToInt64() != slot.Host.ToInt64() + (long)off) return false;
 
@@ -3393,37 +3075,29 @@ namespace Brovan.Core.Emulation
 
         private void RebuildMappingsFull()
         {
-            ulong[] sortedKeys = GetSortedPageKeys();
-            int keyCount = _mappedPages.Count;
             bool anyTrapped = _trappedPages.Count != 0;
 
             _desiredSlots.Clear();
             MarkIntactSlots(0, ulong.MaxValue);
             bool anyKept = _keptSlotStarts.Count != 0;
 
-            for (int i = 0; i < keyCount;)
+            ulong cursor = 0;
+            while (_mappedPages.TryGetNext(cursor, out ulong runAddress, out GuestPage page))
             {
-                ulong runAddress = sortedKeys[i];
                 if (TryGetKeptSlotEnd(runAddress, out ulong keptEnd))
                 {
-                    while (i < keyCount && sortedKeys[i] < keptEnd) i++;
+                    cursor = keptEnd;
                     continue;
                 }
 
-                if (!_mappedPages.TryGetValue(runAddress, out MappedPage page)
-                    || page == null
-                    || page.HostPage == IntPtr.Zero
-                    || page.Permissions == KvmMemoryPermission.None)
-                {
-                    i++;
+                cursor = runAddress + KvmConstants.PageSize;
+                if (page.HostPage == IntPtr.Zero || page.Permissions == GuestPagePermission.None)
                     continue;
-                }
 
                 if (anyTrapped && _trappedPages.TryGetValue(runAddress, out bool writeOnly))
                 {
                     if (writeOnly)
                         _desiredSlots[runAddress] = MakeWriteWatchSlot(page);
-                    i++;
                     continue;
                 }
 
@@ -3431,17 +3105,15 @@ namespace Brovan.Core.Emulation
                 uint runFlags = SlotFlags(page);
                 ulong runSize = KvmConstants.PageSize;
 
-                int j = i + 1;
-                while (j < keyCount)
+                while (true)
                 {
-                    if (sortedKeys[j] != runAddress + runSize) break;
-                    if (anyKept && _keptSlotStarts.Contains(sortedKeys[j])) break;
-                    if (!_mappedPages.TryGetValue(sortedKeys[j], out MappedPage next) || next == null) break;
-                    if (next.Permissions == KvmMemoryPermission.None || SlotFlags(next) != runFlags) break;
-                    if (anyTrapped && _trappedPages.ContainsKey(sortedKeys[j])) break;
+                    ulong nextAddress = runAddress + runSize;
+                    if (anyKept && _keptSlotStarts.Contains(nextAddress)) break;
+                    if (!_mappedPages.TryGetValue(nextAddress, out GuestPage next)) break;
+                    if (next.Permissions == GuestPagePermission.None || SlotFlags(next) != runFlags) break;
+                    if (anyTrapped && _trappedPages.ContainsKey(nextAddress)) break;
                     if (next.HostPage.ToInt64() != runHostBaseLong + (long)runSize) break;
                     runSize += KvmConstants.PageSize;
-                    j++;
                 }
 
                 _desiredSlots[runAddress] = new InstalledSlot
@@ -3450,7 +3122,7 @@ namespace Brovan.Core.Emulation
                     Host = new IntPtr(runHostBaseLong),
                     Flags = runFlags,
                 };
-                i = j;
+                cursor = runAddress + runSize;
             }
 
             _staleSlotKeys.Clear();
@@ -3650,10 +3322,10 @@ namespace Brovan.Core.Emulation
                     continue;
                 }
 
-                if (!_mappedPages.TryGetValue(address, out MappedPage page)
+                if (!_mappedPages.TryGetValue(address, out GuestPage page)
                     || page == null
                     || page.HostPage == IntPtr.Zero
-                    || page.Permissions == KvmMemoryPermission.None)
+                    || page.Permissions == GuestPagePermission.None)
                 {
                     address += KvmConstants.PageSize;
                     continue;
@@ -3674,8 +3346,8 @@ namespace Brovan.Core.Emulation
                 while (address + runSize < spanEnd)
                 {
                     if (anyKept && _keptSlotStarts.Contains(address + runSize)) break;
-                    if (!_mappedPages.TryGetValue(address + runSize, out MappedPage next) || next == null) break;
-                    if (next.Permissions == KvmMemoryPermission.None || SlotFlags(next) != runFlags) break;
+                    if (!_mappedPages.TryGetValue(address + runSize, out GuestPage next) || next == null) break;
+                    if (next.Permissions == GuestPagePermission.None || SlotFlags(next) != runFlags) break;
                     if (next.HostPage == IntPtr.Zero) break;
                     if (anyTrapped && _trappedPages.ContainsKey(address + runSize)) break;
                     if (next.HostPage.ToInt64() != runHostBaseLong + (long)runSize) break;
@@ -3692,7 +3364,7 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private static InstalledSlot MakeWriteWatchSlot(MappedPage page) => new InstalledSlot
+        private static InstalledSlot MakeWriteWatchSlot(GuestPage page) => new InstalledSlot
         {
             Size = KvmConstants.PageSize,
             Host = page.HostPage,
@@ -3739,6 +3411,7 @@ namespace Brovan.Core.Emulation
 
         private void SetMemslot(int slot, ulong guestAddress, ulong size, IntPtr hostBase, uint flags)
         {
+            _paging.AssertMappingsHeld(nameof(SetMemslot));
             LinuxKvmUserspaceMemoryRegion region = new LinuxKvmUserspaceMemoryRegion
             {
                 Slot = (uint)slot,
@@ -3754,6 +3427,7 @@ namespace Brovan.Core.Emulation
         // A slot KVM did not delete still maps its host memory, so its id is never reused.
         private bool DeleteMemslot(int slot)
         {
+            _paging.AssertMappingsHeld(nameof(DeleteMemslot));
             LinuxKvmUserspaceMemoryRegion region = new LinuxKvmUserspaceMemoryRegion
             {
                 Slot = (uint)slot,
@@ -3774,18 +3448,24 @@ namespace Brovan.Core.Emulation
             if (_mmioRegions.Count == 0) return;
 
             long now = Stopwatch.GetTimestamp();
-            if (now - _lastMmioRefreshTimestamp < MmioRefreshIntervalTicks) return;
-            _lastMmioRefreshTimestamp = now;
+            if (now - Volatile.Read(ref _lastMmioRefreshTimestamp) < MmioRefreshIntervalTicks) return;
 
-            for (int i = 0; i < _mmioRegions.Count; i++)
-                RefreshMmioRegion(_mmioRegions[i]);
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            lock (_mmioLock)
+            {
+                if (now - _lastMmioRefreshTimestamp < MmioRefreshIntervalTicks) return;
+                Volatile.Write(ref _lastMmioRefreshTimestamp, now);
+
+                for (int i = 0; i < _mmioRegions.Count; i++)
+                    RefreshMmioRegion(_mmioRegions[i]);
+            }
         }
 
         private unsafe void RefreshMmioRegion(MmioRegion region)
         {
             for (ulong offset = 0; offset < region.Size; offset += KvmConstants.PageSize)
             {
-                if (!_mappedPages.TryGetValue(region.Address + offset, out MappedPage page)
+                if (!_mappedPages.TryGetValue(region.Address + offset, out GuestPage page)
                     || page == null
                     || page.HostPage == IntPtr.Zero)
                     continue;
@@ -3801,7 +3481,10 @@ namespace Brovan.Core.Emulation
 
             ulong rip = ReadRegister(Registers.UC_X86_REG_RIP);
             Span<byte> opcode = stackalloc byte[3];
-            if (!TryReadMemoryInternal(rip, opcode)) return false;
+            using (_paging.LockMappings())
+            {
+                if (!TryReadMemoryInternal(rip, opcode)) return false;
+            }
 
             if (opcode[0] != 0x0F) return false;
 
@@ -3833,63 +3516,9 @@ namespace Brovan.Core.Emulation
         private bool TryReadMemoryInternal(ulong address, Span<byte> buffer)
             => IsGuestRange(address, (ulong)buffer.Length) && TryReadPages(address, buffer);
 
-        private unsafe bool TryReadPages(ulong address, Span<byte> buffer)
-        {
-            if (_untouchedPages != 0) RecordHostAccess(address, (ulong)buffer.Length, false);
+        private bool TryReadPages(ulong address, Span<byte> buffer) => _paging.TryReadPages(address, buffer);
 
-            ulong current = address;
-            int offset = 0;
-            int remaining = buffer.Length;
-
-            while (remaining > 0)
-            {
-                ulong pageBase = current & ~KvmConstants.PageMask;
-                if (!TryLookupPage(pageBase, out MappedPage page))
-                    return false;
-
-                ulong pageOffset = current - pageBase;
-                int chunk = (int)Math.Min((ulong)remaining, KvmConstants.PageSize - pageOffset);
-                Unsafe.CopyBlockUnaligned(
-                    ref Unsafe.AsRef<byte>(ref buffer[offset]),
-                    ref Unsafe.AsRef<byte>((void*)(page.HostPage + (int)pageOffset)),
-                    (uint)chunk);
-
-                current += (ulong)chunk;
-                offset += chunk;
-                remaining -= chunk;
-            }
-            return true;
-        }
-
-        private unsafe bool TryWriteMemoryInternal(ulong address, ReadOnlySpan<byte> buffer)
-        {
-            if (!IsGuestRange(address, (ulong)buffer.Length)) return false;
-
-            ulong current = address;
-            int offset = 0;
-            int remaining = buffer.Length;
-
-            while (remaining > 0)
-            {
-                ulong pageBase = current & ~KvmConstants.PageMask;
-                if (!TryLookupPage(pageBase, out MappedPage page))
-                    return false;
-
-                ulong pageOffset = current - pageBase;
-                int chunk = (int)Math.Min((ulong)remaining, KvmConstants.PageSize - pageOffset);
-                Unsafe.CopyBlockUnaligned(
-                    ref Unsafe.AsRef<byte>((void*)(page.HostPage + (int)pageOffset)),
-                    ref Unsafe.AsRef<byte>(in buffer[offset]),
-                    (uint)chunk);
-
-                current += (ulong)chunk;
-                offset += chunk;
-                remaining -= chunk;
-            }
-
-            if (_watchedPages != 0) RecordHostAccess(address, (ulong)buffer.Length, true);
-            return true;
-        }
+        private bool TryWriteMemoryInternal(ulong address, ReadOnlySpan<byte> buffer) => _paging.TryWritePages(address, buffer);
 
         private bool HandleInstructionHook(BackendInstructionHook type, ulong instructionSize)
         {
@@ -4009,33 +3638,42 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
-            foreach (MmioRegion region in _mmioRegions)
+            lock (_mmioLock)
             {
-                if (physAddr < region.Address || physAddr >= region.Address + region.Size) continue;
-                if (isWrite == 0) break;
+                foreach (MmioRegion region in _mmioRegions)
+                {
+                    if (physAddr < region.Address || physAddr >= region.Address + region.Size) continue;
+                    if (isWrite == 0) break;
 
-                ulong data = mmio.Data;
-                region.WriteCallback(physAddr - region.Address,
-                    new ReadOnlySpan<byte>(&data, (int)Math.Min(len, sizeof(ulong))));
-                return true;
+                    ulong data = mmio.Data;
+                    region.WriteCallback(physAddr - region.Address,
+                        new ReadOnlySpan<byte>(&data, (int)Math.Min(len, sizeof(ulong))));
+                    return true;
+                }
             }
 
             ulong faultPage = physAddr & ~KvmConstants.PageMask;
-            bool mapped = _mappedPages.TryGetValue(faultPage, out MappedPage faulted)
-                          && faulted != null
-                          && faulted.HostPage != IntPtr.Zero;
-
-            if (mapped && _trappedPages.ContainsKey(faultPage))
-                return HandleTrappedAccess(ref mmio, physAddr, len, isWrite != 0);
-
-            // KVM reports a wide access one fragment at a time. A fragment on a page that is accessible now
-            // is not a new fault.
-            if (mapped && IsPageAccessible(faultPage, isWrite != 0))
+            bool mapped;
+            bool trapped;
+            using (_paging.LockMappings())
             {
-                if (_mappingsDirty) RebuildMappings();
-                CompleteMmioAccess(ref mmio);
-                return true;
+                mapped = _mappedPages.TryGetValue(faultPage, out GuestPage faulted)
+                         && faulted != null
+                         && faulted.HostPage != IntPtr.Zero;
+                trapped = mapped && _trappedPages.ContainsKey(faultPage);
+
+                // KVM reports a wide access one fragment at a time. A fragment on a page that is accessible now
+                // is not a new fault.
+                if (!trapped && mapped && IsPageAccessible(faultPage, isWrite != 0))
+                {
+                    if (_mappingsDirty) RebuildMappings();
+                    CompleteMmioAccess(ref mmio);
+                    return true;
+                }
             }
+
+            if (trapped)
+                return HandleTrappedAccess(ref mmio, physAddr, len, isWrite != 0);
 
             BackendHookType required = mapped ? BackendHookType.MemoryProtected : BackendHookType.MemoryUnmapped;
             BackendMemoryAccessType type = mapped
@@ -4084,15 +3722,16 @@ namespace Brovan.Core.Emulation
 
         private bool IsPageAccessible(ulong pageAddress, bool write)
         {
-            if (!TryGetBackedPage(pageAddress, out MappedPage page))
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            if (!TryGetBackedPage(pageAddress, out GuestPage page))
                 return false;
 
-            KvmMemoryPermission perm = page.Permissions;
-            return GuestPageEntries.Allows((perm & KvmMemoryPermission.Read) != 0, (perm & KvmMemoryPermission.Write) != 0,
-                (perm & KvmMemoryPermission.Execute) != 0, write ? GuestAccess.Write : GuestAccess.Read);
+            GuestPagePermission perm = page.Permissions;
+            return GuestPageEntries.Allows((perm & GuestPagePermission.Read) != 0, (perm & GuestPagePermission.Write) != 0,
+                (perm & GuestPagePermission.Execute) != 0, write ? GuestAccess.Write : GuestAccess.Read);
         }
 
-        private bool TryGetBackedPage(ulong pageAddress, out MappedPage page)
+        private bool TryGetBackedPage(ulong pageAddress, out GuestPage page)
         {
             page = null;
             return IsGuestRange(pageAddress, KvmConstants.PageSize) && !_trappedPages.ContainsKey(pageAddress)
@@ -4136,6 +3775,7 @@ namespace Brovan.Core.Emulation
             uint len = mmio.Len;
             if (len == 0 || len > sizeof(ulong)) return;
 
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (mmio.IsWrite != 0)
             {
                 ulong data = mmio.Data;
@@ -4161,9 +3801,13 @@ namespace Brovan.Core.Emulation
                 bool fetch = (errorCode & GuestPageEntries.FaultFetch) != 0;
 
                 // No-access pages are not present, so the present bit cannot tell mapped from unmapped.
-                bool mapped = _mappedPages.TryGetValue(faultPage, out MappedPage faulted)
-                              && faulted != null
-                              && faulted.HostPage != IntPtr.Zero;
+                bool mapped;
+                using (_paging.LockMappings())
+                {
+                    mapped = _mappedPages.TryGetValue(faultPage, out GuestPage faulted)
+                             && faulted != null
+                             && faulted.HostPage != IntPtr.Zero;
+                }
 
                 BackendMemoryAccessType type;
                 if (fetch)
@@ -4218,7 +3862,7 @@ namespace Brovan.Core.Emulation
                     return resumed;
                 return HandleKernelFault(vector);
             }
-            if (vector == 14 && (TryTouchWatchedPage(errorCode) || IsStaleFault(errorCode)))
+            if (vector == 14 && (_paging.TryTouchWatchedPage(errorCode, ReadRegister(Registers.UC_X86_REG_CR2)) || IsStaleFault(errorCode)))
                 return true;
             if (HandleException(vector, (uint)errorCode))
                 return true;
@@ -4234,9 +3878,15 @@ namespace Brovan.Core.Emulation
             if (_guest64 && vector == 1 && rip == CurrentVp.SyscallStubGpa && HandleSyscallTrap())
                 return true;
 
-            if (vector == 1 && _mappedPages.TryGetValue(_exceptionIdtPageGpa, out MappedPage idtPage)
-                && GuestInterruptGates.IsUserGateEntry((byte*)idtPage.HostPage, _exceptionStubPageGpa, KvmConstants.ExceptionVectorCount,
-                    KvmConstants.ExceptionStubStride, rip))
+            bool atUserGate = false;
+            if (vector == 1)
+            {
+                using RankedLock.Scope mappingHold = _paging.LockMappings();
+                atUserGate = _mappedPages.TryGetValue(_exceptionIdtPageGpa, out GuestPage idtPage)
+                    && GuestInterruptGates.IsUserGateEntry((byte*)idtPage.HostPage, _exceptionStubPageGpa, KvmConstants.ExceptionVectorCount,
+                        KvmConstants.ExceptionStubStride, rip);
+            }
+            if (atUserGate)
                 return HandleExceptionTrap(rip + 1);
 
             Utils.LogError($"[Kvm] Vector 0x{vector:X} faulted in ring 0 at 0x{rip:X}.");
@@ -4272,16 +3922,17 @@ namespace Brovan.Core.Emulation
         // A stale TLB entry, or a fault that raced a grant on another processor. The #PF already dropped the entry.
         private bool IsStaleFault(ulong errorCode)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             ulong page = ReadRegister(Registers.UC_X86_REG_CR2) & ~KvmConstants.PageMask;
-            if (!TryGetBackedPage(page, out MappedPage mapped))
+            if (!TryGetBackedPage(page, out GuestPage mapped))
                 return false;
 
-            KvmMemoryPermission perm = mapped.Permissions;
-            if (!GuestPageEntries.IsStaleFault(errorCode, (perm & KvmMemoryPermission.Read) != 0,
-                    (perm & KvmMemoryPermission.Write) != 0, (perm & KvmMemoryPermission.Execute) != 0))
+            GuestPagePermission perm = mapped.Permissions;
+            if (!GuestPageEntries.IsStaleFault(errorCode, (perm & GuestPagePermission.Read) != 0,
+                    (perm & GuestPagePermission.Write) != 0, (perm & GuestPagePermission.Execute) != 0))
                 return false;
 
-            EnsureVirtualMapping(page, perm);
+            _paging.SetLeaf(page, perm);
             return true;
         }
 
@@ -4309,6 +3960,7 @@ namespace Brovan.Core.Emulation
             }
             else
             {
+                using RankedLock.Scope mappingHold = _paging.LockMappings();
                 if (hasErrorCode)
                 {
                     Span<byte> ecBytes = stackalloc byte[sizeof(ulong)];
@@ -4355,7 +4007,7 @@ namespace Brovan.Core.Emulation
 
         private void ClearPendingExceptionState()
         {
-            lock (_vcpuLock)
+            lock (CurrentVp.RegisterLock)
             {
                 LinuxKvmVcpuEvents events = new LinuxKvmVcpuEvents();
                 if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoGetVcpuEvents, ref events) < 0)
@@ -4650,7 +4302,7 @@ namespace Brovan.Core.Emulation
 
         private ulong GetMsr(VirtualProcessor vp, uint msr)
         {
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 LinuxKvmMsrs msrs = new LinuxKvmMsrs
                 {
@@ -4665,7 +4317,7 @@ namespace Brovan.Core.Emulation
 
         private void SetMsr(VirtualProcessor vp, uint msr, ulong value)
         {
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 LinuxKvmMsrs msrs = new LinuxKvmMsrs
                 {
@@ -4705,7 +4357,7 @@ namespace Brovan.Core.Emulation
         private void SetXcr0(VirtualProcessor vp)
         {
             LinuxKvmXcrs xcrs = new LinuxKvmXcrs { Count = 1, Value = KvmConstants.XcrAvxFeatures };
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 if (KvmNative.ioctl(vp.Fd, KvmConstants.KvmIoSetXcrs, ref xcrs) < 0)
                     throw new KvmException("KVM_SET_XCRS failed", Marshal.GetLastWin32Error());
@@ -4723,13 +4375,14 @@ namespace Brovan.Core.Emulation
             if (Xmm == null || Xmm.Length < XmmRegisterCount * 2 || YmmHigh == null || YmmHigh.Length < XmmRegisterCount * 2)
                 return false;
 
-            _xsaveImage ??= new byte[_xsaveSize];
-            int fd = CurrentVp.Fd;
+            VirtualProcessor vp = CurrentVp;
+            vp.XsaveImage ??= new byte[_xsaveSize];
+            int fd = vp.Fd;
             uint getRequest = _supportsXsave2 ? KvmConstants.KvmIoGetXsave2 : KvmConstants.KvmIoGetXsave;
 
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
-                fixed (byte* image = _xsaveImage)
+                fixed (byte* image = vp.XsaveImage)
                 {
                     if (KvmNative.ioctl(fd, getRequest, (IntPtr)image) < 0)
                         return false;
@@ -4771,7 +4424,7 @@ namespace Brovan.Core.Emulation
 
             LinuxKvmFpu Fpu = default;
 
-            lock (_vcpuLock)
+            lock (CurrentVp.RegisterLock)
             {
                 if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoGetFpu, (IntPtr)(&Fpu)) < 0)
                     return false;
@@ -4796,7 +4449,7 @@ namespace Brovan.Core.Emulation
 
         private unsafe void SetFpu(VirtualProcessor vp, ref LinuxKvmFpu fpu)
         {
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 fixed (LinuxKvmFpu* p = &fpu)
                 {
@@ -4808,7 +4461,7 @@ namespace Brovan.Core.Emulation
 
         private void SetVcpuEvents(LinuxKvmVcpuEvents events)
         {
-            lock (_vcpuLock)
+            lock (CurrentVp.RegisterLock)
             {
                 if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoSetVcpuEvents, ref events) < 0)
                     throw new KvmException("KVM_SET_VCPU_EVENTS failed", Marshal.GetLastWin32Error());
@@ -4817,7 +4470,7 @@ namespace Brovan.Core.Emulation
 
         private LinuxKvmDebugRegisters GetDebugRegisters()
         {
-            lock (_vcpuLock)
+            lock (CurrentVp.RegisterLock)
             {
                 LinuxKvmDebugRegisters dr = new LinuxKvmDebugRegisters();
                 if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoGetDebugRegisters, ref dr) < 0)
@@ -4828,7 +4481,7 @@ namespace Brovan.Core.Emulation
 
         private void SetDebugRegisters(LinuxKvmDebugRegisters dr)
         {
-            lock (_vcpuLock)
+            lock (CurrentVp.RegisterLock)
             {
                 if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoSetDebugRegisters, ref dr) < 0)
                     throw new KvmException("KVM_SET_DEBUGREGS failed", Marshal.GetLastWin32Error());
@@ -4888,7 +4541,8 @@ namespace Brovan.Core.Emulation
         // A compatibility-mode segment load takes the base from the descriptor, not from the MSR.
         private unsafe void SyncGdtDescriptorBase(ulong segmentBase)
         {
-            if (!_mappedPages.TryGetValue(CurrentVp.GdtPageGpa, out MappedPage gdtPage) || gdtPage.HostPage == IntPtr.Zero)
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            if (!_mappedPages.TryGetValue(CurrentVp.GdtPageGpa, out GuestPage gdtPage) || gdtPage.HostPage == IntPtr.Zero)
                 return;
 
             byte* descriptor = (byte*)gdtPage.HostPage + (KvmConstants.UserFsSelector32 >> 3) * 8;
@@ -4930,7 +4584,7 @@ namespace Brovan.Core.Emulation
         {
             LinuxKvmFpu Fpu = default;
 
-            lock (_vcpuLock)
+            lock (CurrentVp.RegisterLock)
             {
                 if (KvmNative.ioctl(CurrentVp.Fd, KvmConstants.KvmIoGetFpu, (IntPtr)(&Fpu)) < 0)
                     return false;
@@ -5153,51 +4807,7 @@ namespace Brovan.Core.Emulation
         }
 
         private unsafe bool TryGetHostPointer(ulong address, int accessSize, bool write, out byte* ptr, out long offset)
-        {
-            ptr = null;
-            offset = 0;
-            if (accessSize <= 0 || !IsGuestRange(address, (ulong)accessSize)) return false;
-
-            ulong pageBase = address & ~KvmConstants.PageMask;
-            if (!TryLookupPage(pageBase, out MappedPage page))
-                return false;
-
-            ulong accessEnd = address + (ulong)accessSize;
-            ulong firstPageEnd = pageBase + KvmConstants.PageSize;
-            if (accessEnd > firstPageEnd && !(TryGetIntactBackingEnd(page, pageBase, out ulong backingEnd) && accessEnd <= backingEnd))
-            {
-                ulong cursor = firstPageEnd;
-                while (cursor < accessEnd)
-                {
-                    if (!_mappedPages.TryGetValue(cursor, out MappedPage next) || next == null || next.HostPage == IntPtr.Zero
-                        || next.OwnedBacking != page.OwnedBacking)
-                        return false;
-                    long expectedHost = page.HostPage.ToInt64() + (long)(cursor - pageBase);
-                    long actualHost = next.HostPage.ToInt64();
-                    if (expectedHost != actualHost) return false;
-                    cursor += KvmConstants.PageSize;
-                }
-            }
-
-            ptr = (byte*)page.HostPage;
-            offset = (long)(address - pageBase);
-            if (write ? _watchedPages != 0 : _untouchedPages != 0) RecordHostAccess(address, (ulong)accessSize, write);
-            return true;
-        }
-
-        private bool TryGetIntactBackingEnd(MappedPage page, ulong pageBase, out ulong backingEnd)
-        {
-            backingEnd = 0;
-            if (page.OwnedBacking == IntPtr.Zero || page.IsAlias) return false;
-            if (!_backingAllocations.TryGetValue(page.OwnedBacking, out BackingAllocation allocation)) return false;
-            if (allocation.LivePages != (int)(allocation.Size / KvmConstants.PageSize)) return false;
-
-            ulong hostOffset = (ulong)(page.HostPage.ToInt64() - page.OwnedBacking.ToInt64());
-            if (hostOffset > pageBase || hostOffset >= allocation.Size) return false;
-
-            backingEnd = pageBase - hostOffset + allocation.Size;
-            return true;
-        }
+            => _paging.TryGetHostPointer(address, accessSize, write, out ptr, out offset);
 
         private bool DisposedCheck()
         {

@@ -1,10 +1,11 @@
-﻿using Brovan.Core.Emulation.Guests;
-using static Brovan.Core.Helpers.BinaryHelpers;
+﻿using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtAlertThreadByThreadId : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Scheduler;
+
         internal static EmulatedThread GetTargetThread(BinaryEmulator Instance, uint ThreadId)
         {
             if (Instance == null)
@@ -25,31 +26,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             WindowsThreadState State = WinEmulatedThread.GetState(TargetThread);
 
             // The alert is consumed by the target's next wait or by the wake below, so no epoch bump.
+            using RankedLock.Scope SchedulerScope = Instance.SchedulerLock.EnterScope();
             State.AlertByThreadIdPending = true;
 
-            if (TargetThread.WaitActive && State.AlertByThreadIdWaitActive && TargetThread.State == EmulatedThreadState.Waiting)
-            {
-                if (TargetThread.Context == null)
-                    TargetThread.Context = new CpuContext();
-
-                ulong ResumeRip = State.WaitReturnRIP != 0 ? State.WaitReturnRIP : (State.WaitResumeRIP != 0 ? State.WaitResumeRIP + 2 : TargetThread.Context.RIP);
-                TargetThread.Context.RIP = ResumeRip;
-                TargetThread.Context.RAX = (ulong)(uint)NTSTATUS.STATUS_ALERTED;
-
-                State.AlertByThreadIdPending = false;
-                State.WaitCompleted = false;
-                State.WaitStatus = NTSTATUS.STATUS_ALERTED;
-                State.WaitObjects = null;
-                Instance.WinHelper.ClearWaitState(TargetThread, true);
-                TargetThread.State = EmulatedThreadState.Ready;
-
-                if (Instance.CurrentThread == TargetThread)
-                    WindowsGuest.WriteWaitReturn(Instance, TargetThread.Context, false);
-                else
-                {
-                    Instance.YieldSliceAfterWake(TargetThread);
-                }
-            }
+            if (State.AlertByThreadIdWaitActive && TargetThread.State == EmulatedThreadState.Waiting && Instance.TryWakeWaiter(TargetThread)
+                && TargetThread != Instance.CurrentThread)
+                Instance.YieldSliceAfterWake(TargetThread);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

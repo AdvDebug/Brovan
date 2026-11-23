@@ -119,8 +119,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
             };
 
             Helper.RegisterThread(Child);
-            Instance.Threads[ThreadId] = Child;
-            Instance.ThreadOrder.Add((int)ThreadId);
+            Instance.InsertThread(Child);
             Helper.SetReturnValue(Instance, ThreadId);
         }
 

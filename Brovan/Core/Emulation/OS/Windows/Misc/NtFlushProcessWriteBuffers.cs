@@ -5,7 +5,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             // A processor drains its write buffer when it leaves the guest.
-            Instance._emulator.HoldProcessorsOutOfGuest();
+            Instance._emulator.EvictProcessors();
             return NTSTATUS.STATUS_SUCCESS;
         }
     }

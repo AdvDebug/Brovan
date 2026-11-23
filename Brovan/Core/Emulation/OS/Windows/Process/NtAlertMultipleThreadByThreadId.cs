@@ -7,6 +7,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private const uint ChunkIds = 256;
 
+        public WinSyscallDomain Domain => WinSyscallDomain.Scheduler;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 

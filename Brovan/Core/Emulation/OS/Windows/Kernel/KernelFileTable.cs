@@ -527,7 +527,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // SMP no thread takes KernelLock, and only the thread that built this runs the guest.
         private void OnHostFileChanging(string GuestPath)
         {
-            if (Monitor.IsEntered(Emulator.KernelLock) || (!Emulator.SmpEnabled && Environment.CurrentManagedThreadId == OwnerThreadId))
+            if (Emulator.KernelLock.IsHeld || (!Emulator.SmpEnabled && Environment.CurrentManagedThreadId == OwnerThreadId))
                 ReleasePath(GuestPath, null);
         }
 

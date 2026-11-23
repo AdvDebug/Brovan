@@ -570,6 +570,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private bool OnRead(BackendMemoryAccessType Type, ulong Address, uint Size, ulong Value)
         {
+            using RankedLock.Scope KernelScope = Emulator.EnterKernelLockScope();
             UpdateDynamicFields(false);
             return true;
         }
@@ -582,6 +583,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RefreshedOnRead)
                 return;
 
+            using RankedLock.Scope KernelScope = Emulator.EnterKernelLockScope();
             UpdateDynamicFields(false);
         }
 
@@ -989,11 +991,27 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal void SyncFromSyscall()
         {
-            if (!PollDriven)
+            if (!NeedsSyncFromSyscall())
                 return;
 
             PollListHead();
             Drain();
+        }
+
+        // Also read without KernelLock, by a syscall that does not take it.
+        internal bool NeedsSyncFromSyscall()
+        {
+            if (!PollDriven)
+                return false;
+            if (PendingSync || PendingRefreshHooks)
+                return true;
+
+            ulong Head = Volatile.Read(ref ListHead);
+            if (Head == 0)
+                return true;
+
+            return TryReadHeadLinks(Head, out ulong Flink, out ulong Blink)
+                && (Flink != Volatile.Read(ref LastHeadFlink) || Blink != Volatile.Read(ref LastHeadBlink));
         }
 
         // Every load and unload touches the list head. Reading it costs less than a write watch on the page
@@ -1013,7 +1031,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            if (!TryReadHeadLinks(out ulong Flink, out ulong Blink))
+            if (!TryReadHeadLinks(ListHead, out ulong Flink, out ulong Blink))
                 return;
             if (Flink == LastHeadFlink && Blink == LastHeadBlink)
                 return;
@@ -1309,7 +1327,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // PEB_LDR_DATA stays mapped for the life of the process, so the range check made when the head was
         // resolved still holds.
-        private bool TryReadHeadLinks(out ulong Flink, out ulong Blink)
+        private bool TryReadHeadLinks(ulong Head, out ulong Flink, out ulong Blink)
         {
             Flink = 0;
             Blink = 0;
@@ -1317,7 +1335,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Span<byte> Links = stackalloc byte[16];
             try
             {
-                Emulator.ReadMemory(ListHead, Links.Slice(0, PointerSize * 2));
+                Emulator.ReadMemory(Head, Links.Slice(0, PointerSize * 2));
             }
             catch
             {

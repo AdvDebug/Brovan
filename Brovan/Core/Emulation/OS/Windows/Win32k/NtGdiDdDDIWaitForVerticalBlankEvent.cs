@@ -33,7 +33,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 || DeviceHandle != 0 && (!Process.TryGet(DeviceHandle, out DxgkDevice Device) || Device.Adapter != Adapter))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            if (Instance.WinHelper.PendingConnectReplies.Count != 0)
+            if (Instance.WinHelper.HasPendingConnectReplies)
                 AlpcMessaging.DeliverConnectReplies(Instance, Thread.ThreadId);
 
             long Deadline = Math.Min(Instance.WinHelper.GetNextVerticalBlankTick(), Instance.CreateEmulatedDeadlineMilliseconds(TimeoutMilliseconds));

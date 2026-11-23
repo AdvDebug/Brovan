@@ -95,28 +95,17 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Deadline == Instance.EmulatedTickCount64)
                     return ReturnEmpty(Instance, EntriesRemovedPtr, NTSTATUS.STATUS_TIMEOUT);
 
-                Thread.WaitActive = true;
-                Thread.WaitOnSingleHandle(IoCompletionHandle);
-                Thread.WaitAll = true;
-                Thread.WaitDeadline = Deadline;
-                State.WaitCompleted = false;
-                State.WaitStatus = NTSTATUS.STATUS_PENDING;
-                State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip();
-                State.WaitReturnRIP = State.WaitResumeRIP + 2;
-                State.WaitAlertable = Alertable;
                 State.ResetIoCompletionWait();
                 State.IoCompletionWaitActive = true;
                 State.IoCompletionHandle = IoCompletionHandle;
                 State.IoCompletionInformationPtr = InformationPtr;
                 State.IoCompletionEntriesRemovedPtr = EntriesRemovedPtr;
                 State.IoCompletionMaxEntries = Count;
+                Thread.WaitOnSingleHandle(IoCompletionHandle);
+                return Instance.WinHelper.ParkUntil(Thread, Deadline, Alertable, Thread.WaitHandles, WaitAll: true);
             }
 
-            Thread.State = EmulatedThreadState.Waiting;
-            State.ApcAlertable = Alertable;
-            Instance._emulator.WriteRegister(Instance.IPRegister, State.WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ContinueParked(Thread);
         }
     }
 }

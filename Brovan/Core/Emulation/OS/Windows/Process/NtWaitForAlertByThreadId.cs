@@ -5,6 +5,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtWaitForAlertByThreadId : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Scheduler;
+
         private readonly struct AlertWaitTimeout
         {
             public AlertWaitTimeout(bool Infinite, bool PollOnly, long Deadline)
@@ -53,10 +55,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ALERTED;
             }
 
-            Thread.State = EmulatedThreadState.Waiting;
-            Instance._emulator.WriteRegister(Instance.IPRegister, State.WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ContinueParked(Thread);
         }
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -114,10 +113,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.AlertByThreadIdWaitActive = true;
             State.AlertByThreadIdAddress = Address;
 
-            Thread.State = EmulatedThreadState.Waiting;
-            Instance._emulator.WriteRegister(Instance.IPRegister, SyscallRip);
-            Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ContinueParked(Thread);
         }
     }
 }

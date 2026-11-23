@@ -463,6 +463,7 @@ namespace Brovan.Core.Emulation
 
         internal bool RefreshWindowsTimersAndWakeWaiters()
         {
+            AssertKernelLockHeld(nameof(RefreshWindowsTimersAndWakeWaiters));
             bool WokeThread = false;
 
             if (WinHelper == null)
@@ -504,6 +505,7 @@ namespace Brovan.Core.Emulation
 
         internal bool TryGetNextWindowsTimerSleepMs(out int SleepMs, int MaxSleepMs = 10)
         {
+            AssertKernelLockHeld(nameof(TryGetNextWindowsTimerSleepMs));
             SleepMs = 0;
 
             if (WinHelper == null)
@@ -609,6 +611,8 @@ namespace Brovan.Core.Emulation
                 MaterializeSignaledWaitPackets(Packet.IoCompletionHandle);
             }
 
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
+
             // Port waiters are never filed.
             List<EmulatedThread> Candidates = WindowsWakeCandidates;
             Candidates.Clear();
@@ -647,11 +651,8 @@ namespace Brovan.Core.Emulation
                 if (Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
                     continue;
 
-                if (!TrySatisfyThreadWait(Thread))
-                    continue;
-
-                CompleteThreadWait(Thread);
-                WokeThread = true;
+                if (TryWakeWaiter(Thread))
+                    WokeThread = true;
             }
 
             Candidates.Clear();
@@ -771,9 +772,16 @@ namespace Brovan.Core.Emulation
 
         internal bool TrySatisfyThreadWait(EmulatedThread Thread) => TrySatisfyThreadWait(Thread, EmulatedTickCount64);
 
+        // An alert-only wait is satisfied from its pending flag or deadline and completed into the thread's context,
+        // so scheduler state alone covers it.
+        internal static bool IsAlertWaitOnly(EmulatedThread Thread, WindowsThreadState State)
+            => State.AlertByThreadIdWaitActive && Thread.WaitHandles == null && !State.WorkerFactoryWaitActive && State.IoRequest == null
+               && !State.SyncIoCancelled && !State.HostWorkWaitActive && !State.IoCompletionWaitActive && !State.RetrySyscallActive;
+
         // A wait on objects alone stays unsatisfiable until one signals or the deadline passes.
         internal bool CanSkipWaitCheck(EmulatedThread Thread, long Now)
         {
+            AssertWaitLockHeld(Thread, nameof(CanSkipWaitCheck));
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
             if (State == null || State.WaitCheckedObjects == null || State.WaitCheckedGeneration != Thread.WaitHandlesGeneration)
                 return false;
@@ -794,6 +802,7 @@ namespace Brovan.Core.Emulation
 
         internal void NoteWaitCheckFailed(EmulatedThread Thread, long ScanEpoch)
         {
+            AssertWaitLockHeld(Thread, nameof(NoteWaitCheckFailed));
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
             if (State == null)
                 return;
@@ -844,6 +853,7 @@ namespace Brovan.Core.Emulation
         // wait changes.
         internal bool TryFileWait(EmulatedThread Thread, long Now)
         {
+            AssertWaitLockHeld(Thread, nameof(TryFileWait));
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
             if (State == null || State.WaitFiled || !IsWaitFileable(Thread, State, Now))
                 return false;
@@ -877,6 +887,7 @@ namespace Brovan.Core.Emulation
 
         internal void UnfileWait(EmulatedThread Thread)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
             if (State == null || !State.WaitFiled)
                 return;
@@ -1100,6 +1111,7 @@ namespace Brovan.Core.Emulation
         {
             if (Thread == null || !Thread.WaitActive)
                 return false;
+            AssertWaitLockHeld(Thread, nameof(TrySatisfyThreadWait));
 
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;

@@ -54,12 +54,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance._emulator.WriteMemory(PreviousSuspendCountPtr, (uint)TargetThread.SuspendCount);
             }
 
-            if (TargetThread.SuspendCount > 0)
-                TargetThread.SuspendCount--;
-
-            if (TargetThread.SuspendCount == 0)
+            using (Instance.SchedulerLock.EnterScope())
             {
-                if (TargetThread.State == EmulatedThreadState.Suspended)
+                if (TargetThread.SuspendCount > 0)
+                    TargetThread.SuspendCount--;
+
+                if (TargetThread.SuspendCount == 0 && TargetThread.State == EmulatedThreadState.Suspended)
                 {
                     Instance.UnfileWait(TargetThread);
                     if (TargetThread.WaitActive)

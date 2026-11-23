@@ -4,6 +4,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtYieldExecution : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Scheduler;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             EmulatedThread Thread = Instance.CurrentThread;
@@ -15,7 +17,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS Yield(BinaryEmulator Instance, EmulatedThread Thread)
         {
-            if (Instance.WinHelper.PendingConnectReplies.Count != 0)
+            // Without KernelLock the replies wait for the next yield, delay or wait of this thread.
+            if (Instance.WinHelper.HasPendingConnectReplies && Instance.KernelLockCovered)
                 AlpcMessaging.DeliverConnectReplies(Instance, Thread.ThreadId);
 
             NTSTATUS Status = Instance.HasThreadReadyForYield() ? NTSTATUS.STATUS_SUCCESS : NTSTATUS.STATUS_NO_YIELD_PERFORMED;

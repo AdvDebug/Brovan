@@ -164,10 +164,14 @@ namespace Brovan.Core.Emulation
         public bool IsThreadResident(uint threadId) => Inner.IsThreadResident(threadId);
         public void SelectThread(uint threadId) => Inner.SelectThread(threadId);
         public bool TryLimitSlice(int microseconds) => Inner.TryLimitSlice(microseconds);
-        public void UseRunLock(object runLock) => Inner.UseRunLock(runLock);
+        public void UseHost(IBackendHost host) => Inner.UseHost(host);
         public void StopThread(uint threadId) => Inner.StopThread(threadId);
         public void StopAllProcessors() => Inner.StopAllProcessors();
-        public void HoldProcessorsOutOfGuest() => Inner.HoldProcessorsOutOfGuest();
+        public void EvictProcessors() => Inner.EvictProcessors();
+
+        public ProcessorHold HoldProcessorsOutOfGuest() => Inner.HoldProcessorsOutOfGuest();
+        public bool HasDeferredFrees => Inner.HasDeferredFrees;
+        public bool CompleteDeferredFrees(bool all) => Inner.CompleteDeferredFrees(all);
         public IGuestKernel GuestKernel => Inner.GuestKernel;
 
         public IntPtr AddCodeHook(ulong begin, ulong end, CodeHookCallback callback)

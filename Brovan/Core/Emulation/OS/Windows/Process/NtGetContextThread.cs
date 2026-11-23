@@ -22,7 +22,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
-            if (!Instance.WaitUntilParked(Thread))
+            using BinaryEmulator.ThreadClaim Claim = Instance.WaitUntilParked(Thread);
+            if (!Claim.Parked)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
             WindowsThreadContext64.WriteContext(Instance, Thread, ContextPtr, Flags, ContextSource.SyscallReturn);

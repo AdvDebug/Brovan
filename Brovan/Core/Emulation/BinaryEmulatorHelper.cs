@@ -26,6 +26,17 @@ namespace Brovan.Core.Emulation
         /// stack after two return addresses (ESP+8), or after one (ESP+4) on a direct blob startup.
         /// </remarks>
         public NTSTATUS Handle(BinaryEmulator Instance);
+
+        public WinSyscallDomain Domain => WinSyscallDomain.KernelLock;
+    }
+
+    public enum WinSyscallDomain : byte
+    {
+        KernelLock,
+
+        // The handler touches only scheduler state and guest memory. It runs under SchedulerLock, and under KernelLock
+        // instead when the work around it needs that lock.
+        Scheduler,
     }
 
     public enum SyscallAbi
@@ -50,6 +61,7 @@ namespace Brovan.Core.Emulation
         public uint Number;
         public string Name;
         public IWinSyscall Handler;
+        public WinSyscallDomain Domain;
     }
 
     public sealed class SyscallDispatchTable<TEntry> where TEntry : struct
@@ -116,6 +128,13 @@ namespace Brovan.Core.Emulation
         bool TryHandleSyscall(BinaryEmulator Instance);
         bool TryHandleInterrupt(BinaryEmulator Instance, uint InterruptNumber);
 
+        // Core sends this vector down the syscall path, not the interrupt path.
+        uint SyscallGateVector => uint.MaxValue;
+        bool TryHandleSyscallGate(BinaryEmulator Instance, uint Vector) => false;
+
+        // False when the thread's active wait is checked and completed from scheduler state alone, under SchedulerLock.
+        bool WaitNeedsKernelLock(BinaryEmulator Instance, EmulatedThread Thread) => true;
+
         bool RaisableFromUserMode(uint Vector);
         void HandlePrivilegedInstruction(BinaryEmulator Instance);
         void HandleInvalidInstruction(BinaryEmulator Instance);
@@ -124,8 +143,10 @@ namespace Brovan.Core.Emulation
 
         ulong CreateInitialThread(BinaryEmulator Instance);
         EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8);
+        // Runs without KernelLock on SMP: with thread residency it writes only the processor's registers.
         void OnThreadContextLoaded(BinaryEmulator Instance, EmulatedThread Thread);
         void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread);
+        // Runs under SchedulerLock and reads only scheduler state.
         bool HasPendingGuestWork(BinaryEmulator Instance, EmulatedThread Thread);
 
         // Runs between slices. True when finished host work needs a wakeup scan.
@@ -133,6 +154,11 @@ namespace Brovan.Core.Emulation
 
         // True while host work or another process can still wake a thread, so the scheduler waits instead of ending.
         bool AwaitsHostWork(BinaryEmulator Instance) => false;
+
+        void OnTerminationRequested(BinaryEmulator Instance) { }
+
+        // Runs without KernelLock, and work that needs it takes BinaryEmulator.EnterKernelLockScope.
+        void RefreshGuestClock(BinaryEmulator Instance) { }
 
         bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle);
         bool ExecuteThreadSlice(BinaryEmulator Instance, EmulatedThread Thread, uint QuantumInstructions, out bool State);
@@ -1692,7 +1718,8 @@ namespace Brovan.Core.Emulation
                     {
                         Number = SyscallNumber,
                         Name = FunctionName,
-                        Handler = Instance
+                        Handler = Instance,
+                        Domain = Instance.Domain
                     };
                 }
                 catch (Exception Ex)

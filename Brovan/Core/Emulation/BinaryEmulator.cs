@@ -254,7 +254,7 @@ namespace Brovan.Core.Emulation
         }
     }
 
-    public partial class BinaryEmulator : IDisposable, IGuestMemory
+    public partial class BinaryEmulator : IDisposable, IGuestMemory, IBackendHost
     {
         internal BinaryFile _binary;
 
@@ -262,20 +262,28 @@ namespace Brovan.Core.Emulation
 
         private static readonly bool GuestKernelStats = Environment.GetEnvironmentVariable("BROVAN_GUEST_KERNEL_STATS") == "1";
 
-        internal IGuestKernel GuestKernel =>
-            Settings.GuestKernel && Settings.SyscallNotificationCallback == null && (Settings.Flags & (LogFlags.General | LogFlags.Syscall)) == 0
-                ? _emulator?.GuestKernel
-                : null;
+        internal IGuestKernel GuestKernel => Settings.GuestKernel && !_settingsObserveDispatch ? _emulator?.GuestKernel : null;
 
-        private readonly object GuestKernelRefreshLock = new();
+        // Dispatch is observed when host code sees each syscall or gets emulator messages. Such a run keeps the whole pass
+        // under KernelLock.
+        private readonly bool _settingsObserveDispatch;
+        private volatile bool _dispatchObserved;
+        private readonly object DispatchObservationLock = new();
 
-        internal void RefreshGuestKernel()
+        private static bool ObservesDispatch(in BinaryEmulatorSettings Settings) =>
+            Settings.SyscallNotificationCallback != null
+            || (Settings.Flags & (LogFlags.General | LogFlags.Syscall)) != 0
+            || (Settings.OnMessageHandler != null && Settings.Flags != 0);
+
+        internal void RefreshDispatchObservation()
         {
-            if (_emulator?.GuestKernel is not IGuestKernel Kernel)
-                return;
-
-            lock (GuestKernelRefreshLock)
-                Kernel.Enabled = Syscalls?.TraceEnabled != true && Syscalls?.HasRules != true;
+            lock (DispatchObservationLock)
+            {
+                bool Observed = _settingsObserveDispatch || Syscalls?.TraceEnabled == true || Syscalls?.HasRules == true;
+                _dispatchObserved = Observed;
+                if (_emulator?.GuestKernel is IGuestKernel Kernel)
+                    Kernel.Enabled = !Observed;
+            }
         }
 
         private void ReportGuestKernelStats()
@@ -394,15 +402,34 @@ namespace Brovan.Core.Emulation
         public ulong UserAddressEnd => AlignUp(MaxAddress, PageSize);
         private const int IdleWaitSliceMs = 5;
 
-        // Held by every host thread that touches emulator state. A hypervisor backend releases it for the time
-        // a processor spends in the guest (IEmulationBackend.UseRunLock), and a syscall handler for host work
-        // (TryLeaveKernelLock).
-        internal readonly object KernelLock = new();
+        // Held by every host thread that touches guest object or OS layer state. On Split only the work that needs it
+        // takes it (EnterKernelLockScope).
+        internal readonly RankedLock KernelLock = new("KernelLock", RankedLock.BigRank, CountsCalls: true);
 
-        private static readonly bool ConcurrentSyscallsDisabled = Environment.GetEnvironmentVariable("BROVAN_NO_CONCURRENT_SYSCALLS") == "1";
+        // Held by every change of a hypervisor backend's mappings. Skipped while one processor runs.
+        internal RankedLock MappingLock { get; private set; }
+
+        // Held by every write of scheduler state, ranked after KernelLock. Skipped while one processor runs.
+        internal RankedLock SchedulerLock { get; private set; }
+
+        private static readonly bool BigLockForced = Environment.GetEnvironmentVariable("BROVAN_BIG_LOCK") == "1";
 
         internal bool SmpEnabled { get; private set; }
-        private bool ConcurrentSyscalls => SmpEnabled && Guest.SupportsConcurrentSyscalls && !ConcurrentSyscallsDisabled;
+
+        internal enum LockRegime
+        {
+            SingleProcessor,
+            WholePass,
+            Split,
+        }
+
+        private readonly bool _splitCapable;
+
+        internal LockRegime Regime =>
+            !SmpEnabled ? LockRegime.SingleProcessor
+            : _splitCapable && !_dispatchObserved ? LockRegime.Split
+            : LockRegime.WholePass;
+
         private volatile bool SchedulerExiting;
         private int IdleWorkers;
         private int ParkWaiters;
@@ -435,16 +462,156 @@ namespace Brovan.Core.Emulation
                 return;
             }
 
-            IdleWorkers++;
-            if (IdleWorkers == SmpWorkerCount)
+            EnterQuiescentSpan();
+            if (_passWithoutBig && _emulator.HasDeferredFrees)
+                _emulator.CompleteDeferredFrees(false);
+
+            using (SchedulerLock.EnterScope())
             {
-                ParkedEpoch = PassEpoch;
-                SweepKick.Set();
+                IdleWorkers++;
+                if (IdleWorkers == SmpWorkerCount)
+                {
+                    ParkedEpoch = PassEpoch;
+                    SweepKick.Set();
+                }
+
+                SchedulerLock.WaitLeavingOthers(_rankedLocks, IdleWaitBackstopMs);
+                IdleWorkers--;
+            }
+            LeaveQuiescentSpan();
+        }
+
+        // Published before the workers start and replaced after the join.
+        private SchedulerWorker[] _runWorkers = Array.Empty<SchedulerWorker>();
+        private int _deferredFreeWaiters;
+        private int _deferredFreeWaitDue;
+        private readonly ManualResetEventSlim _deferredFreesPassed = new(false, 0);
+
+        private void EnterQuiescentSpan()
+        {
+            if (!_passWithoutBig || OwnWorker is not SchedulerWorker Own || (Own.Quiescence & 1) == 0)
+                return;
+
+            Volatile.Write(ref Own.Quiescence, Own.Quiescence + 1);
+            if (Volatile.Read(ref _deferredFreeWaiters) != 0)
+                _deferredFreesPassed.Set();
+        }
+
+        private void LeaveQuiescentSpan()
+        {
+            if (_passWithoutBig && OwnWorker is SchedulerWorker Own && (Own.Quiescence & 1) == 0)
+                Volatile.Write(ref Own.Quiescence, Own.Quiescence + 1);
+        }
+
+        // A worker entering a quiescent span stores its sequence and reads the waiter count with no fence, so the waiter
+        // registers, fences every processor and only then checks.
+        private void WaitForDeferredFrees(SchedulerWorker Self)
+        {
+            Self.DeferredFreeWaitDue = false;
+            Volatile.Write(ref _deferredFreeWaitDue, 0);
+            RankedLock.AssertNoneHeld(nameof(WaitForDeferredFrees));
+            EnterQuiescentSpan();
+            Interlocked.Increment(ref _deferredFreeWaiters);
+            try
+            {
+                while (!SchedulerExiting)
+                {
+                    _deferredFreesPassed.Reset();
+                    Interlocked.MemoryBarrierProcessWide();
+                    if (!_emulator.CompleteDeferredFrees(false))
+                        return;
+
+                    _deferredFreesPassed.Wait(IdleWaitBackstopMs);
+                }
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _deferredFreeWaiters);
+                LeaveQuiescentSpan();
+            }
+        }
+
+        private bool DeferredFreeWaitDue(SchedulerWorker Self) => Self.DeferredFreeWaitDue || Volatile.Read(ref _deferredFreeWaitDue) != 0;
+
+        bool IBackendHost.DefersHostFrees => _passWithoutBig;
+
+        bool IBackendHost.MayReadPagesWithoutLock => _passWithoutBig && OwnWorker is SchedulerWorker Own && (Own.Quiescence & 1) != 0;
+
+        QuiescenceSnapshot IBackendHost.TakeQuiescence()
+        {
+            SchedulerWorker[] Workers = Volatile.Read(ref _runWorkers);
+            SchedulerWorker Own = OwnWorker;
+            long[] Seen = new long[Workers.Length];
+            if (Workers.Length > (Own != null ? 1 : 0))
+            {
+                Interlocked.MemoryBarrierProcessWide();
+                for (int i = 0; i < Workers.Length; i++)
+                    Seen[i] = ReferenceEquals(Workers[i], Own) ? 0 : Volatile.Read(ref Workers[i].Quiescence);
             }
 
-            Monitor.Wait(KernelLock, IdleWaitBackstopMs);
-            IdleWorkers--;
+            return new QuiescenceSnapshot(Workers, Seen);
         }
+
+        bool IBackendHost.HasPassed(QuiescenceSnapshot Snapshot)
+        {
+            SchedulerWorker[] Workers = (SchedulerWorker[])Snapshot.Source;
+            // The workers of an earlier run are joined.
+            if (!ReferenceEquals(Workers, Volatile.Read(ref _runWorkers)))
+                return true;
+
+            for (int i = 0; i < Workers.Length; i++)
+            {
+                if (!SequenceSnapshot.Passed(Snapshot.Seen[i], Volatile.Read(ref Workers[i].Quiescence)))
+                    return false;
+            }
+
+            return true;
+        }
+
+        void IBackendHost.RequestQuiescentWait()
+        {
+            if (OwnWorker is SchedulerWorker Own)
+                Own.DeferredFreeWaitDue = true;
+            else
+                Volatile.Write(ref _deferredFreeWaitDue, 1);
+        }
+
+        void IBackendHost.EnteringGuest() => EnterQuiescentSpan();
+
+        void IBackendHost.LeftGuest() => LeaveQuiescentSpan();
+
+        // Set while the workers run on Split, where the pass and the slice run without KernelLock.
+        private bool _passWithoutBig;
+
+        // Set while no scheduler worker runs. No lock stops a worker on Split, so dispose waits for this.
+        private readonly ManualResetEventSlim _workersStopped = new(true);
+
+        internal RankedLock.Scope EnterKernelLockScope() =>
+            _passWithoutBig && !KernelLock.IsHeld ? KernelLock.EnterScope() : default;
+
+        internal bool KernelLockCovered => !_passWithoutBig || KernelLock.IsHeld;
+
+        // Only the thread's own park entries set its wait kind and others only clear it, so an answer read before a
+        // section never goes from "no KernelLock" to "needs KernelLock".
+        private bool WaitNeedsKernelLock(EmulatedThread Thread) => Thread.WaitActive && Guest.WaitNeedsKernelLock(this, Thread);
+
+        internal void AssertWaitLockHeld(EmulatedThread Thread, string Where)
+        {
+            if (!RankedLock.OrderChecked)
+                return;
+            if (Guest.WaitNeedsKernelLock(this, Thread))
+                AssertKernelLockHeld(Where);
+            else
+                SchedulerLock.AssertHeld(Where);
+        }
+
+        // A guest kernel finish runs in a backend exit and writes guest memory, so it runs under KernelLock.
+        internal bool RegisterGuestKernelSyscall(IGuestKernel Kernel, uint Number, string Name, Action<GuestKernelCallBuilder> Emit, GuestKernelFinish Finish) =>
+            Kernel.RegisterSyscall(Number, Name, Emit, Saved =>
+            {
+                using RankedLock.Scope KernelScope = EnterKernelLockScope();
+                Finish(Saved);
+            });
 
         // A dispatched thread is invisible to every scan, so a worker leaving its slice by any route, an
         // escaping exception included, has to give it back.
@@ -455,18 +622,113 @@ namespace Brovan.Core.Emulation
                 return;
 
             Worker.DispatchedThread = null;
-            Dispatched.HostWorker = -1;
+            ReleaseOwnership(Dispatched);
+        }
+
+        private void ReleaseOwnership(EmulatedThread Thread)
+        {
+            Thread.HostWorker = -1;
             DispatchedThreads--;
             if (ParkWaiters != 0)
-                Monitor.PulseAll(KernelLock);
+                SchedulerLock.PulseAll();
+        }
+
+        internal readonly struct ThreadClaim : IDisposable
+        {
+            private readonly BinaryEmulator _owner;
+            private readonly EmulatedThread _thread;
+            internal readonly bool Parked;
+
+            internal ThreadClaim(bool Parked)
+            {
+                _owner = null;
+                _thread = null;
+                this.Parked = Parked;
+            }
+
+            internal ThreadClaim(BinaryEmulator Owner, EmulatedThread Thread)
+            {
+                _owner = Owner;
+                _thread = Thread;
+                Parked = true;
+            }
+
+            // The scope ends on the host thread that took the claim.
+            public void Dispose() => _owner?.ReleaseHeldThread(_thread);
+        }
+
+        private SchedulerWorker OwnWorker
+        {
+            get
+            {
+                SchedulerWorker Bound = t_worker;
+                return Bound != null && ReferenceEquals(Bound.Owner, this) ? Bound : null;
+            }
+        }
+
+        internal bool OwnsThread(EmulatedThread Thread) => OwnWorker is SchedulerWorker Own && Thread.HostWorker == Own.Index;
+
+        // A claim owns a thread no worker runs, as a dispatch does: no worker dispatches it and a waker leaves its wait
+        // to the release. Only a worker claims, and it holds one claim at a time.
+        private bool TryClaimThread(EmulatedThread Thread, out ThreadClaim Claim)
+        {
+            SchedulerLock.AssertHeld(nameof(TryClaimThread));
+            Claim = default;
+            SchedulerWorker Self = OwnWorker;
+            if (Self == null || Thread.HostWorker != -1)
+                return false;
+            if (Self.HeldThread != null)
+            {
+                Utils.LogError($"[Scheduler] Worker {Self.Index} already holds thread {Self.HeldThread.ThreadId} and cannot claim thread {Thread.ThreadId}.");
+                return false;
+            }
+
+            Thread.HostWorker = Self.Index;
+            Self.HeldThread = Thread;
+            DispatchedThreads++;
+            Claim = new ThreadClaim(this, Thread);
+            return true;
+        }
+
+        // The release checks an active wait, which can reach guest code, so it takes KernelLock first when the wait needs it.
+        private void ReleaseHeldThread(EmulatedThread Thread)
+        {
+            using RankedLock.Scope KernelScope = WaitNeedsKernelLock(Thread) ? EnterKernelLockScope() : default;
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
+            SchedulerWorker Self = OwnWorker;
+            if (Self == null || !ReferenceEquals(Self.HeldThread, Thread))
+                return;
+
+            Self.HeldThread = null;
+            ReleaseOwnership(Thread);
+            if (Thread.State != EmulatedThreadState.Terminated && MlfqLevels > 0)
+                CheckOwnWaitAndEnqueue(Thread, MlfqReadyQueues, MlfqQueuedThreads, MlfqLevels, MlfqSchedulerTick);
+        }
+
+        // Scans skip an owned thread, so a wait a waker claimed meanwhile completes when the owner lets it go.
+        private void CheckOwnWaitAndEnqueue(EmulatedThread Thread, Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick)
+        {
+            if (SmpEnabled && Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive)
+            {
+                long EarliestDeadline = EarliestWaitDeadline;
+                UpdateMlfqThreadWakeup(Thread, ReadyQueues, InQueue, Levels, SchedulerTick, EmulatedTickCount64, WakeSignal.Current, ref EarliestDeadline);
+                EarliestWaitDeadline = EarliestDeadline;
+            }
+
+            if (Thread.State == EmulatedThreadState.Ready || Thread.State == EmulatedThreadState.Exception)
+                EnqueueMlfqThread(Thread, ReadyQueues, InQueue, Levels, SchedulerTick);
+
+            if (Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive
+                && Thread.WaitDeadline != -1 && Thread.WaitDeadline < EarliestWaitDeadline)
+                EarliestWaitDeadline = Thread.WaitDeadline;
         }
 
         private void WakeIdleWorker()
         {
             if (ParkWaiters != 0)
-                Monitor.PulseAll(KernelLock);
+                SchedulerLock.PulseAll();
             else
-                Monitor.Pulse(KernelLock);
+                SchedulerLock.Pulse();
         }
 
         // Timed wakes have no producer, so one thread wakes an idle worker every SweepIntervalMs. While every
@@ -479,7 +741,7 @@ namespace Brovan.Core.Emulation
                 bool AllIdle;
                 long Observed;
                 SweepKick.Reset();
-                lock (KernelLock)
+                using (SchedulerLock.EnterScope())
                 {
                     if (Pulse && IdleWorkers != 0)
                     {
@@ -507,7 +769,8 @@ namespace Brovan.Core.Emulation
         {
             SchedulerExiting = true;
             _emulator.StopAllProcessors();
-            Monitor.PulseAll(KernelLock);
+            using (SchedulerLock.EnterScope())
+                SchedulerLock.PulseAll();
         }
 
         private static Thread StartSchedulerThread(string Name, ThreadStart Body)
@@ -530,13 +793,25 @@ namespace Brovan.Core.Emulation
             return Math.Max(1, Math.Min(Requested, Limit));
         }
 
-        // NT answers a context request on a running thread only once it reaches a safe point. False means it
-        // never reached one, so the saved context is not the one it runs on.
-        internal bool WaitUntilParked(EmulatedThread Thread)
+        // NT answers a context request on a running thread only once it reaches a safe point. A claim that is not
+        // Parked means the thread never reached one, so the saved context is not the one it runs on.
+        internal ThreadClaim WaitUntilParked(EmulatedThread Thread)
         {
-            if (!SmpEnabled || Thread == null || Thread.HostWorker == -1 || ReferenceEquals(Thread, CurrentThread))
-                return true;
+            if (!SmpEnabled || Thread == null || ReferenceEquals(Thread, CurrentThread))
+                return new ThreadClaim(true);
 
+            // The last check and the claim are one section, so no worker dispatches the thread between them.
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
+            if (Thread.HostWorker != -1 && !WaitForPark(Thread))
+                return new ThreadClaim(false);
+
+            return TryClaimThread(Thread, out ThreadClaim Claim) ? Claim : new ThreadClaim(false);
+        }
+
+        // Lets go of KernelLock while it waits, so the target's worker can hand it back.
+        private bool WaitForPark(EmulatedThread Thread)
+        {
+            SchedulerLock.AssertHeld(nameof(WaitForPark));
             _emulator.StopThread(Thread.ThreadId);
 
             EmulatedThread Self = CurrentThread;
@@ -557,7 +832,9 @@ namespace Brovan.Core.Emulation
                     if (System.Diagnostics.Stopwatch.GetTimestamp() >= Deadline)
                         return false;
 
-                    Monitor.Wait(KernelLock, 1);
+                    EnterQuiescentSpan();
+                    SchedulerLock.WaitLeavingOthers(_rankedLocks, 1);
+                    LeaveQuiescentSpan();
                 }
 
                 return Thread.HostWorker == -1;
@@ -574,20 +851,23 @@ namespace Brovan.Core.Emulation
         }
 
         // The thread stays dispatched with the lock out, so WaitUntilParked waits for it as for a thread in the guest.
-        internal bool TryLeaveKernelLock()
+        internal RankedLock.LeftLocks TryLeaveKernelLock()
         {
-            if (!ConcurrentSyscalls || !Monitor.IsEntered(KernelLock))
-                return false;
+            if (!_passWithoutBig || !KernelLock.IsHeld)
+                return default;
 
-            Monitor.Exit(KernelLock);
-            if (!Monitor.IsEntered(KernelLock))
-                return true;
-
-            Monitor.Enter(KernelLock);
-            return false;
+            RankedLock.LeftLocks Left = RankedLock.TryLeaveAll(_rankedLocks);
+            if (Left.Any)
+                EnterQuiescentSpan();
+            return Left;
         }
 
-        internal void EnterKernelLock() => Monitor.Enter(KernelLock);
+        internal void ReturnKernelLock(RankedLock.LeftLocks Left)
+        {
+            if (Left.Any)
+                LeaveQuiescentSpan();
+            Left.Restore();
+        }
 
         // The console thread's view of the guest follows the thread it last ran once the workers are gone.
         private void ReselectCurrentThread()
@@ -615,11 +895,29 @@ namespace Brovan.Core.Emulation
         // dispatched, so the scan skips it and its worker checks it after the slice.
         private void ScanWakeupsAfterCallback(long EpochBeforeCallback)
         {
-            if (!SmpEnabled || MlfqLevels == 0 || WakeSignal.Current == EpochBeforeCallback
-                || WakeSignal.Current == LastScannedWakeEpoch)
+            if (!SmpEnabled || MlfqLevels == 0 || WakeSignal.Current == EpochBeforeCallback)
                 return;
 
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
+            if (WakeSignal.Current == LastScannedWakeEpoch)
+                return;
+
+            long Mark = HoldMark();
             UpdateMlfqWakeups(MlfqReadyQueues, MlfqQueuedThreads, MlfqLevels, MlfqSchedulerTick);
+            NoteHold(HoldSite.ProducerScan, Mark);
+        }
+
+        private enum HoldSite { PollHostWork, WakeScan, Dispatch, Slice, SliceEnd, GuestCallback, ProducerScan }
+
+        private static readonly string[] HoldSiteNames =
+            { "host work poll", "wake scan", "dispatch", "slice", "slice end", "guest callback", "producer scan" };
+
+        private long HoldMark() => KernelLock.CountsHolds ? KernelLock.HeldTicks() : 0;
+
+        private void NoteHold(HoldSite Site, long Mark)
+        {
+            if (KernelLock.CountsHolds)
+                KernelLock.NoteSite((int)Site, HoldSiteNames[(int)Site], Mark);
         }
 
         private const ulong TscCyclesPerMillisecond = 3_000_000UL;
@@ -716,6 +1014,47 @@ namespace Brovan.Core.Emulation
 
         private bool StartSuspendedReleased;
         internal readonly List<int> ThreadOrder = new();
+
+        // Threads and ThreadOrder change with KernelLock and SchedulerLock held, so a holder of either reads them.
+        internal void InsertThread(EmulatedThread Thread)
+        {
+            AssertKernelLockHeld(nameof(InsertThread));
+
+            using (SchedulerLock.EnterScope())
+            {
+                Threads[Thread.ThreadId] = Thread;
+                ThreadOrder.Add((int)Thread.ThreadId);
+                Thread.Owner = this;
+            }
+        }
+
+        // A thread's State changes under SchedulerLock, except before InsertThread, on one processor, on a guest that
+        // keeps KernelLock for the whole pass, and on the writer's own dispatched thread when it does not start a wait.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        internal void CheckStateWrite(EmulatedThread Thread, EmulatedThreadState Value)
+        {
+            if (!SmpEnabled || !_splitCapable || SchedulerLock.IsHeld)
+                return;
+            if (OwnsThread(Thread) && KernelLock.IsHeld && Value != EmulatedThreadState.Waiting)
+                return;
+
+            SchedulerLock.AssertHeld($"Setting thread {Thread.ThreadId} to {Value}");
+        }
+
+        private void AssertKernelLockHeld(string Where)
+        {
+            if (RankedLock.OrderChecked && SmpEnabled)
+                KernelLock.AssertHeld(Where);
+        }
+
+        internal void ForgetThread(uint ThreadId)
+        {
+            AssertKernelLockHeld(nameof(ForgetThread));
+
+            using (SchedulerLock.EnterScope())
+                Threads.Remove(ThreadId);
+        }
+
         internal int NextThreadId = 1;
         internal volatile bool EscapeScheduler;
         private int TerminationRequested;
@@ -785,7 +1124,14 @@ namespace Brovan.Core.Emulation
             public bool SuppressStatusWrite;
             public bool WakeupScanRequired;
             public EmulatedThread DispatchedThread;
+            public EmulatedThread HeldThread;
             public ulong[] GprScratch;
+            public object GuestCallState;
+
+            // Odd while the worker may copy guest memory through a page it found, even in the guest and in waits that
+            // read none. Only this worker writes it.
+            public long Quiescence = 1;
+            public bool DeferredFreeWaitDue;
 
             public SchedulerWorker(BinaryEmulator Owner, int Index)
             {
@@ -817,6 +1163,26 @@ namespace Brovan.Core.Emulation
 
         private bool CurrentContextSaved { get => Worker.ContextSaved; set => Worker.ContextSaved = value; }
 
+        // One per worker, so a syscall on another worker never replaces it.
+        internal object WorkerCallState
+        {
+            get
+            {
+                SchedulerWorker Bound = t_worker;
+                return Bound != null && ReferenceEquals(Bound.Owner, this) ? Bound.GuestCallState : _hostCallState;
+            }
+            set
+            {
+                SchedulerWorker Bound = t_worker;
+                if (Bound != null && ReferenceEquals(Bound.Owner, this))
+                    Bound.GuestCallState = value;
+                else
+                    _hostCallState = value;
+            }
+        }
+
+        private object _hostCallState;
+
         internal EmulatedThread CurrentThread
         {
             get
@@ -827,6 +1193,7 @@ namespace Brovan.Core.Emulation
                 EmulatedThread Cached = W.CurrentThreadCache;
                 if (Cached != null && (int)Cached.ThreadId == tid)
                     return Cached;
+                RankedLock.AssertOneHeld(KernelLock, SchedulerLock, nameof(CurrentThread));
                 if (Threads.TryGetValue((uint)tid, out EmulatedThread t))
                 { W.CurrentThreadCache = t; return t; }
                 W.CurrentThreadCache = null;
@@ -857,6 +1224,7 @@ namespace Brovan.Core.Emulation
             GeneralHelper.IO.BeginGuest(Binary.FileFormat, Binary.Architecture);
             GuestImagePath = ResolveGuestImagePath(Binary);
             _emulator = BackendFactory.Create(Settings.BackendKind, BackendArch, BackendMode, Settings.NoHooks, GuestImagePath, Binary.Location);
+            HandOverToBackend();
             _emulator.NoHooks = Settings.NoHooks;
             this.Settings = Settings;
             Debug = Settings.Debug;
@@ -871,12 +1239,31 @@ namespace Brovan.Core.Emulation
 
             this.Syscalls = new SyscallManager(this);
             Guest = GuestFactory.Create(Binary);
+            _settingsObserveDispatch = ObservesDispatch(Settings);
+            _splitCapable = Guest.SupportsConcurrentSyscalls && !BigLockForced;
 
             if (Settings.OnMessageHandler != null)
                 OnMessage += Settings.OnMessageHandler;
 
             InitializeEmulationEnvironment(this.Settings);
+            RefreshDispatchObservation();
         }
+
+        // This emulator's ranked locks, in rank order.
+        private RankedLock[] _rankedLocks = Array.Empty<RankedLock>();
+
+        private void HandOverToBackend()
+        {
+            SchedulerLock = new RankedLock("Scheduler", RankedLock.SchedulerRank, this, CountsCalls: true);
+            MappingLock = new RankedLock("BackendMapping", RankedLock.BackendMappingRank, this);
+            _rankedLocks = new[] { KernelLock, SchedulerLock, MappingLock };
+            _emulator.UseHost(this);
+        }
+
+        RankedLock IBackendHost.RunLock => KernelLock;
+
+        RankedLock IBackendHost.MappingLock => MappingLock;
+
 
         public BinaryEmulator(IGuestEnvironment Guest, BinaryEmulatorSettings Settings, Mode mode, Arch arch, BinaryFile Binary)
         {
@@ -890,6 +1277,7 @@ namespace Brovan.Core.Emulation
             GeneralHelper.IO.BeginGuest(Binary.FileFormat, Binary.Architecture);
             GuestImagePath = ResolveGuestImagePath(_binary, Guest);
             _emulator = BackendFactory.Create(Settings.BackendKind, arch, mode, Settings.NoHooks, GuestImagePath, _binary.Location);
+            HandOverToBackend();
             this.Settings = Settings;
             Debug = Settings.Debug;
             RawProgramArguments = Settings.RawProgramArguments ?? string.Empty;
@@ -907,11 +1295,14 @@ namespace Brovan.Core.Emulation
 
             this.Syscalls = new SyscallManager(this);
             this.Guest = Guest;
+            _settingsObserveDispatch = ObservesDispatch(Settings);
+            _splitCapable = Guest.SupportsConcurrentSyscalls && !BigLockForced;
 
             if (Settings.OnMessageHandler != null)
                 OnMessage += Settings.OnMessageHandler;
 
             InitializeEmulationEnvironment(this.Settings);
+            RefreshDispatchObservation();
         }
 
         public string GetDump()
@@ -1754,6 +2145,7 @@ namespace Brovan.Core.Emulation
 
         private void PrivilegedInstructionHandler()
         {
+            using RankedLock.Scope KernelScope = EnterKernelLockScope();
             SchedulerRefreshRequested = true;
             if (Debug)
                 TriggerDebugMessage($"cpu: privileged instruction at 0x{ReadRegister(IPRegister):X}");
@@ -1762,6 +2154,7 @@ namespace Brovan.Core.Emulation
 
         private void InvalidInstructionHandler()
         {
+            using RankedLock.Scope KernelScope = EnterKernelLockScope();
             SchedulerRefreshRequested = true;
             if (Debug)
                 TriggerDebugMessage($"cpu: invalid instruction at 0x{ReadRegister(IPRegister):X}");
@@ -1770,24 +2163,35 @@ namespace Brovan.Core.Emulation
 
         private bool InterruptHandler(uint interrupt_number)
         {
-            if (Debug)
-                TriggerDebugMessage($"cpu: interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}");
-            long EpochBeforeCallback = WakeSignal.Current;
+            if (interrupt_number == Guest.SyscallGateVector)
+                return RunGuestSyscall(interrupt_number);
+
             bool Handled = false;
-            try
+            using (EnterKernelLockScope())
             {
-                // An unhandled vector leaves IP on the faulting instruction, which re-faults forever.
-                Handled = Guest.TryHandleInterrupt(this, interrupt_number);
-                if (!Handled && (Settings.Flags & LogFlags.Issues) != 0)
-                    TriggerEventMessage($"[-] Unhandled CPU interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}.", LogFlags.Issues);
-            }
-            catch (Exception ex)
-            {
-                SchedulerRefreshRequested = true;
-                Utils.LogError($"[GuestInterrupt] Error: {ex.Message}");
+                if (Debug)
+                    TriggerDebugMessage($"cpu: interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}");
+                long EpochBeforeCallback = WakeSignal.Current;
+                long Mark = HoldMark();
+                try
+                {
+                    // An unhandled vector leaves IP on the faulting instruction, which re-faults forever.
+                    Handled = Guest.TryHandleInterrupt(this, interrupt_number);
+                    if (!Handled && (Settings.Flags & LogFlags.Issues) != 0)
+                        TriggerEventMessage($"[-] Unhandled CPU interrupt 0x{interrupt_number:X} at 0x{ReadRegister(IPRegister):X}.", LogFlags.Issues);
+                }
+                catch (Exception ex)
+                {
+                    SchedulerRefreshRequested = true;
+                    Utils.LogError($"[GuestInterrupt] Error: {ex.Message}");
+                }
+
+                NoteHold(HoldSite.GuestCallback, Mark);
+                ScanWakeupsAfterCallback(EpochBeforeCallback);
             }
 
-            ScanWakeupsAfterCallback(EpochBeforeCallback);
+            if (OwnWorker is SchedulerWorker Own && Own.DeferredFreeWaitDue)
+                WaitForDeferredFrees(Own);
             return Handled;
         }
 
@@ -1798,6 +2202,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         internal void YieldSliceAfterWake(EmulatedThread WokenThread, bool EndSlice = false)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             if (WokenThread != null && MlfqLevels > 0)
                 EnqueueMlfqThread(WokenThread, MlfqReadyQueues, MlfqQueuedThreads, MlfqLevels, MlfqSchedulerTick);
             else
@@ -1817,6 +2222,7 @@ namespace Brovan.Core.Emulation
         // NT only yields to a thread that is ready to run (KeYieldExecution).
         internal bool HasThreadReadyForYield()
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             if (SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch || EmulatedTickCount64 >= EarliestWaitDeadline)
                 return true;
 
@@ -2103,10 +2509,16 @@ namespace Brovan.Core.Emulation
         public void SaveContext(EmulatedThread t)
         {
             if (t == null || t.Context == null) return;
+            SaveContext(t, _emulator.IsThreadResident(t.ThreadId));
+        }
+
+        // A resident thread's processor keeps its vector state, so only its general registers are read back.
+        private void SaveContext(EmulatedThread t, bool Resident)
+        {
+            if (t == null || t.Context == null) return;
             ReadGprBatch(t.Context);
-            if (_emulator.IsThreadResident(t.ThreadId))
-                return;
-            SaveFloatingPointState(t.Context);
+            if (!Resident)
+                SaveFloatingPointState(t.Context);
         }
 
         internal ulong[] RegisterScratch => Worker.GprScratch ??= new ulong[GprBatchCount];
@@ -2373,62 +2785,86 @@ namespace Brovan.Core.Emulation
 
         private static ulong BreakpointEnables(int Index) => 3UL << (Index * 2);
 
-        private void SwitchToThread(int ThreadId, bool BoundThisSwitch = false)
+        private void SwitchToThread(EmulatedThread next, bool BoundThisSwitch = false, bool? WasResident = null)
         {
-            if (!Threads.TryGetValue((uint)ThreadId, out EmulatedThread next))
-                return;
             EmulatedThread cur = CurrentThreadCache;
             if (!SmpEnabled && cur != null && !CurrentContextSaved && cur.State != EmulatedThreadState.Terminated)
                 SaveContext(cur);
             CurrentContextSaved = false;
-            CurrentThreadId = ThreadId;
+            CurrentThreadId = (int)next.ThreadId;
             CurrentThreadCache = next;
-            bool FirstResidentLoad = BoundThisSwitch || (!_emulator.IsThreadResident(next.ThreadId) && BindThreadProcessor(next));
+            bool Resident = WasResident ?? _emulator.IsThreadResident(next.ThreadId);
+            bool FirstResidentLoad = BoundThisSwitch || (!Resident && BindThreadProcessor(next));
             _emulator.SelectThread(next.ThreadId);
-            LoadContext(next, FirstResidentLoad || !_emulator.IsThreadResident(next.ThreadId));
+            LoadContext(next, FirstResidentLoad || !Resident);
         }
 
         private bool _threadProcessorsExhausted;
 
         private bool BindThreadProcessor(EmulatedThread Thread)
         {
-            if (!_emulator.SupportsThreadResidency || _threadProcessorsExhausted || Thread.State == EmulatedThreadState.Terminated)
+            if (!_emulator.SupportsThreadResidency || Thread.State == EmulatedThreadState.Terminated)
                 return false;
 
+            // The pool flag changes with the binds it describes, so a release between a failed bind and the flag
+            // cannot lose its reset.
+            using (MappingLock.EnterScope())
+            {
+                if (_threadProcessorsExhausted)
+                    return false;
+                if (_emulator.TryBindThread(Thread.ThreadId))
+                    return true;
+            }
+
+            using (SchedulerLock.EnterScope())
+            {
+                foreach (EmulatedThread Other in Threads.Values)
+                    if (Other.State == EmulatedThreadState.Terminated && Other.HostWorker == -1)
+                        _emulator.UnbindThread(Other.ThreadId);
+            }
+
             if (_emulator.TryBindThread(Thread.ThreadId))
                 return true;
 
-            foreach (EmulatedThread Other in Threads.Values)
-                if (Other.State == EmulatedThreadState.Terminated && Other.HostWorker == -1)
-                    _emulator.UnbindThread(Other.ThreadId);
+            bool Evicted = EvictLeastRecentlyRunProcessor(Thread);
+            using (MappingLock.EnterScope())
+            {
+                if (Evicted && _emulator.TryBindThread(Thread.ThreadId))
+                    return true;
 
-            if (_emulator.TryBindThread(Thread.ThreadId))
-                return true;
-
-            if (EvictLeastRecentlyRunProcessor(Thread) && _emulator.TryBindThread(Thread.ThreadId))
-                return true;
-
-            _threadProcessorsExhausted = true;
-            return false;
+                _threadProcessorsExhausted = true;
+                return false;
+            }
         }
 
         // A resident thread's saved context has no vector state, so read the victim's before eviction.
         private bool EvictLeastRecentlyRunProcessor(EmulatedThread Thread)
         {
+            // The victim is claimed, so no worker dispatches it while its processor goes. Terminated threads are not
+            // candidates, as the sweep before eviction unbinds them.
             EmulatedThread Victim = null;
-            for (int i = 0; i < ThreadOrder.Count; i++)
+            ThreadClaim Claim;
+            using (SchedulerLock.EnterScope())
             {
-                if (!Threads.TryGetValue((uint)ThreadOrder[i], out EmulatedThread Candidate))
-                    continue;
-                if (ReferenceEquals(Candidate, Thread) || Candidate.HostWorker != -1 || Candidate.Context == null || !_emulator.IsThreadResident(Candidate.ThreadId))
-                    continue;
-                if (Victim == null || Candidate.LastRunTick < Victim.LastRunTick)
-                    Victim = Candidate;
+                using (MappingLock.EnterScope())
+                {
+                    for (int i = 0; i < ThreadOrder.Count; i++)
+                    {
+                        if (!Threads.TryGetValue((uint)ThreadOrder[i], out EmulatedThread Candidate))
+                            continue;
+                        if (ReferenceEquals(Candidate, Thread) || Candidate.HostWorker != -1 || Candidate.State == EmulatedThreadState.Terminated
+                            || Candidate.Context == null || !_emulator.IsThreadResident(Candidate.ThreadId))
+                            continue;
+                        if (Victim == null || Candidate.LastRunTick < Victim.LastRunTick)
+                            Victim = Candidate;
+                    }
+                }
+
+                if (Victim == null || !TryClaimThread(Victim, out Claim))
+                    return false;
             }
 
-            if (Victim == null)
-                return false;
-
+            using ThreadClaim VictimClaim = Claim;
             _emulator.SelectThread(Victim.ThreadId);
             SaveFloatingPointState(Victim.Context);
             _emulator.UnbindThread(Victim.ThreadId);
@@ -2437,6 +2873,7 @@ namespace Brovan.Core.Emulation
 
         internal void ReleaseThreadProcessor(EmulatedThread Thread)
         {
+            using RankedLock.Scope MappingScope = MappingLock.EnterScope();
             if (!_emulator.IsThreadResident(Thread.ThreadId))
                 return;
             _emulator.UnbindThread(Thread.ThreadId);
@@ -2467,7 +2904,7 @@ namespace Brovan.Core.Emulation
                 return false;
 
             CurrentContextSaved = false;
-            SwitchToThread((int)ThreadId);
+            SwitchToThread(Thread);
             return CurrentThreadId == (int)ThreadId;
         }
 
@@ -2521,17 +2958,20 @@ namespace Brovan.Core.Emulation
             if (!Threads.TryGetValue(ThreadId, out EmulatedThread Thread) || Thread == null || Thread.State == EmulatedThreadState.Terminated)
                 return false;
 
-            if (CurrentThreadId == (int)ThreadId && Thread.Context != null)
+            bool Current = CurrentThreadId == (int)ThreadId;
+            if (Current && Thread.Context != null)
                 SaveContext(Thread);
-            else
-                WaitUntilParked(Thread);
+            using ThreadClaim Claim = Current ? default : WaitUntilParked(Thread);
 
-            UnfileWait(Thread);
-            Thread.ExitCode = ExitCode;
-            Thread.WaitActive = false;
-            Thread.WaitHandles = null;
-            Thread.WaitDeadline = -1;
-            Thread.State = EmulatedThreadState.Terminated;
+            using (SchedulerLock.EnterScope())
+            {
+                UnfileWait(Thread);
+                Thread.ExitCode = ExitCode;
+                Thread.WaitActive = false;
+                Thread.WaitHandles = null;
+                Thread.WaitDeadline = -1;
+                Thread.State = EmulatedThreadState.Terminated;
+            }
             SchedulerRefreshRequested = true;
             return true;
         }
@@ -2550,12 +2990,13 @@ namespace Brovan.Core.Emulation
             if (Thread == null)
                 return;
 
-            PreviousSuspendCount = Thread.SuspendCount;
-            Thread.SuspendCount = PreviousSuspendCount + 1;
-
-            if (Thread.SuspendCount > 0)
+            using (SchedulerLock.EnterScope())
             {
-                if (Thread.State == EmulatedThreadState.Ready || Thread.State == EmulatedThreadState.Running || Thread.State == EmulatedThreadState.Exception)
+                PreviousSuspendCount = Thread.SuspendCount;
+                Thread.SuspendCount = PreviousSuspendCount + 1;
+
+                if (Thread.SuspendCount > 0
+                    && (Thread.State == EmulatedThreadState.Ready || Thread.State == EmulatedThreadState.Running || Thread.State == EmulatedThreadState.Exception))
                     Thread.State = EmulatedThreadState.Suspended;
             }
 
@@ -2578,16 +3019,19 @@ namespace Brovan.Core.Emulation
             if (Thread == null)
                 return;
 
-            PreviousSuspendCount = Thread.SuspendCount;
-
-            if (Thread.SuspendCount > 0)
-                Thread.SuspendCount--;
-
-            if (Thread.SuspendCount == 0 && Thread.State == EmulatedThreadState.Suspended)
+            using (SchedulerLock.EnterScope())
             {
-                UnfileWait(Thread);
-                Thread.State = EmulatedThreadState.Ready;
-                WakeSignal.Bump();
+                PreviousSuspendCount = Thread.SuspendCount;
+
+                if (Thread.SuspendCount > 0)
+                    Thread.SuspendCount--;
+
+                if (Thread.SuspendCount == 0 && Thread.State == EmulatedThreadState.Suspended)
+                {
+                    UnfileWait(Thread);
+                    Thread.State = EmulatedThreadState.Ready;
+                    WakeSignal.Bump();
+                }
             }
         }
 
@@ -2625,6 +3069,7 @@ namespace Brovan.Core.Emulation
 
         private bool IsMlfqRunnableThread(EmulatedThread Thread)
         {
+            SchedulerLock.AssertHeld(nameof(IsMlfqRunnableThread));
             if (Thread == null || Thread.HostWorker != -1)
                 return false;
 
@@ -2644,6 +3089,7 @@ namespace Brovan.Core.Emulation
 
         private void CompleteThreadWait(EmulatedThread Thread)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             if (Debug && Thread != null)
             {
                 if (Debug)
@@ -2651,6 +3097,7 @@ namespace Brovan.Core.Emulation
             }
 
             UnfileWait(Thread);
+            AssertWaitLockHeld(Thread, nameof(IGuestEnvironment.OnThreadWaitSatisfied));
             Guest.OnThreadWaitSatisfied(this, Thread);
 
             Thread.WaitActive = false;
@@ -2659,17 +3106,61 @@ namespace Brovan.Core.Emulation
             Thread.WaitAll = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
+            Thread.WaitClaimed = false;
             Thread.State = EmulatedThreadState.Ready;
+        }
+
+        internal bool TryWakeWaiter(EmulatedThread Thread)
+        {
+            if (Thread.HostWorker != -1 && Thread != CurrentThread)
+            {
+                TryClaimWait(Thread, EmulatedTickCount64);
+                return false;
+            }
+
+            if (!TrySatisfyThreadWait(Thread, EmulatedTickCount64))
+                return false;
+
+            CompleteThreadWait(Thread);
+            return true;
+        }
+
+        // A waker that finds the wait of a thread another worker runs satisfies it, as NT's dispatcher does, and
+        // leaves the completion to that worker, whose SaveContext would overwrite one written into Context now.
+        internal bool TryClaimWait(EmulatedThread Thread, long Now)
+        {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
+            if (Thread == CurrentThread || Thread.WaitClaimed || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
+                return false;
+
+            if (CanSkipWaitCheck(Thread, Now) || !TrySatisfyThreadWait(Thread, Now))
+                return false;
+
+            Thread.WaitClaimed = true;
+            return true;
         }
 
         private bool UpdateMlfqThreadWakeup(EmulatedThread Thread, Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, long Now, long ScanEpoch, ref long EarliestDeadline)
         {
+            SchedulerLock.AssertHeld(nameof(UpdateMlfqThreadWakeup));
             bool Changed = false;
 
-            if (Thread == null || Thread.HostWorker != -1)
+            if (Thread == null)
                 return false;
 
-            if (Thread.State == EmulatedThreadState.Suspended && Thread.SuspendCount == 0)
+            if (Thread.HostWorker != -1)
+            {
+                TryClaimWait(Thread, Now);
+                return false;
+            }
+
+            if (Thread.WaitClaimed && Thread.WaitActive
+                && (Thread.State == EmulatedThreadState.Waiting || (Thread.State == EmulatedThreadState.Suspended && Thread.SuspendCount == 0)))
+            {
+                CompleteThreadWait(Thread);
+                Changed = true;
+            }
+            else if (Thread.State == EmulatedThreadState.Suspended && Thread.SuspendCount == 0)
             {
                 if (Debug)
                     TriggerDebugMessage($"scheduler: resumed suspended tid={Thread.ThreadId}");
@@ -2704,6 +3195,7 @@ namespace Brovan.Core.Emulation
 
         private bool UpdateMlfqWakeups(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             // Read before the timer refresh, so a timer that signals inside this scan counts as later.
             long ScanEpoch = WakeSignal.Current;
             bool Changed = RefreshWindowsTimersAndWakeWaiters();
@@ -2818,6 +3310,7 @@ namespace Brovan.Core.Emulation
 
         internal void AddToWakeScan(EmulatedThread Thread)
         {
+            SchedulerLock.AssertHeld(nameof(AddToWakeScan));
             if (Thread == null || Thread.InWakeScanList)
                 return;
 
@@ -2916,6 +3409,7 @@ namespace Brovan.Core.Emulation
 
         private bool TryGetNextWaitSleepMs(out int SleepMs, int MaxSleepMs = 10)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             SleepMs = 0;
 
             long Now = EmulatedTickCount64;
@@ -2960,6 +3454,9 @@ namespace Brovan.Core.Emulation
 
         private void TrimDeadThreadsFromOrder()
         {
+            AssertKernelLockHeld(nameof(TrimDeadThreadsFromOrder));
+
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             ThreadOrderHasDead = false;
             for (int i = ThreadOrder.Count - 1; i >= 0; i--)
             {
@@ -2975,6 +3472,7 @@ namespace Brovan.Core.Emulation
 
         private void EnqueueMlfqThread(EmulatedThread t, Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             if (t == null)
                 return;
 
@@ -2999,12 +3497,33 @@ namespace Brovan.Core.Emulation
 
         private void EnsureMlfqRunnableThreadsEnqueued(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             for (int i = IndexNewThreads(); i < WakeScanList.Count; i++)
                 EnqueueMlfqThread(WakeScanList[i], ReadyQueues, InQueue, Levels, SchedulerTick);
         }
 
+        // The dequeue, the claim and the change to Running are one section, so no other worker sees the thread
+        // between them.
+        private bool TryDispatchMlfqThread(SchedulerWorker Self, Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, out EmulatedThread Thread, out int SelectedLevel, out EmulatedThreadState StateBefore)
+        {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
+            StateBefore = EmulatedThreadState.Ready;
+            if (!TryDequeueMlfqThread(ReadyQueues, InQueue, Levels, out Thread, out SelectedLevel))
+                return false;
+
+            UnfileWait(Thread);
+            AddToWakeScan(Thread);
+            Thread.HostWorker = Self.Index;
+            Self.DispatchedThread = Thread;
+            DispatchedThreads++;
+            StateBefore = Thread.State;
+            Thread.State = EmulatedThreadState.Running;
+            return true;
+        }
+
         private bool TryDequeueMlfqThread(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, out EmulatedThread Thread, out int SelectedLevel)
         {
+            SchedulerLock.AssertHeld(nameof(TryDequeueMlfqThread));
             Thread = null;
             SelectedLevel = -1;
 
@@ -3073,6 +3592,7 @@ namespace Brovan.Core.Emulation
 
         private bool HasLiveMlfqThread()
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             for (int i = 0; i < ThreadOrder.Count; i++)
             {
                 int Tid = ThreadOrder[i];
@@ -3085,6 +3605,7 @@ namespace Brovan.Core.Emulation
 
         private void RebuildMlfqReadyQueues(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, long AgingThresholdBudget, int AgingBoost)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             for (int i = 0; i < Levels && i < ReadyQueues.Length; i++)
                 ReadyQueues[i]?.Clear();
 
@@ -3195,20 +3716,29 @@ namespace Brovan.Core.Emulation
 
             // Another worker may dispatch the thread before this one switches again, so the context loaded
             // before the run is captured here.
-            EmulatedThread Loaded = CurrentThread;
+            EmulatedThread Loaded;
+            using (SchedulerLock.EnterScope())
+                Loaded = CurrentThread;
             if (Loaded != null && !CurrentContextSaved && Loaded.State != EmulatedThreadState.Terminated)
                 SaveContext(Loaded);
             CurrentContextSaved = true;
 
-            _emulator.UseRunLock(KernelLock);
-
             int WorkerCount = ResolveSmpWorkerCount();
             SmpWorkerCount = WorkerCount;
+            _workersStopped.Reset();
+            _passWithoutBig = Regime == LockRegime.Split;
+            SchedulerWorker[] Workers = new SchedulerWorker[WorkerCount];
+            Workers[0] = _mainWorker;
+            _mainWorker.Quiescence |= 1;
+            for (int i = 1; i < WorkerCount; i++)
+                Workers[i] = new SchedulerWorker(this, i);
+            Volatile.Write(ref _runWorkers, Workers);
+
             Thread[] Helpers = new Thread[WorkerCount];
             Helpers[0] = StartSchedulerThread("BrovanSchedulerSweep", SweepLoop);
             for (int i = 1; i < WorkerCount; i++)
             {
-                SchedulerWorker Extra = new SchedulerWorker(this, i);
+                SchedulerWorker Extra = Workers[i];
                 Helpers[i] = StartSchedulerThread($"BrovanScheduler-{i}",
                     () => RunSchedulerWorker(Extra, ReadyQueues, InQueue, Levels, MaxTotalInstructions, MaxSlices, AgingThresholdSlices, AgingThresholdBudget));
             }
@@ -3221,8 +3751,13 @@ namespace Brovan.Core.Emulation
             {
                 for (int i = 0; i < Helpers.Length; i++)
                     Helpers[i].Join();
+
+                _passWithoutBig = false;
+                _emulator.CompleteDeferredFrees(true);
+                Volatile.Write(ref _runWorkers, Array.Empty<SchedulerWorker>());
                 SmpEnabled = false;
                 ReselectCurrentThread();
+                _workersStopped.Set();
             }
         }
 
@@ -3230,7 +3765,7 @@ namespace Brovan.Core.Emulation
         {
             t_worker = Worker;
             WakeSignal.BeginServing();
-            lock (KernelLock)
+            using (_passWithoutBig ? default : KernelLock.EnterScope())
             {
                 try
                 {
@@ -3243,7 +3778,15 @@ namespace Brovan.Core.Emulation
                 }
                 finally
                 {
-                    ReleaseDispatch(Worker);
+                    using (SchedulerLock.EnterScope())
+                    {
+                        ReleaseDispatch(Worker);
+                        if (Worker.HeldThread != null)
+                        {
+                            ReleaseOwnership(Worker.HeldThread);
+                            Worker.HeldThread = null;
+                        }
+                    }
 
                     // Any worker leaving ends the run for all of them.
                     SignalSchedulerExit();
@@ -3262,6 +3805,9 @@ namespace Brovan.Core.Emulation
 
             while (true)
             {
+                if (DeferredFreeWaitDue(Self))
+                    WaitForDeferredFrees(Self);
+
                 if (SchedulerExiting)
                     return true;
 
@@ -3272,35 +3818,38 @@ namespace Brovan.Core.Emulation
                     return true;
                 }
 
-                long SchedulerTick = ++MlfqSchedulerTick;
+                long SchedulerTick;
+                using (SchedulerLock.EnterScope())
+                    SchedulerTick = ++MlfqSchedulerTick;
                 long PassEpoch = WakeSignal.Current;
                 long PassHostEpoch = WakeSignal.HostCurrent;
 
                 if ((SchedulerTick & 0x7) == 0)
                     _emulator.ResolveCodeCache();
 
-                bool HostWorkFinished = Guest.PollHostWork(this);
-
-                if (Volatile.Read(ref TerminationRequested) != 0 && Interlocked.Exchange(ref TerminationRequested, 0) != 0)
+                long Mark;
+                bool HostWorkFinished;
+                using (EnterKernelLockScope())
                 {
-                    if (WinHelper != null)
-                        OS.Windows.NtTerminateJobObject.CloseJobsOfExitingProcess(this);
+                    Mark = HoldMark();
+                    AssertKernelLockHeld(nameof(IGuestEnvironment.PollHostWork));
+                    HostWorkFinished = Guest.PollHostWork(this);
+                    NoteHold(HoldSite.PollHostWork, Mark);
 
-                    WinHelper?.HideDesktopWindow();
-                    StopEmulation();
+                    if (Volatile.Read(ref TerminationRequested) != 0 && Interlocked.Exchange(ref TerminationRequested, 0) != 0)
+                    {
+                        AssertKernelLockHeld(nameof(IGuestEnvironment.OnTerminationRequested));
+                        Guest.OnTerminationRequested(this);
+                        StopEmulation();
+                    }
                 }
 
-                bool ThreadOrderChanged = ThreadOrder.Count != KnownThreadOrderCount;
+                // The rebuild and the wake scan reach guest code, so they take KernelLock; the checks before them do not.
                 bool AgingDue = AgingThresholdSlices > 0 && SchedulerTick % AgingThresholdSlices == 0;
-                if (AgingDue)
+                bool ScanDue;
+                using (SchedulerLock.EnterScope())
                 {
-                    RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
-                    KnownThreadOrderCount = ThreadOrder.Count;
-                    Self.WakeupScanRequired = false;
-                }
-                else
-                {
-                    if (ThreadOrderChanged)
+                    if (!AgingDue && ThreadOrder.Count != KnownThreadOrderCount)
                     {
                         if (Debug)
                             TriggerDebugMessage($"scheduler: thread list changed old={KnownThreadOrderCount} new={ThreadOrder.Count}");
@@ -3308,100 +3857,134 @@ namespace Brovan.Core.Emulation
                         KnownThreadOrderCount = ThreadOrder.Count;
                     }
 
-                    if (Self.WakeupScanRequired || SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch || HostWorkFinished)
-                    {
-                        if (Debug)
-                            TriggerDebugMessage($"scheduler: wakeup scan required={Self.WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
+                    ScanDue = !AgingDue && (Self.WakeupScanRequired || SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch || HostWorkFinished);
+                }
 
+                if (AgingDue || ScanDue)
+                {
+                    using (EnterKernelLockScope())
+                    using (SchedulerLock.EnterScope())
+                    {
+                        if (AgingDue)
+                        {
+                            RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
+                            KnownThreadOrderCount = ThreadOrder.Count;
+                            Self.WakeupScanRequired = false;
+                        }
+                        else
+                        {
+                            if (Debug)
+                                TriggerDebugMessage($"scheduler: wakeup scan required={Self.WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
+
+                            Mark = HoldMark();
+                            UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
+                            NoteHold(HoldSite.WakeScan, Mark);
+                            KnownThreadOrderCount = ThreadOrder.Count;
+                            SchedulerRefreshRequested = false;
+                            Self.WakeupScanRequired = false;
+                        }
+                    }
+                }
+
+                if (!TryDispatchMlfqThread(Self, ReadyQueues, InQueue, Levels, out EmulatedThread ImmaBeEmulatedOOO, out int SelectedLevel, out EmulatedThreadState StateBeforeSlice))
+                {
+                    using (EnterKernelLockScope())
+                    using (SchedulerLock.EnterScope())
+                    {
+                        Mark = HoldMark();
                         UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
+                        NoteHold(HoldSite.WakeScan, Mark);
                         KnownThreadOrderCount = ThreadOrder.Count;
                         SchedulerRefreshRequested = false;
                         Self.WakeupScanRequired = false;
                     }
-                }
 
-                if (!TryDequeueMlfqThread(ReadyQueues, InQueue, Levels, out EmulatedThread ImmaBeEmulatedOOO, out int SelectedLevel))
-                {
-                    UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
-                    KnownThreadOrderCount = ThreadOrder.Count;
-                    SchedulerRefreshRequested = false;
-                    Self.WakeupScanRequired = false;
-
-                    if (!TryDequeueMlfqThread(ReadyQueues, InQueue, Levels, out ImmaBeEmulatedOOO, out SelectedLevel))
+                    if (!TryDispatchMlfqThread(Self, ReadyQueues, InQueue, Levels, out ImmaBeEmulatedOOO, out SelectedLevel, out StateBeforeSlice))
                     {
-                        if (ThreadOrderHasDead)
-                            TrimDeadThreadsFromOrder();
-                        KnownThreadOrderCount = ThreadOrder.Count;
-
-                        // A process created suspended has no runnable thread by design, and it still has to serve
-                        // session requests until its creator resumes it.
-                        if (StartSuspendedApplied && !StartSuspendedReleased)
+                        // The checks that end the run are one section under both locks, so no hand-back, host completion
+                        // or handler on another worker falls between them.
+                        int WaitMs = -1;
+                        bool RefreshClock = false;
+                        using (EnterKernelLockScope())
+                        using (SchedulerLock.EnterScope())
                         {
-                            IdleWait(IdleWaitSliceMs, PassEpoch, PassHostEpoch);
-                            Self.WakeupScanRequired = true;
-                            continue;
+                            if (ThreadOrderHasDead)
+                                TrimDeadThreadsFromOrder();
+                            KnownThreadOrderCount = ThreadOrder.Count;
+
+                            // A process created suspended has no runnable thread by design, and it still has to serve
+                            // session requests until its creator resumes it. A slice on another worker can still make
+                            // threads runnable, and a thread made ready since the dispatch runs on the next pass.
+                            if ((StartSuspendedApplied && !StartSuspendedReleased) || DispatchedThreads != 0 || InQueue.Count != 0)
+                                WaitMs = InQueue.Count != 0 ? 0 : IdleWaitSliceMs;
+                            else if (!HasLiveMlfqThread())
+                            {
+                                if (Debug)
+                                    TriggerDebugMessage($"scheduler: finished no live threads total={_schedulerTotal} slices={_schedulerSlices}");
+                            }
+                            else if (TryGetNextWaitSleepMs(out int SleepMs, int.MaxValue))
+                            {
+                                if (Debug)
+                                    TriggerDebugMessage($"scheduler: no runnable thread, waiting up to {SleepMs}ms");
+                                WaitMs = Math.Min(SleepMs, IdleWaitSliceMs);
+                                RefreshClock = true;
+                            }
+                            else
+                            {
+                                AssertKernelLockHeld(nameof(IGuestEnvironment.AwaitsHostWork));
+                                if (Guest.AwaitsHostWork(this))
+                                {
+                                    WaitMs = IdleWaitSliceMs;
+                                    RefreshClock = true;
+                                }
+                                else if (Debug)
+                                    TriggerDebugMessage($"scheduler: no runnable thread and no pending wakeup total={_schedulerTotal} slices={_schedulerSlices}");
+                            }
                         }
 
-                        // A slice on another worker can still make threads runnable.
-                        if (DispatchedThreads != 0)
-                        {
-                            IdleWait(IdleWaitSliceMs, PassEpoch, PassHostEpoch);
-                            Self.WakeupScanRequired = true;
-                            continue;
-                        }
-
-                        if (!HasLiveMlfqThread())
-                        {
-                            if (Debug)
-                                TriggerDebugMessage($"scheduler: finished no live threads total={_schedulerTotal} slices={_schedulerSlices}");
+                        if (WaitMs < 0)
                             return true;
-                        }
 
-                        if (TryGetNextWaitSleepMs(out int SleepMs, int.MaxValue))
-                        {
-                            if (Debug)
-                                TriggerDebugMessage($"scheduler: no runnable thread, waiting up to {SleepMs}ms");
-                            IdleWait(Math.Min(SleepMs, IdleWaitSliceMs), PassEpoch, PassHostEpoch);
-                            WinHelper?.KuserSharedData?.RefreshIfUnhooked();
-                            Self.WakeupScanRequired = true;
-                            continue;
-                        }
-
-                        if (Guest.AwaitsHostWork(this))
-                        {
-                            IdleWait(IdleWaitSliceMs, PassEpoch, PassHostEpoch);
-                            WinHelper?.KuserSharedData?.RefreshIfUnhooked();
-                            Self.WakeupScanRequired = true;
-                            continue;
-                        }
-
-                        if (Debug)
-                            TriggerDebugMessage($"scheduler: no runnable thread and no pending wakeup total={_schedulerTotal} slices={_schedulerSlices}");
-                        return true;
+                        if (WaitMs > 0)
+                            IdleWait(WaitMs, PassEpoch, PassHostEpoch);
+                        if (RefreshClock)
+                            Guest.RefreshGuestClock(this);
+                        Self.WakeupScanRequired = true;
+                        continue;
                     }
                 }
 
-                // Without a processor of its own the thread waits for one rather than sharing processor 0.
+                Mark = HoldMark();
+
+                // Without a processor of its own the thread waits for one rather than sharing processor 0. While this
+                // worker owns the thread nothing else binds or evicts it, so its residency is read once per dispatch.
                 bool BoundThisSwitch = false;
-                if (SmpEnabled && !_emulator.IsThreadResident(ImmaBeEmulatedOOO.ThreadId))
+                bool? ResidentAtDispatch = null;
+                if (SmpEnabled)
+                    ResidentAtDispatch = _emulator.IsThreadResident(ImmaBeEmulatedOOO.ThreadId);
+                if (ResidentAtDispatch == false)
                 {
                     if (!BindThreadProcessor(ImmaBeEmulatedOOO))
                     {
-                        EnqueueMlfqThread(ImmaBeEmulatedOOO, ReadyQueues, InQueue, Levels, SchedulerTick);
+                        using (SchedulerLock.EnterScope())
+                        {
+                            if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Running)
+                                ImmaBeEmulatedOOO.State = StateBeforeSlice;
+                            ReleaseDispatch(Self);
+                            EnqueueMlfqThread(ImmaBeEmulatedOOO, ReadyQueues, InQueue, Levels, SchedulerTick);
+                        }
                         IdleWait(IdleWaitSliceMs, PassEpoch, PassHostEpoch);
+
+                        // Every processor may have been busy with a dispatched thread only for the moment of the bind,
+                        // so the next attempt looks for a victim again.
+                        using (MappingLock.EnterScope())
+                            _threadProcessorsExhausted = false;
                         Self.WakeupScanRequired = true;
                         continue;
                     }
 
                     BoundThisSwitch = true;
                 }
-
-                UnfileWait(ImmaBeEmulatedOOO);
-                AddToWakeScan(ImmaBeEmulatedOOO);
-
-                ImmaBeEmulatedOOO.HostWorker = Self.Index;
-                Self.DispatchedThread = ImmaBeEmulatedOOO;
-                DispatchedThreads++;
 
                 if (CurrentThreadId != (int)ImmaBeEmulatedOOO.ThreadId)
                 {
@@ -3411,11 +3994,9 @@ namespace Brovan.Core.Emulation
                         TriggerDebugMessage($"scheduler: switch {CurrentThreadId} -> {ImmaBeEmulatedOOO.ThreadId} queue={SelectedLevel} state={ImmaBeEmulatedOOO.State} rip=0x{ImmaBeEmulatedOOO.Context?.RIP ?? 0:X}");
                 }
 
-                SwitchToThread((int)ImmaBeEmulatedOOO.ThreadId, BoundThisSwitch);
+                SwitchToThread(ImmaBeEmulatedOOO, BoundThisSwitch, ResidentAtDispatch);
 
-                EmulatedThreadState StateBeforeSlice = ImmaBeEmulatedOOO.State;
                 ulong RipBeforeSlice = ImmaBeEmulatedOOO.Context?.RIP ?? 0;
-                ImmaBeEmulatedOOO.State = EmulatedThreadState.Running;
 
                 uint QuantumInstructions = MlfqQuanta[Math.Max(0, SelectedLevel)];
 
@@ -3428,6 +4009,8 @@ namespace Brovan.Core.Emulation
 
                 SchedulerRefreshRequested = false;
                 long SliceStart = _wallClock.ElapsedTicks;
+                NoteHold(HoldSite.Dispatch, Mark);
+                Mark = HoldMark();
                 try
                 {
                     Guest.ExecuteThreadSlice(this, ImmaBeEmulatedOOO, QuantumInstructions, out State);
@@ -3451,13 +4034,107 @@ namespace Brovan.Core.Emulation
                     SchedulerRefreshRequested = false;
                 }
 
+                NoteHold(HoldSite.Slice, Mark);
+                Mark = HoldMark();
                 ImmaBeEmulatedOOO.RunTicks += _wallClock.ElapsedTicks - SliceStart;
-                SaveContext(ImmaBeEmulatedOOO);
+                if (SmpEnabled)
+                    SaveContext(ImmaBeEmulatedOOO, true);
+                else
+                    SaveContext(ImmaBeEmulatedOOO);
                 CurrentContextSaved = true;
 
-                ReleaseDispatch(Self);
+                // One section hands the thread back, so no other worker sees it released before its state after the
+                // slice. A thread that ended keeps its claim until its termination is done.
+                bool Escape;
+                bool NullCall = false;
+                bool Ended = false;
+                bool TimedWaitRescanDue = false;
+                bool OrderChanged = false;
+                bool TotalBudgetReached = false;
+                bool SliceBudgetReached = false;
+                uint SchedulerSliceWork = 1;
 
-                if (EscapeScheduler)
+                // A wait the slice started is checked in the section and can reach guest code. Suspend and resume write the
+                // state of a dispatched thread, but only the thread's own park entries set WaitActive.
+                using (WaitNeedsKernelLock(ImmaBeEmulatedOOO) ? EnterKernelLockScope() : default)
+                using (SchedulerLock.EnterScope())
+                {
+                    Escape = EscapeScheduler;
+                    if (Escape)
+                        ReleaseDispatch(Self);
+                    else
+                    {
+                        if (State && ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
+                        {
+                            bool StoppedBeforeQuantum = ImmaBeEmulatedOOO.State != EmulatedThreadState.Running || ImmaBeEmulatedOOO.Context == null || ImmaBeEmulatedOOO.Context.RIP == 0;
+
+                            if (!StoppedBeforeQuantum)
+                                SchedulerSliceWork = Math.Max(1U, QuantumInstructions);
+                        }
+
+                        ImmaBeEmulatedOOO.InstructionsExecuted += SchedulerSliceWork;
+                        _schedulerTotal += SchedulerSliceWork;
+
+                        if (SchedulerSliceWork > 1)
+                        {
+                            _schedulerPendingInstructions += SchedulerSliceWork;
+                            if (_schedulerPendingInstructions >= SchedulerRescanInstructions)
+                            {
+                                _schedulerPendingInstructions = 0;
+                                TimedWaitRescanDue = true;
+                            }
+                        }
+
+                        // A guest whose threads all block early never accumulates instructions, so the fallback sweep is
+                        // bounded by wall time. The slice count is a second bound that does not depend on the clock.
+                        SlicesSinceFullWakeupScan++;
+                        if (!TimedWaitRescanDue)
+                        {
+                            long NowTick = EmulatedTickCount64;
+                            if (SlicesSinceFullWakeupScan >= FullWakeupScanSliceLimit
+                                || (NowTick - LastFullWakeupScanTick >= FullWakeupScanIntervalMs && NowTick >= EarliestWaitDeadline))
+                                TimedWaitRescanDue = true;
+                        }
+
+                        _schedulerSlices++;
+                        ImmaBeEmulatedOOO.LastRunTick = SchedulerTick;
+
+                        if (ImmaBeEmulatedOOO.Context?.RIP == 0 && ImmaBeEmulatedOOO.State != EmulatedThreadState.Exception)
+                        {
+                            if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
+                            {
+                                ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context!.RAX);
+                                NullCall = WinHelper != null;
+                            }
+
+                            ImmaBeEmulatedOOO.State = EmulatedThreadState.Terminated;
+                        }
+                        else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Running)
+                        {
+                            ImmaBeEmulatedOOO.State = EmulatedThreadState.Ready;
+                        }
+
+                        if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting)
+                            ImmaBeEmulatedOOO.DynamicBoost = ClampInt(ImmaBeEmulatedOOO.DynamicBoost + 2, -16, 16);
+                        else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Exception)
+                            ImmaBeEmulatedOOO.DynamicBoost = ClampInt(ImmaBeEmulatedOOO.DynamicBoost - 1, -16, 16);
+                        else if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
+                            ImmaBeEmulatedOOO.DynamicBoost = ClampInt(ImmaBeEmulatedOOO.DynamicBoost - 1, -16, 16);
+
+                        Ended = ImmaBeEmulatedOOO.State == EmulatedThreadState.Terminated;
+                        if (!Ended)
+                        {
+                            ReleaseDispatch(Self);
+                            CheckOwnWaitAndEnqueue(ImmaBeEmulatedOOO, ReadyQueues, InQueue, Levels, SchedulerTick);
+                        }
+
+                        OrderChanged = ThreadOrder.Count != KnownThreadOrderCount;
+                        TotalBudgetReached = MaxTotalInstructions != 0 && _schedulerTotal >= MaxTotalInstructions;
+                        SliceBudgetReached = MaxSlices != 0 && _schedulerSlices >= MaxSlices;
+                    }
+                }
+
+                if (Escape)
                 {
                     if (Debug)
                         TriggerDebugMessage($"scheduler: escape requested after slice tid={ImmaBeEmulatedOOO.ThreadId}");
@@ -3466,99 +4143,36 @@ namespace Brovan.Core.Emulation
                     return true;
                 }
 
-                uint SchedulerSliceWork = 1;
+                Guest.RefreshGuestClock(this);
 
-                if (State && ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
+                if (NullCall || Ended)
                 {
-                    bool StoppedBeforeQuantum = ImmaBeEmulatedOOO.State != EmulatedThreadState.Running || ImmaBeEmulatedOOO.Context == null || ImmaBeEmulatedOOO.Context.RIP == 0;
-
-                    if (!StoppedBeforeQuantum)
-                        SchedulerSliceWork = Math.Max(1U, QuantumInstructions);
-                }
-
-                ImmaBeEmulatedOOO.InstructionsExecuted += SchedulerSliceWork;
-                _schedulerTotal += SchedulerSliceWork;
-
-                bool TimedWaitRescanDue = false;
-                if (SchedulerSliceWork > 1)
-                {
-                    _schedulerPendingInstructions += SchedulerSliceWork;
-                    if (_schedulerPendingInstructions >= SchedulerRescanInstructions)
+                    using RankedLock.Scope TailScope = EnterKernelLockScope();
+                    if (NullCall)
                     {
-                        _schedulerPendingInstructions = 0;
-                        TimedWaitRescanDue = true;
+                        TriggerEventMessage($"[-] Thread {ImmaBeEmulatedOOO.ThreadId} jumped to a NULL address from 0x{RipBeforeSlice:X}.", LogFlags.Issues);
+                        TraceCallStack("[-] NULL call");
+                    }
+
+                    if (Ended)
+                    {
+                        AssertKernelLockHeld(nameof(IGuestEnvironment.OnThreadTerminated));
+                        Guest.OnThreadTerminated(this, ImmaBeEmulatedOOO);
+                        ReleaseThreadProcessor(ImmaBeEmulatedOOO);
+                        // A thread that ended its own slice stays in the table until the slice is fully over.
+                        if (ImmaBeEmulatedOOO.Unreferenced)
+                            ForgetThread(ImmaBeEmulatedOOO.ThreadId);
+                        TrimDeadThreadsFromOrder();
+                        KnownThreadOrderCount = ThreadOrder.Count;
+                        OrderChanged = false;
+
+                        using (SchedulerLock.EnterScope())
+                            ReleaseDispatch(Self);
                     }
                 }
 
-                // A guest whose threads all block early never accumulates instructions, so the fallback sweep is
-                // bounded by wall time. The slice count is a second bound that does not depend on the clock.
-                SlicesSinceFullWakeupScan++;
-                if (!TimedWaitRescanDue)
-                {
-                    long NowTick = EmulatedTickCount64;
-                    if (SlicesSinceFullWakeupScan >= FullWakeupScanSliceLimit
-                        || (NowTick - LastFullWakeupScanTick >= FullWakeupScanIntervalMs && NowTick >= EarliestWaitDeadline))
-                        TimedWaitRescanDue = true;
-                }
-
-                _schedulerSlices++;
-                WinHelper?.KuserSharedData?.RefreshIfUnhooked();
-                ImmaBeEmulatedOOO.LastRunTick = SchedulerTick;
-
-                if (ImmaBeEmulatedOOO.Context?.RIP == 0 && ImmaBeEmulatedOOO.State != EmulatedThreadState.Exception)
-                {
-                    if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
-                    {
-                        ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context!.RAX);
-
-                        if (WinHelper != null)
-                        {
-                            TriggerEventMessage($"[-] Thread {ImmaBeEmulatedOOO.ThreadId} jumped to a NULL address from 0x{RipBeforeSlice:X}.", LogFlags.Issues);
-                            TraceCallStack("[-] NULL call");
-                        }
-                    }
-
-                    ImmaBeEmulatedOOO.State = EmulatedThreadState.Terminated;
-                }
-                else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Running)
-                {
-                    ImmaBeEmulatedOOO.State = EmulatedThreadState.Ready;
-                }
-
-                if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting)
-                    ImmaBeEmulatedOOO.DynamicBoost = ClampInt(ImmaBeEmulatedOOO.DynamicBoost + 2, -16, 16);
-                else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Exception)
-                    ImmaBeEmulatedOOO.DynamicBoost = ClampInt(ImmaBeEmulatedOOO.DynamicBoost - 1, -16, 16);
-                else if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
-                    ImmaBeEmulatedOOO.DynamicBoost = ClampInt(ImmaBeEmulatedOOO.DynamicBoost - 1, -16, 16);
-
-                // Scans skipped the thread while it was dispatched, so its own wait is checked here.
-                if (SmpEnabled && ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting && ImmaBeEmulatedOOO.WaitActive)
-                {
-                    long EarliestDeadline = EarliestWaitDeadline;
-                    UpdateMlfqThreadWakeup(ImmaBeEmulatedOOO, ReadyQueues, InQueue, Levels, SchedulerTick, EmulatedTickCount64, WakeSignal.Current, ref EarliestDeadline);
-                    EarliestWaitDeadline = EarliestDeadline;
-                }
-
-                if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Ready || ImmaBeEmulatedOOO.State == EmulatedThreadState.Exception)
-                    EnqueueMlfqThread(ImmaBeEmulatedOOO, ReadyQueues, InQueue, Levels, SchedulerTick);
-                else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Terminated)
-                {
-                    // The thread is off its worker now, so a release the terminating side skipped runs here.
-                    Guest.OnThreadTerminated(this, ImmaBeEmulatedOOO);
-                    ReleaseThreadProcessor(ImmaBeEmulatedOOO);
-                    // A thread that ended its own slice stays in the table until the slice is fully over.
-                    if (ImmaBeEmulatedOOO.Unreferenced)
-                        Threads.Remove(ImmaBeEmulatedOOO.ThreadId);
-                    TrimDeadThreadsFromOrder();
-                    KnownThreadOrderCount = ThreadOrder.Count;
-                }
-
-                if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Waiting && ImmaBeEmulatedOOO.WaitActive
-                    && ImmaBeEmulatedOOO.WaitDeadline != -1 && ImmaBeEmulatedOOO.WaitDeadline < EarliestWaitDeadline)
-                    EarliestWaitDeadline = ImmaBeEmulatedOOO.WaitDeadline;
-
-                Self.WakeupScanRequired = SliceRequestedRefresh || TimedWaitRescanDue || ThreadOrder.Count != KnownThreadOrderCount;
+                Self.WakeupScanRequired = SliceRequestedRefresh || TimedWaitRescanDue || OrderChanged;
+                NoteHold(HoldSite.SliceEnd, Mark);
 
                 if (Debug && (_schedulerSlices <= 64 || (_schedulerSlices & 0xFF) == 0 || ImmaBeEmulatedOOO.State != StateBeforeSlice || SliceRequestedRefresh || TimedWaitRescanDue))
                 {
@@ -3573,13 +4187,13 @@ namespace Brovan.Core.Emulation
                     Self.CurrentThreadCache = null;
                 }
 
-                if (MaxTotalInstructions != 0 && _schedulerTotal >= MaxTotalInstructions)
+                if (TotalBudgetReached)
                 {
                     if (Debug)
                         TriggerDebugMessage($"scheduler: max instruction budget reached total={_schedulerTotal} slices={_schedulerSlices}");
                     return true;
                 }
-                if (MaxSlices != 0 && _schedulerSlices >= MaxSlices)
+                if (SliceBudgetReached)
                 {
                     if (Debug)
                         TriggerDebugMessage($"scheduler: max slice budget reached total={_schedulerTotal} slices={_schedulerSlices}");
@@ -3604,6 +4218,7 @@ namespace Brovan.Core.Emulation
 
         private bool InvalidMemoryHandler(BackendMemoryAccessType Type, ulong Address, uint Size, ulong value)
         {
+            using RankedLock.Scope KernelScope = EnterKernelLockScope();
             if (Type == BackendMemoryAccessType.FetchUnmapped && Address == 0 && Guest.EndsThreadOnNullFetch((uint)CurrentThreadId))
                 return false;
 
@@ -3696,14 +4311,21 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        private void SyscallInstructionHandler()
+        private void SyscallInstructionHandler() => RunGuestSyscall(NoSyscallGate);
+
+        private const uint NoSyscallGate = uint.MaxValue;
+
+        // A guest without a gate vector, such as Linux with int 0x80, serves its call as an interrupt.
+        private bool RunGuestSyscall(uint GateVector)
         {
             if (Debug)
-                TriggerDebugMessage($"cpu: syscall instruction at 0x{ReadRegister(IPRegister):X}");
+                TriggerDebugMessage($"cpu: syscall at 0x{ReadRegister(IPRegister):X}");
             long EpochBeforeCallback = WakeSignal.Current;
+            long Mark = HoldMark();
+            bool Handled = true;
             try
             {
-                Guest.TryHandleSyscall(this);
+                Handled = GateVector == NoSyscallGate ? Guest.TryHandleSyscall(this) : Guest.TryHandleSyscallGate(this, GateVector);
             }
             catch (Exception ex)
             {
@@ -3713,7 +4335,16 @@ namespace Brovan.Core.Emulation
                 Utils.LogError($"[GuestSyscall] Error: {ex.Message}");
             }
 
-            ScanWakeupsAfterCallback(EpochBeforeCallback);
+            NoteHold(HoldSite.GuestCallback, Mark);
+            if (WakeSignal.Current != EpochBeforeCallback)
+            {
+                using RankedLock.Scope KernelScope = EnterKernelLockScope();
+                ScanWakeupsAfterCallback(EpochBeforeCallback);
+            }
+
+            if (OwnWorker is SchedulerWorker Own && Own.DeferredFreeWaitDue)
+                WaitForDeferredFrees(Own);
+            return Handled;
         }
 
         public void Start()
@@ -3724,6 +4355,8 @@ namespace Brovan.Core.Emulation
             // "exit" command calls Environment.Exit.
             _emulator.PersistCodeCache();
             ReportGuestKernelStats();
+            foreach (RankedLock Lock in _rankedLocks)
+                Lock.Report();
         }
 
         public ulong AlignToPageSize(ulong Size)
@@ -3886,9 +4519,10 @@ namespace Brovan.Core.Emulation
             SchedulerRefreshRequested = true;
             if (Debug)
                 TriggerDebugMessage($"emu: stop requested threads={Threads.Count}");
-            foreach (EmulatedThread EmuThread in Threads.Values)
+            using (SchedulerLock.EnterScope())
             {
-                EmuThread.State = EmulatedThreadState.Terminated;
+                foreach (EmulatedThread EmuThread in Threads.Values)
+                    EmuThread.State = EmulatedThreadState.Terminated;
             }
             _emulator.StopAllProcessors();
             return _emulator.StopEmulation();
@@ -4068,13 +4702,31 @@ namespace Brovan.Core.Emulation
                 if (_emulator != null)
                 {
                     _emulator.StopEmulation();
-                    Guest?.Shutdown(this);
-                    _emulator.PersistCodeCache();
-                    _emulator.Dispose();
+                    bool WorkersStopped = true;
+                    if (!_workersStopped.IsSet && OwnWorker == null)
+                    {
+                        SignalSchedulerExit();
+                        WorkersStopped = _workersStopped.Wait(5000);
+                    }
+
+                    // A worker that never stopped may still run a slice, so the backend stays.
+                    if (WorkersStopped)
+                    {
+                        Guest?.Shutdown(this);
+                        _emulator.PersistCodeCache();
+                        _emulator.Dispose();
+                    }
+                    else
+                        Utils.LogError("[Scheduler] The workers did not stop before dispose, so the backend is kept.");
                 }
 
                 // Release retained driver pointers only after all processors stop.
                 WinHelper?.ReleaseHostResources();
+                KernelLock.Dispose();
+                SchedulerLock?.Dispose();
+                _workersStopped.Dispose();
+                _deferredFreesPassed.Dispose();
+                MappingLock?.Dispose();
 
                 _memory.Clear();
                 _freedmemory.Clear();

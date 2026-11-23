@@ -287,7 +287,7 @@ namespace Brovan.Android
 
             // The walk runs on the UI thread, so it reads the context saved at the stop and never waits for the lock.
             BinaryEmulator emulator = Variables.Emulator;
-            if (emulator == null || !Stopped || !Monitor.TryEnter(emulator.KernelLock))
+            if (emulator == null || !Stopped || !emulator.KernelLock.TryEnter())
                 return;
 
             try
@@ -308,7 +308,7 @@ namespace Brovan.Android
             }
             finally
             {
-                Monitor.Exit(emulator.KernelLock);
+                emulator.KernelLock.Exit();
             }
         }
 

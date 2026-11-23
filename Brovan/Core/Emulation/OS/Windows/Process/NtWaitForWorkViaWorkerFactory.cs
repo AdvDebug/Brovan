@@ -140,27 +140,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Factory.Timeout != 0 && Deadline == Instance.EmulatedTickCount64)
                 return NTSTATUS.STATUS_TIMEOUT;
 
-            Thread.WaitActive = true;
-            Thread.WaitOnSingleHandle(WorkerFactoryHandle);
-            Thread.WaitAll = true;
-            Thread.WaitDeadline = Deadline;
-            State.WaitCompleted = false;
-            State.WaitStatus = NTSTATUS.STATUS_PENDING;
-            State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip();
-            State.WaitReturnRIP = State.WaitResumeRIP + 2;
-            State.WaitAlertable = false;
             State.WorkerFactoryReservedEntries?.Clear();
             State.WorkerFactoryWaitActive = true;
             State.WorkerFactoryHandle = WorkerFactoryHandle;
             State.WorkerFactoryMiniPackets = MiniPackets;
             State.WorkerFactoryPacketsReturned = PacketsReturnedPtr;
             State.WorkerFactoryMaxPackets = Count;
-
-            Thread.State = EmulatedThreadState.Waiting;
-            State.ApcAlertable = false;
-            Instance._emulator.WriteRegister(Instance.IPRegister, State.WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_PENDING;
+            Thread.WaitOnSingleHandle(WorkerFactoryHandle);
+            return Instance.WinHelper.ParkUntil(Thread, Deadline, false, Thread.WaitHandles, WaitAll: true);
         }
     }
 }

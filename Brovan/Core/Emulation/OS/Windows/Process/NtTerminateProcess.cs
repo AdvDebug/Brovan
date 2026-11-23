@@ -79,17 +79,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Self && SpareCaller)
                     continue;
 
-                if (!Self)
-                    Instance.WaitUntilParked(Thread);
-
-                Instance.WinHelper.AbandonMutexesOwnedByThread(Thread.ThreadId);
-                Thread.ExitCode = (int)ExitCode;
-                Instance.WinHelper.ClearTerminationState(Thread);
-                Thread.State = EmulatedThreadState.Terminated;
+                using BinaryEmulator.ThreadClaim Claim = Self ? default : Instance.WaitUntilParked(Thread);
 
                 // Without a spared caller the process ends, and emulator dispose releases its threads.
-                if (SpareCaller)
-                    Instance.WinHelper.ReleaseThreadResources(Thread);
+                NtTerminateThread.End(Instance, Thread, ExitCode, ReleaseResources: SpareCaller);
             }
 
             Instance.WakeSignal.Bump();

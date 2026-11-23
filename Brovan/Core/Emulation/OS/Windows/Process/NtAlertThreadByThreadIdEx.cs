@@ -6,6 +6,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtAlertThreadByThreadIdEx : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Scheduler;
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 

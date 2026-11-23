@@ -33,18 +33,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            using RankedLock.Scope SchedulerScope = Instance.SchedulerLock.EnterScope();
             State.PendingUserApcs.Add(Apc);
 
             // A queued APC makes the target runnable through HasPendingGuestWork even when it stays Waiting.
             Instance.WakeSignal.Bump();
 
             bool SpecialApc = Apc.IsSpecial;
-            bool AlertableWait = Thread.WaitActive && State.WaitAlertable;
+            // A claimed wait is satisfied already. Its own status returns, and the APC waits for its worker's completion.
+            bool AlertableWait = Thread.WaitActive && State.WaitAlertable && !Thread.WaitClaimed;
 
             if (AlertableWait)
                 State.ApcAlertable = true;
 
-            if ((SpecialApc || AlertableWait) && Thread.State == EmulatedThreadState.Waiting)
+            if ((SpecialApc || AlertableWait) && Thread.State == EmulatedThreadState.Waiting && !Thread.WaitClaimed)
             {
                 Instance.UnfileWait(Thread);
                 Thread.State = EmulatedThreadState.Ready;

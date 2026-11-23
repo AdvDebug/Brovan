@@ -79,11 +79,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Thread.WaitDeadline = Win32kHelper.GetMsgWaitDeadline(Instance, Thread.ThreadId, WakeMask, State.MsgWaitTimeout);
 
-            Thread.State = EmulatedThreadState.Waiting;
-            WinEmulatedThread.GetState(Thread).ApcAlertable = WinEmulatedThread.GetState(Thread).WaitAlertable;
-            Instance._emulator.WriteRegister(Instance.IPRegister, WinEmulatedThread.GetState(Thread).WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ContinueParked(Thread);
         }
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -146,25 +142,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Deadline == Instance.EmulatedTickCount64)
                 return NTSTATUS.STATUS_TIMEOUT;
 
-            Thread.WaitActive = true;
-            Thread.WaitHandles = Handles;
-            Thread.WaitAll = WaitAll;
-            Thread.WaitDeadline = Win32kHelper.GetMsgWaitDeadline(Instance, Thread.ThreadId, WakeMask, Deadline);
+            long WaitDeadline = Win32kHelper.GetMsgWaitDeadline(Instance, Thread.ThreadId, WakeMask, Deadline);
             State.MsgWaitActive = true;
             State.MsgWaitMask = WakeMask;
             State.MsgWaitTimeout = Deadline;
-            State.WaitCompleted = false;
-            State.WaitStatus = NTSTATUS.STATUS_PENDING;
-            State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip();
-            State.WaitReturnRIP = State.WaitResumeRIP + 2;
-            State.WaitAlertable = Alertable;
-
-            Thread.State = EmulatedThreadState.Waiting;
-            State.ApcAlertable = Alertable;
-            Instance._emulator.WriteRegister(Instance.IPRegister, State.WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ParkUntil(Thread, WaitDeadline, Alertable, Handles, WaitAll);
         }
     }
 }

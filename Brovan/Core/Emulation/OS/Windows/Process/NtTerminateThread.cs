@@ -27,8 +27,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_CANT_TERMINATE_SELF;
 
             bool TerminatingSelf = Instance.CurrentThread != null && TargetThread.ThreadId == (uint)Instance.CurrentThreadId;
-            if (!TerminatingSelf)
-                Instance.WaitUntilParked(TargetThread);
+            using BinaryEmulator.ThreadClaim Claim = TerminatingSelf ? default : Instance.WaitUntilParked(TargetThread);
 
             End(Instance, TargetThread, (uint)ExitStatus);
 
@@ -49,18 +48,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread.State == EmulatedThreadState.Terminated)
                 return;
 
-            Instance.WaitUntilParked(Thread);
+            using BinaryEmulator.ThreadClaim Claim = Instance.WaitUntilParked(Thread);
             End(Instance, Thread, ExitStatus);
         }
 
-        private static void End(BinaryEmulator Instance, EmulatedThread Thread, uint ExitStatus)
+        internal static void End(BinaryEmulator Instance, EmulatedThread Thread, uint ExitStatus, bool ReleaseResources = true)
         {
             Instance.WinHelper.AbandonMutexesOwnedByThread(Thread.ThreadId);
 
             Thread.ExitCode = unchecked((int)ExitStatus);
             Instance.WinHelper.ClearTerminationState(Thread);
-            Thread.State = EmulatedThreadState.Terminated;
-            Instance.WinHelper.ReleaseThreadResources(Thread);
+            using (Instance.SchedulerLock.EnterScope())
+                Thread.State = EmulatedThreadState.Terminated;
+            if (ReleaseResources)
+                Instance.WinHelper.ReleaseThreadResources(Thread);
             Instance.WakeSignal.Bump();
         }
 

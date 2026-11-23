@@ -22,19 +22,6 @@ namespace Brovan.Core.Emulation
         InternalError,
     }
 
-    [Flags]
-    public enum KvmMemoryPermission
-    {
-        None = 0,
-        Read = 1,
-        Write = 2,
-        Execute = 4,
-        ReadWrite = Read | Write,
-        WriteExecute = Write | Execute,
-        ReadExecute = Read | Execute,
-        All = Read | Write | Execute,
-    }
-
     public static class KvmConstants
     {
         public const int ExpectedApiVersion = 12;
@@ -133,13 +120,7 @@ namespace Brovan.Core.Emulation
         public const ulong HugePageSize = 2UL << 20;
 
         public const ulong InternalPageTableBase = 0x0000007000000000UL;
-        public const ulong PageTableEntryPresent = GuestPageEntries.Present;
-        public const ulong PageTableEntryWritable = GuestPageEntries.Writable;
-        public const ulong PageTableEntryUser = GuestPageEntries.User;
-        public const ulong PageTableEntryAccessed = GuestPageEntries.Accessed;
-        public const ulong PageTableEntryDirty = GuestPageEntries.Dirty;
         public const ulong PageTableEntryNoExecute = GuestPageEntries.NoExecute;
-        public const ulong PageTableEntryAddressMask = GuestPageEntries.AddressMask;
 
         public const ushort KernelCodeSelector = 0x08;
         public const ushort KernelDataSelector = 0x10;

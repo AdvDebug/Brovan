@@ -310,7 +310,6 @@ namespace Brovan.Core.Emulation.Guests
             WinHelper.KernelFiles?.Dispose();
         }
 
-        // SMP workers may still run here, so the release takes KernelLock.
         public void Shutdown(BinaryEmulator Instance)
         {
             if (WinHelper == null)
@@ -321,7 +320,7 @@ namespace Brovan.Core.Emulation.Guests
             WinHelper.Composition.Compositor.End();
             OS.Windows.RPC.Ports.RpcssLaunch.Shutdown();
 
-            lock (Instance.KernelLock)
+            using (Instance.KernelLock.EnterScope())
             {
                 OS.Windows.RPC.Ports.AudioSrvPortHandler.StopStreams(Instance);
                 AlpcMessaging.ReleaseRemote(Instance);
@@ -376,6 +375,7 @@ namespace Brovan.Core.Emulation.Guests
 
         public bool HasPendingGuestWork(BinaryEmulator Instance, EmulatedThread Thread)
         {
+            Instance.SchedulerLock.AssertHeld(nameof(HasPendingGuestWork));
             if (Thread == null)
                 return false;
 
@@ -409,6 +409,34 @@ namespace Brovan.Core.Emulation.Guests
             => WinHelper != null && (Instance.HasActiveGetMessageWait() || Instance.HasPendingHostIo() || AlpcMessaging.HasRemoteWork || AlpcMessaging.HasDeferredAnswers
                 || RemoteCalls.HasPending
                 || WinHelper.Composition.Compositor.AwaitsHostWork);
+
+        public void OnTerminationRequested(BinaryEmulator Instance)
+        {
+            if (WinHelper == null)
+                return;
+
+            NtTerminateJobObject.CloseJobsOfExitingProcess(Instance);
+            WinHelper.HideDesktopWindow();
+        }
+
+        public void RefreshGuestClock(BinaryEmulator Instance) => WinHelper?.KuserSharedData?.RefreshIfUnhooked();
+
+        public uint SyscallGateVector => 0x2E;
+
+        public bool TryHandleSyscallGate(BinaryEmulator Instance, uint Vector)
+        {
+            if (Instance.IsX86Guest)
+                return TryHandleSyscall(Instance);
+
+            HandleInt2ESyscall(Instance);
+            return true;
+        }
+
+        public bool WaitNeedsKernelLock(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            return State == null || !BinaryEmulator.IsAlertWaitOnly(Thread, State);
+        }
 
         public bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle)
         {
@@ -698,24 +726,37 @@ namespace Brovan.Core.Emulation.Guests
             if (Thread == null)
                 return false;
 
+            // The work before and after the run reads and writes guest memory, so it holds KernelLock; the run does not.
             WindowsThreadState ThreadState = WinEmulatedThread.GetState(Thread);
-            if (ThreadState.LoaderThunkPending)
-                EnterLoaderThunk(Instance, Thread, ThreadState);
-
-            if (WinHelper != null && WinHelper.CanDispatchUserApc(Thread))
-                WinHelper.DispatchNextUserApc(Thread);
-
-            if (ThreadState.DispatchException)
+            // An APC queued after this check runs at the start of the next slice.
+            bool DispatchException = false;
+            bool PreWork = ThreadState.LoaderThunkPending || ThreadState.DispatchException
+                || (ThreadState.PendingUserApcs != null && ThreadState.PendingUserApcs.Count != 0);
+            if (PreWork)
             {
-                if (ThreadState.ExceptionInformation == null)
-                    ThreadState.ExceptionInformation = new ExceptionInformation();
+                using RankedLock.Scope KernelScope = Instance.EnterKernelLockScope();
+                if (ThreadState.LoaderThunkPending)
+                    EnterLoaderThunk(Instance, Thread, ThreadState);
 
-                WinHelper?.InvokeException(ThreadState.ExceptionInformation.Status, ThreadState.ExceptionInformation);
+                if (WinHelper != null && WinHelper.CanDispatchUserApc(Thread))
+                    WinHelper.DispatchNextUserApc(Thread);
 
-                ThreadState.DispatchException = false;
-                if (Thread.State == EmulatedThreadState.Terminated)
-                    return true;
+                DispatchException = ThreadState.DispatchException;
+                if (DispatchException)
+                {
+                    if (ThreadState.ExceptionInformation == null)
+                        ThreadState.ExceptionInformation = new ExceptionInformation();
 
+                    WinHelper?.InvokeException(ThreadState.ExceptionInformation.Status, ThreadState.ExceptionInformation);
+
+                    ThreadState.DispatchException = false;
+                    if (Thread.State == EmulatedThreadState.Terminated)
+                        return true;
+                }
+            }
+
+            if (DispatchException)
+            {
                 ThreadState.ReleaseHeldContext();
                 State = Instance._emulator.Emulate(Instance.ReadRegister(Instance.IPRegister), 0, 0, QuantumInstructions);
             }
@@ -728,7 +769,8 @@ namespace Brovan.Core.Emulation.Guests
                     ulong EFlags = Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS);
                     if ((EFlags & (ulong)CPUFlags.TF) != 0 && !ThreadState.DispatchException)
                     {
-                        QueueUserModeException(Instance, NTSTATUS.STATUS_SINGLE_STEP, CurrentEFlags: EFlags);
+                        using (Instance.EnterKernelLockScope())
+                            QueueUserModeException(Instance, NTSTATUS.STATUS_SINGLE_STEP, CurrentEFlags: EFlags);
                         State = true;
                     }
                 }
@@ -737,8 +779,12 @@ namespace Brovan.Core.Emulation.Guests
                     State = true;
             }
 
-            if (Thread.State == EmulatedThreadState.Waiting && WinHelper != null && WinHelper.PendingConnectReplies.Count != 0)
-                AlpcMessaging.DeliverConnectRepliesTo(Instance, Thread);
+            if (Thread.State == EmulatedThreadState.Waiting && WinHelper != null && WinHelper.HasPendingConnectReplies)
+            {
+                using RankedLock.Scope KernelScope = Instance.EnterKernelLockScope();
+                if (WinHelper.PendingConnectReplies.Count != 0)
+                    AlpcMessaging.DeliverConnectRepliesTo(Instance, Thread);
+            }
             return true;
         }
 
@@ -813,16 +859,15 @@ namespace Brovan.Core.Emulation.Guests
 
             Instance.WinHelper.ClearPipeWait();
             SetLastWinErrorRegister(Instance, NTSTATUS.STATUS_CANCELLED);
-            SetSyscallExitRegisters(Instance, Rip);
+            SetSyscallExitRegisters(Instance, Rip, Instance.CurrentThread?.State == EmulatedThreadState.Waiting);
             return true;
         }
 
         // NT returns from every x64 system call with rcx, rdx and r8 to r11 set as KiSystemServiceExit sets them.
         // A waiting thread keeps its arguments for the retry, and a handler that moved RIP set its own context.
-        private void SetSyscallExitRegisters(BinaryEmulator Instance, ulong SyscallRip)
+        private void SetSyscallExitRegisters(BinaryEmulator Instance, ulong SyscallRip, bool Waiting)
         {
-            if (!Instance.IsX64Guest || Instance.CurrentThread?.State == EmulatedThreadState.Waiting
-                || Instance.ReadRegister(Instance.IPRegister) != SyscallRip)
+            if (!Instance.IsX64Guest || Waiting || Instance.ReadRegister(Instance.IPRegister) != SyscallRip)
                 return;
 
             Instance._emulator.SetSyscallReturnRegisters(SyscallRip + 2);
@@ -886,19 +931,25 @@ namespace Brovan.Core.Emulation.Guests
 
         public bool TryHandleSyscall(BinaryEmulator Instance)
         {
-            WinHelper?.LdrTracker?.SyncFromSyscall();
+            uint Syscall = Instance._binary.Architecture == BinaryArchitecture.x64
+                ? (uint)Instance.ReadRegister(Registers.UC_X86_REG_RAX)
+                : Instance.ReadRegister32(Registers.UC_X86_REG_EAX);
+            WinSyscallEntry Entry = WinSyscallTable.Lookup(Syscall);
+            // A scheduler-domain call that falls back to KernelLock runs its handler under KernelLock alone, as every other
+            // call does.
+            bool WithoutKernelLock = Entry.Domain == WinSyscallDomain.Scheduler && !Instance.KernelLockCovered && !NeedsKernelLockAroundCall(Instance);
+
+            using RankedLock.Scope KernelScope = WithoutKernelLock ? default : Instance.EnterKernelLockScope();
+            if (!WithoutKernelLock)
+                WinHelper?.LdrTracker?.SyncFromSyscall();
 
             try
             {
-                uint Syscall = Instance._binary.Architecture == BinaryArchitecture.x64
-                    ? (uint)Instance.ReadRegister(Registers.UC_X86_REG_RAX)
-                    : Instance.ReadRegister32(Registers.UC_X86_REG_EAX);
                 SyscallAbi Abi = Instance._binary.Architecture == BinaryArchitecture.x64 ? SyscallAbi.X64 : SyscallAbi.X86;
                 ulong Rip = Instance.WinHelper != null ? Instance.WinHelper.GetSyscallRip() : Instance.ReadRegister(Instance.IPRegister);
                 bool CaptureSyscallHistory = Instance.Syscalls?.TraceEnabled == true;
                 ulong[] HistoryArgs = CaptureSyscallHistory ? ReadWindowsSyscallArguments(Instance, 6) : Array.Empty<ulong>();
 
-                WinSyscallEntry Entry = WinSyscallTable.Lookup(Syscall);
                 string HandlerName = Entry.Name;
                 bool IsImplemented = Entry.Handler != null;
 
@@ -950,19 +1001,30 @@ namespace Brovan.Core.Emulation.Guests
                 }
 
                 NTSTATUS Status;
+                bool Waiting;
                 if (IsImplemented)
                 {
                     if (Syscall >= Win32kServiceBase)
                         Instance.WinHelper.FlushGdiBatch();
 
-                    Instance.WinHelper.BeginSyscall();
-                    try
+                    RankedLock HeldLock = WithoutKernelLock ? Instance.SchedulerLock : Instance.KernelLock;
+                    bool CountHold = HeldLock.CountsHolds;
+                    long HeldBefore = CountHold ? HeldLock.HeldTicks() : 0;
+                    using (WithoutKernelLock ? HeldLock.EnterScope() : default)
                     {
-                        Status = Entry.Handler.Handle(Instance);
-                    }
-                    finally
-                    {
-                        Instance.WinHelper.EndSyscall();
+                        Instance.WinHelper.BeginSyscall();
+                        try
+                        {
+                            Status = Entry.Handler.Handle(Instance);
+                        }
+                        finally
+                        {
+                            Instance.WinHelper.EndSyscall();
+                            if (CountHold)
+                                HeldLock.NoteCall(Syscall, HandlerName, HeldBefore);
+                        }
+
+                        Waiting = Instance.CurrentThread?.State == EmulatedThreadState.Waiting;
                     }
 
                     if (Instance.Settings.SyscallNotificationCallback != null)
@@ -980,6 +1042,7 @@ namespace Brovan.Core.Emulation.Guests
                 }
                 else
                 {
+                    Waiting = false;
                     Status = Instance.WinUnimplemented;
                     if (Instance.Settings.SyscallNotificationCallback != null)
                     {
@@ -1001,8 +1064,9 @@ namespace Brovan.Core.Emulation.Guests
                 if (!SuppressStatusWrite)
                     SetLastWinErrorRegister(Instance, Status);
 
-                SetSyscallExitRegisters(Instance, Rip);
-                RaiseSysretSingleStep(Instance, Rip, Entry.Handler);
+                SetSyscallExitRegisters(Instance, Rip, Waiting);
+                if (!Waiting)
+                    RaiseSysretSingleStep(Instance, Rip, Entry.Handler);
                 return true;
             }
             catch (Exception ex)
@@ -1024,13 +1088,14 @@ namespace Brovan.Core.Emulation.Guests
             if (Instance.IsX86Guest)
                 return;
 
+            ulong EFlags = Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS);
+            if ((EFlags & (ulong)CPUFlags.TF) == 0)
+                return;
+
+            using RankedLock.Scope KernelScope = Instance.EnterKernelLockScope();
             EmulatedThread Thread = Instance.CurrentThread;
             if (Thread == null || Thread.State is not (EmulatedThreadState.Running or EmulatedThreadState.Ready) || Thread.WaitActive
                 || Thread.SwitchingContext || WinEmulatedThread.GetState(Thread).DispatchException)
-                return;
-
-            ulong EFlags = Instance.ReadRegister(Registers.UC_X86_REG_EFLAGS);
-            if ((EFlags & (ulong)CPUFlags.TF) == 0)
                 return;
 
             if (Instance.ReadRegister(Instance.IPRegister) != SyscallRip && Handler is not NtSetContextThread)
@@ -1151,11 +1216,6 @@ namespace Brovan.Core.Emulation.Guests
                 case 0x2D:
                     RaiseDebugService(Instance);
                     return true;
-                case 0x2E:
-                    if (Instance.IsX86Guest)
-                        return TryHandleSyscall(Instance);
-                    HandleInt2ESyscall(Instance);
-                    return true;
                 default:
                     return false;
             }
@@ -1180,6 +1240,65 @@ namespace Brovan.Core.Emulation.Guests
                 CustomParameters = new ulong[] { Service },
                 ExceptionAddress = Rip + 1
             });
+        }
+
+        private bool NeedsKernelLockAroundCall(BinaryEmulator Instance)
+        {
+            if (WinHelper == null)
+                return true;
+            if (WinHelper.LdrTracker?.NeedsSyncFromSyscall() == true)
+                return SyscallDomainStats.FellBack(SyscallDomainStats.Reason.LoaderSync);
+            if (WinEmulatedThread.TryGetState(Instance.CurrentThread)?.SyncIoBetweenRetries == true)
+                return SyscallDomainStats.FellBack(SyscallDomainStats.Reason.SyncIoRetry);
+            if (WinHelper.HasPendingConnectReplies)
+                return SyscallDomainStats.FellBack(SyscallDomainStats.Reason.ConnectReplies);
+
+            SyscallDomainStats.Served();
+            return false;
+        }
+
+        private static class SyscallDomainStats
+        {
+            internal enum Reason
+            {
+                LoaderSync,
+                SyncIoRetry,
+                ConnectReplies,
+            }
+
+            private static readonly PeriodicStats Log = new PeriodicStats("BROVAN_SYSCALL_DOMAIN_STATS", "Syscalls off KernelLock:", Describe);
+            private static readonly int Reasons = Enum.GetValues<Reason>().Length;
+            private static readonly int ServedIndex = Reasons;
+            private static readonly int TickIndex = Reasons + 1;
+            private static readonly StatsSlots Slots = new StatsSlots(Reasons + 2);
+
+            internal static void Served()
+            {
+                if (!Log.Enabled)
+                    return;
+
+                long[] S = Slots.Current.Values;
+                S[ServedIndex]++;
+                Log.TickSlot(ref S[TickIndex]);
+            }
+
+            internal static bool FellBack(Reason Why)
+            {
+                if (Log.Enabled)
+                {
+                    long[] S = Slots.Current.Values;
+                    S[(int)Why]++;
+                    Log.TickSlot(ref S[TickIndex]);
+                }
+                return true;
+            }
+
+            private static void Describe(StringBuilder sb)
+            {
+                sb.Append(" served=").Append(Slots.Sum(ServedIndex));
+                for (int i = 0; i < Reasons; i++)
+                    sb.Append(' ').Append((Reason)i).Append('=').Append(Slots.Sum(i));
+            }
         }
 
         // NT sends int 2E down the same path as syscall, so the handler sees RIP on the instruction.
@@ -1585,7 +1704,6 @@ namespace Brovan.Core.Emulation.Guests
             Thread.State = EmulatedThreadState.Exception;
             State.DispatchException = true;
             State.ExceptionInformation = ExceptionInfo;
-            Instance.Threads[ThreadId] = Thread;
             Instance._emulator.StopEmulation();
         }
 
@@ -1867,8 +1985,7 @@ namespace Brovan.Core.Emulation.Guests
             Thread.Context.RFLAGS = 0x202;
             ApplyInitialSegments(Instance, Thread.Context);
 
-            Instance.Threads[Thread.ThreadId] = Thread;
-            Instance.ThreadOrder.Add((int)Thread.ThreadId);
+            Instance.InsertThread(Thread);
             if (Instance.CurrentThreadId == -1)
                 Instance.CurrentThreadId = (int)Thread.ThreadId;
 
@@ -1950,8 +2067,7 @@ namespace Brovan.Core.Emulation.Guests
                 Thread.Context.RBX = Parameter;
             }
 
-            Instance.Threads[Thread.ThreadId] = Thread;
-            Instance.ThreadOrder.Add((int)Thread.ThreadId);
+            Instance.InsertThread(Thread);
             if (Instance.CurrentThreadId == -1)
                 Instance.CurrentThreadId = (int)Thread.ThreadId;
 
@@ -2231,8 +2347,6 @@ namespace Brovan.Core.Emulation.Guests
             WinHelper.KernelFileReads = KernelFileReads.TryCreate(Instance, this, WinHelper.KernelFiles);
             WinHelper.KernelFileInformation = KernelFileInformation.TryCreate(Instance, this, WinHelper.KernelFiles);
             WinHelper.KernelFileVolumeInformation = KernelFileVolumeInformation.TryCreate(Instance, this, WinHelper.KernelFiles);
-            if (WinHelper.KernelFiles != null)
-                Instance.RefreshGuestKernel();
             Win32kDpi.SeedFromImage(Instance, MainModule);
             JoinGuestSession(Instance, MainModule);
 

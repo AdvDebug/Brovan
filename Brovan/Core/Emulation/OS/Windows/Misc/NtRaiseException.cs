@@ -82,7 +82,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinEmulatedThread.GetState(CurrentThread).ExceptionInformation = Info;
             CurrentThread.ExitCode = unchecked((int)ExceptionCode);
 
-            Instance.Threads[(uint)Instance.CurrentThreadId] = CurrentThread;
             if ((Instance.Settings.Flags & LogFlags.Issues) != 0)
                 Instance.TriggerEventMessage($"[!] NtRaiseException triggered with Exception Code: 0x{ExceptionCode:X}", LogFlags.Issues);
             WindowsThreadContext64.ResumeAtNewContext(Instance, CurrentThread);

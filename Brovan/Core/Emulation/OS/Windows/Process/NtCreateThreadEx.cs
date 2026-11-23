@@ -160,6 +160,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             // THREAD_CREATE_FLAGS_CREATE_SUSPENDED
             if ((CreateFlags & 0x1UL) != 0)
             {
+                using RankedLock.Scope SchedulerScope = Instance.SchedulerLock.EnterScope();
                 NewThread.SuspendCount = 1;
                 NewThread.State = EmulatedThreadState.Suspended;
             }

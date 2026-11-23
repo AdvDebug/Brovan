@@ -97,7 +97,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             if (Timer.QueuedApc != null)
-                WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Remove(Timer.QueuedApc);
+            {
+                using (Instance.SchedulerLock.EnterScope())
+                    WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Remove(Timer.QueuedApc);
+            }
 
             Instance.WinHelper.ApcTimers.Remove(Timer);
             Timer.ApcThread = null;

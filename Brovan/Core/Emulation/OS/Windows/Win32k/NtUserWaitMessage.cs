@@ -41,11 +41,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 State.WaitMessageActive = true;
             }
 
-            Thread.State = EmulatedThreadState.Waiting;
-            State.ApcAlertable = false;
-            Instance._emulator.WriteRegister(Instance.IPRegister, State.WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ContinueParked(Thread);
         }
     }
 }

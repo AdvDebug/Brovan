@@ -26,7 +26,7 @@ namespace Brovan.Core.Emulation
         public WhpException() : base("WHP backend exception occurred.") { }
     }
 
-    public sealed class Whp : IDisposable, IGuestKernelBackend
+    public sealed class Whp : IDisposable, IGuestKernelBackend, IGuestPagingBackend, IGuestEntryBackend
     {
         private IntPtr _partition = IntPtr.Zero;
         private const uint SharedVpIndex = 0;
@@ -34,11 +34,9 @@ namespace Brovan.Core.Emulation
         private const ulong ExceptionStackPages = 2;
         private const uint Wow64SystemCallVector = 0x2E;
 
-        private readonly Dictionary<ulong, MappedPage> _mappedPages = new();
-        private readonly Dictionary<IntPtr, BackingAllocation> _backingAllocations = new();
-        private readonly List<long> _backingStarts = new();
-        private readonly List<IntPtr> _releasedBackings = new();
-        private readonly HostDiscardRuns _discardRuns = new();
+        private readonly GuestPageMap _mappedPages = new(InternalPages.PageLimit(WhpConstants.InternalPageTableBase));
+        private readonly BackingTable<BackingAllocation> _backings = new();
+        private readonly BackingFrees<BackingAllocation> _frees;
         private readonly Dictionary<ulong, BackingAllocation> _windowBlocks = new();
 
         // WHvMapGpaRange and WHvUnmapGpaRange cost grows with the runs that are contiguous in both guest and host
@@ -54,26 +52,19 @@ namespace Brovan.Core.Emulation
         private readonly Dictionary<ulong, IntPtr> _foreignStillMapped = new();
         private ulong _backingBytes;
         private readonly Dictionary<ulong, bool> _trappedPages = new();
-        private readonly Dictionary<ulong, IntPtr> _pageTableViews = new();
 
-        private ulong[] _sortedPageKeys = Array.Empty<ulong>();
-        private bool _sortedPageKeysDirty = true;
         private bool _mappingsDirty;
         private bool _populateUnavailable = !WhpNative.HasAdviseGpaRange;
         private bool _touchPopulateArmed;
         private bool _avxEnabled;
         private ulong _cr4Protection;
-        private byte[] _xsaveImage;
         private const int XsaveImageSize = 4096;
         private const int XsaveXmmOffset = 160;
         private const int XsaveHeaderOffset = 512;
         // Component 2 follows the header in both the standard and the compacted layout.
         private const int XsaveYmmHighOffset = 576;
         private const ulong XcrAvxFeatures = 0x7;
-        private ulong _lastLookupPageBase = ulong.MaxValue;
-        private MappedPage _lastLookupPage;
-        private int _watchedPages;
-        private int _untouchedPages;
+        private readonly GuestPaging _paging;
 
         private readonly Dictionary<ulong, InstalledMap> _activeMaps = new();
         private readonly Dictionary<ulong, InstalledMap> _desiredMaps = new();
@@ -97,7 +88,6 @@ namespace Brovan.Core.Emulation
         private const int MaxDirtyRanges = 16;
 
         private readonly bool _guest64;
-        private ulong _pml4Gpa;
         private ulong _nextInternalGpa = WhpConstants.InternalPageTableBase;
 
         private IntPtr _internalPoolPtr = IntPtr.Zero;
@@ -113,8 +103,6 @@ namespace Brovan.Core.Emulation
         private ulong _exceptionStubPageGpa;
         private ulong _exceptionIdtPageGpa;
         private ulong _gdtPageGpa;
-
-        private readonly object _vcpuLock = new();
 
         private enum PendingReturn
         {
@@ -136,20 +124,23 @@ namespace Brovan.Core.Emulation
             EndedBeforeIret,
         }
 
-        // Every caller holds KernelLock.
+        // The slice-end register flush runs without KernelLock, so the counters are per host thread.
         private static class InPlaceReturnStats
         {
             private static readonly PeriodicStats Log = new PeriodicStats("BROVAN_INPLACE_RETURN_STATS", "In-place returns:", Describe);
-            private static readonly long[] Counts = new long[Enum.GetValues<InPlaceFallback>().Length];
-            private static long _served;
+            private static readonly int Reasons = Enum.GetValues<InPlaceFallback>().Length;
+            private static readonly int ServedIndex = Reasons;
+            private static readonly int TickIndex = Reasons + 1;
+            private static readonly StatsSlots Slots = new StatsSlots(Reasons + 2);
 
             internal static void Served()
             {
                 if (!Log.Enabled)
                     return;
 
-                _served++;
-                Log.Tick();
+                long[] S = Slots.Current.Values;
+                S[ServedIndex]++;
+                Log.TickSlot(ref S[TickIndex]);
             }
 
             internal static void Fallback(InPlaceFallback reason)
@@ -157,22 +148,25 @@ namespace Brovan.Core.Emulation
                 if (!Log.Enabled)
                     return;
 
-                Counts[(int)reason]++;
-                Log.Tick();
+                long[] S = Slots.Current.Values;
+                S[(int)reason]++;
+                Log.TickSlot(ref S[TickIndex]);
             }
 
             private static void Describe(StringBuilder sb)
             {
-                sb.Append(" served=").Append(_served);
-                for (int i = 0; i < Counts.Length; i++)
-                    sb.Append(' ').Append((InPlaceFallback)i).Append('=').Append(Counts[i]);
+                sb.Append(" served=").Append(Slots.Sum(ServedIndex));
+                for (int i = 0; i < Reasons; i++)
+                    sb.Append(' ').Append((InPlaceFallback)i).Append('=').Append(Slots.Sum(i));
             }
         }
 
-        private sealed class VirtualProcessor
+        private sealed class VirtualProcessor : GuestProcessor
         {
             public Whp Owner;
             public uint Index;
+            public readonly object RegisterLock = new();
+            public byte[] XsaveImage;
             public uint ThreadId;
             public IntPtr ExitContextPtr;
             public ulong GdtPageGpa;
@@ -211,9 +205,6 @@ namespace Brovan.Core.Emulation
 
             public volatile bool StopRequested;
             public volatile bool Running;
-            public volatile bool InGuest;
-            public long TlbGeneration;
-            public bool TlbFlushPending;
             public int HostThreadId;
             public bool SingleStepRequested;
             public long SliceDeadlineTimestamp;
@@ -236,8 +227,6 @@ namespace Brovan.Core.Emulation
         [ThreadStatic]
         private static long t_vpBinding;
 
-        private long _tlbGeneration;
-
         private VirtualProcessor CurrentVp
         {
             get
@@ -245,7 +234,7 @@ namespace Brovan.Core.Emulation
                 VirtualProcessor vp = t_vp;
                 return vp != null && ReferenceEquals(vp.Owner, this) && vp.Binding == t_vpBinding
                     ? vp
-                    : _processors[(int)SharedVpIndex];
+                    : Volatile.Read(ref _processorSnapshot)[(int)SharedVpIndex];
             }
         }
 
@@ -255,7 +244,7 @@ namespace Brovan.Core.Emulation
             t_vpBinding = vp.Binding;
         }
 
-        private object _runLock;
+        private readonly GuestEntryGate _gate;
 
         private readonly WhvRegisterValue _userCodeSegment;
         private readonly WhvRegisterValue _userDataSegment;
@@ -289,18 +278,6 @@ namespace Brovan.Core.Emulation
 
         [ThreadStatic]
         private static WhpErrors _error;
-
-        private sealed class MappedPage
-        {
-            public IntPtr HostPage;
-            public IntPtr OwnedBacking;
-            public bool IsAlias;
-            public WhpMemoryPermission Permissions;
-            public bool WriteRetained;
-            public bool WriteWatched;
-            public bool Written;
-            public bool Untouched;
-        }
 
         private sealed class BackingAllocation : BackingBlock
         {
@@ -363,6 +340,13 @@ namespace Brovan.Core.Emulation
                 _live[page >> 6] &= ~(1UL << (page & 63));
             }
 
+            public bool IsFreed(IntPtr hostPage)
+            {
+                int page = PageOf(hostPage);
+                ulong bit = 1UL << (page & 63);
+                return (_committed[page >> 6] & bit) != 0 && (_live[page >> 6] & bit) == 0;
+            }
+
             public void Discarded(IntPtr start, ulong size)
             {
                 int first = PageOf(start);
@@ -381,21 +365,6 @@ namespace Brovan.Core.Emulation
                         return false;
                 }
                 return true;
-            }
-
-            public int LiveRunFrom(IntPtr hostPage)
-            {
-                int first = PageOf(hostPage);
-                int page = first;
-                while (page < BackingWindowPages)
-                {
-                    int shift = page & 63;
-                    ulong word = _live[page >> 6] >> shift;
-                    if (word != ulong.MaxValue >> shift)
-                        return page + BitOperations.TrailingZeroCount(~word) - first;
-                    page = (page | 63) + 1;
-                }
-                return page - first;
             }
 
             public void AddFreedSlots(HostDiscardRuns runs)
@@ -422,7 +391,7 @@ namespace Brovan.Core.Emulation
             CommitFailed,
         }
 
-        // Every caller holds KernelLock.
+        // Every caller holds the mapping lock.
         private static class WindowStats
         {
             private static readonly PeriodicStats Log = new PeriodicStats("BROVAN_BACKING_WINDOW_STATS", "Backing window fallbacks:", Describe);
@@ -549,6 +518,9 @@ namespace Brovan.Core.Emulation
             if (arch != Arch.X86 || (mode != Mode.MODE_64 && mode != Mode.MODE_32))
                 throw new WhpException("WHP backend only supports x86 32-bit and x86-64 guests.");
 
+            _gate = new GuestEntryGate(this);
+            _paging = new GuestPaging(this, _gate, _mappedPages, WhpConstants.InternalPageTableBase);
+            _frees = new BackingFrees<BackingAllocation>(_backings, new FreeSite(this));
             _guest64 = mode == Mode.MODE_64;
             _userCodeSegment = MakeSegment(_guest64 ? WhpConstants.UserCodeSelector : WhpConstants.UserCodeSelector32, true, true);
             _userDataSegment = MakeSegment(_guest64 ? WhpConstants.UserDataSelector : WhpConstants.UserDataSelector32, false, true);
@@ -605,6 +577,7 @@ namespace Brovan.Core.Emulation
 
         public bool MapMemoryShared(ulong address, ulong size, MemoryProtection protection, IntPtr hostPointer)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck() || hostPointer == IntPtr.Zero) return false;
 
             if (!IsGuestPageRange(address, size))
@@ -613,7 +586,7 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            WhpMemoryPermission perm = TranslateProtection(protection);
+            GuestPagePermission perm = TranslateProtection(protection);
             long backingAddr = hostPointer.ToInt64();
             IntPtr backing = IntPtr.Zero;
             BackingAllocation allocation = null;
@@ -626,8 +599,8 @@ namespace Brovan.Core.Emulation
 
                 if (allocation == null || (ulong)(hostPage.ToInt64() - backing.ToInt64()) >= allocation.Size)
                 {
-                    backing = FindBackingAllocation(hostPage);
-                    if (backing == IntPtr.Zero || !_backingAllocations.TryGetValue(backing, out allocation))
+                    backing = _backings.Find(hostPage);
+                    if (backing == IntPtr.Zero || !_backings.TryGet(backing, out allocation))
                     {
                         backing = IntPtr.Zero;
                         allocation = null;
@@ -638,20 +611,20 @@ namespace Brovan.Core.Emulation
                 if (allocation != null)
                     allocation.AliasPages++;
 
-                if (_mappedPages.TryGetValue(guest, out MappedPage previous))
+                if (_mappedPages.TryGetValue(guest, out GuestPage previous))
                 {
                     ReleaseBacking(previous);
                     replaced = true;
                 }
 
-                SetMappedPage(guest, new MappedPage
+                SetGuestPage(guest, new GuestPage
                 {
                     HostPage = hostPage,
                     OwnedBacking = backing,
                     IsAlias = true,
                     Permissions = perm,
                 });
-                EnsureVirtualMapping(guest, perm);
+                _paging.SetLeaf(guest, perm);
             }
 
             // New pages install lazily, as in MapMemory. Replaced pages must go now, or a processor keeps using them.
@@ -667,6 +640,7 @@ namespace Brovan.Core.Emulation
 
         public IntPtr AllocateSharedStorage(ulong size)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return IntPtr.Zero;
 
             if (size == 0 || (size & WhpConstants.PageMask) != 0)
@@ -681,38 +655,43 @@ namespace Brovan.Core.Emulation
                 return IntPtr.Zero;
             }
 
-            AddBackingAllocation(backing, new BackingAllocation { Size = size, Held = true });
+            _backings.Add(backing, new BackingAllocation { Size = size, Held = true });
             _error = WhpErrors.Ok;
             return backing;
         }
 
         public IntPtr AdoptSharedStorage(IntPtr hostPointer, ulong size, IDisposable owner)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return IntPtr.Zero;
 
             if (hostPointer == IntPtr.Zero || owner == null || size == 0 || (size & WhpConstants.PageMask) != 0
-                || ((ulong)hostPointer.ToInt64() & WhpConstants.PageMask) != 0 || FindBackingAllocation(hostPointer) != IntPtr.Zero)
+                || ((ulong)hostPointer.ToInt64() & WhpConstants.PageMask) != 0 || _backings.Find(hostPointer) != IntPtr.Zero)
             {
                 _error = WhpErrors.InvalidArgument;
                 return IntPtr.Zero;
             }
 
-            AddBackingAllocation(hostPointer, new BackingAllocation { Size = size, Held = true, Owner = owner });
+            _backings.Add(hostPointer, new BackingAllocation { Size = size, Held = true, Owner = owner });
             _error = WhpErrors.Ok;
             return hostPointer;
         }
 
         public void ReleaseSharedStorage(IntPtr storage)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return;
-            if (!_backingAllocations.TryGetValue(storage, out BackingAllocation? allocation) || !allocation.Held) return;
+            BackingAllocation allocation = _backings.TakeHold(storage);
+            if (allocation == null)
+                return;
 
-            allocation.Held = false;
-            FreeIfUnreferenced(storage, allocation);
+            _frees.FreeIfUnreferenced(storage, allocation);
+            _frees.Settle();
         }
 
         public bool MapMemory(ulong address, ulong size, MemoryProtection protection)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return false;
 
             if (!IsGuestPageRange(address, size))
@@ -721,12 +700,12 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            WhpMemoryPermission perm = TranslateProtection(protection);
+            GuestPagePermission perm = TranslateProtection(protection);
 
             bool canBatch = true;
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
-                if (_mappedPages.TryGetValue(address + off, out MappedPage existing) && existing.HostPage != IntPtr.Zero)
+                if (_mappedPages.TryGetValue(address + off, out GuestPage existing) && existing.HostPage != IntPtr.Zero)
                 {
                     canBatch = false;
                     break;
@@ -747,15 +726,15 @@ namespace Brovan.Core.Emulation
                 for (ulong off = 0; off < size; off += WhpConstants.PageSize)
                 {
                     ulong guest = address + off;
-                    MappedPage page = new MappedPage
+                    GuestPage page = new GuestPage
                     {
                         HostPage = new IntPtr(backingAddr + (long)off),
                         OwnedBacking = backing,
                         Permissions = perm,
                         WriteRetained = RetainsWriteWithoutAccess(perm, false),
                     };
-                    SetMappedPage(guest, page);
-                    EnsureVirtualMapping(guest, perm);
+                    SetGuestPage(guest, page);
+                    _paging.SetLeaf(guest, perm);
                 }
 
                 _error = WhpErrors.Ok;
@@ -765,29 +744,34 @@ namespace Brovan.Core.Emulation
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong guest = address + off;
-                if (!_mappedPages.TryGetValue(guest, out MappedPage page))
+                _mappedPages.TryGetValue(guest, out GuestPage current);
+                IntPtr host = current?.HostPage ?? IntPtr.Zero;
+                IntPtr backing = current?.OwnedBacking ?? IntPtr.Zero;
+                bool isAlias = current?.IsAlias ?? false;
+                if (host == IntPtr.Zero && !TryPlaceBacking(guest, WhpConstants.PageSize, out backing, out host))
                 {
-                    page = new MappedPage();
-                    SetMappedPage(guest, page);
+                    RebuildMappings();
+                    _error = WhpErrors.NoMemory;
+                    return false;
                 }
 
-                if (page.HostPage == IntPtr.Zero)
+                GuestPage page = new GuestPage
                 {
-                    if (!TryPlaceBacking(guest, WhpConstants.PageSize, out IntPtr backing, out IntPtr host))
-                    {
-                        RebuildMappings();
-                        _error = WhpErrors.NoMemory;
-                        return false;
-                    }
-
-                    page.HostPage = host;
-                    page.OwnedBacking = backing;
-                }
-
-                page.Permissions = perm;
-                page.WriteRetained = RetainsWriteWithoutAccess(perm, page.IsAlias);
+                    HostPage = host,
+                    OwnedBacking = backing,
+                    IsAlias = isAlias,
+                    Permissions = perm,
+                    WriteRetained = RetainsWriteWithoutAccess(perm, isAlias),
+                    WriteWatched = current?.WriteWatched ?? false,
+                    Written = current?.Written ?? false,
+                    Untouched = current?.Untouched ?? false,
+                };
+                if (current == null)
+                    SetGuestPage(guest, page);
+                else
+                    _paging.ReplacePage(guest, page);
                 MarkSpanDirty(guest, WhpConstants.PageSize);
-                EnsureVirtualMapping(guest, perm);
+                _paging.SetLeaf(guest, perm);
             }
 
             _error = WhpErrors.Ok;
@@ -796,6 +780,7 @@ namespace Brovan.Core.Emulation
 
         public bool UnmapMemory(ulong address, ulong size)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return false;
 
             if (!IsGuestPageRange(address, size))
@@ -814,12 +799,12 @@ namespace Brovan.Core.Emulation
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong guest = address + off;
-                if (_mappedPages.TryGetValue(guest, out MappedPage page))
+                if (_mappedPages.TryGetValue(guest, out GuestPage page))
                 {
                     if (page.OwnedBacking == IntPtr.Zero && page.HostPage != IntPtr.Zero)
                         (foreign ??= new()).Add((guest, page.HostPage));
                     ReleaseBacking(page);
-                    RemoveMappedPage(guest);
+                    RemoveGuestPage(guest);
                 }
                 else if (_foreignStillMapped.TryGetValue(guest, out IntPtr stuck))
                     (foreign ??= new()).Add((guest, stuck));
@@ -859,6 +844,7 @@ namespace Brovan.Core.Emulation
 
         public bool SetMemoryProtection(ulong address, ulong size, MemoryProtection protection)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return false;
             if (!IsGuestRange(address, size))
             {
@@ -866,40 +852,39 @@ namespace Brovan.Core.Emulation
                 return false;
             }
 
-            WhpMemoryPermission perm = TranslateProtection(protection);
-            bool writable = (perm & WhpMemoryPermission.Write) != 0;
+            GuestPagePermission perm = TranslateProtection(protection);
+            bool writable = (perm & GuestPagePermission.Write) != 0;
             bool accessRemoved = false;
             bool writeAdded = false;
 
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong guest = address + off;
-                if (!_mappedPages.TryGetValue(guest, out MappedPage page) || page.Permissions == perm)
+                if (!_mappedPages.TryGetValue(guest, out GuestPage page) || page.Permissions == perm)
                     continue;
 
-                WhpMemoryPermission old = page.Permissions;
-                bool wasWritable = (old & WhpMemoryPermission.Write) != 0;
+                GuestPagePermission old = page.Permissions;
+                bool wasWritable = (old & GuestPagePermission.Write) != 0;
                 WhvMapGpaRangeFlags oldFlags = MapFlags(page);
                 bool oldLeaves = LeavesGpaMap(page);
 
-                if (wasWritable || RetainsWriteWithoutAccess(perm, page.IsAlias))
-                    page.WriteRetained = true;
-                page.Permissions = perm;
+                GuestPage next = page.WithPermissions(perm, page.WriteRetained || wasWritable || RetainsWriteWithoutAccess(perm, page.IsAlias));
+                _paging.ReplacePage(guest, next);
 
-                if (MapFlags(page) != oldFlags || LeavesGpaMap(page) != oldLeaves)
+                if (MapFlags(next) != oldFlags || LeavesGpaMap(next) != oldLeaves)
                     MarkSpanDirty(guest, WhpConstants.PageSize);
 
-                if (wasWritable == writable && (old == WhpMemoryPermission.None) == (perm == WhpMemoryPermission.None))
+                if (wasWritable == writable && (old == GuestPagePermission.None) == (perm == GuestPagePermission.None))
                     continue;
 
-                accessRemoved |= EnsureVirtualMapping(guest, perm);
-                writeAdded |= old != WhpMemoryPermission.None && writable;
+                accessRemoved |= _paging.SetLeaf(guest, perm);
+                writeAdded |= old != GuestPagePermission.None && writable;
             }
 
             RebuildMappings();
 
             if (accessRemoved)
-                ShootDownGuestTlbs();
+                _gate.ShootDownGuestTlbs();
             else if (writeAdded)
                 CurrentVp.TlbFlushPending = true;
 
@@ -909,219 +894,61 @@ namespace Brovan.Core.Emulation
 
         // A GPA mapping stays writable once write is granted or a private page loses all access. The guest PTE holds
         // the current permission, so neither change needs a remap, which flushes the whole partition.
-        private static bool MapsWritable(MappedPage page)
-            => (page.Permissions & WhpMemoryPermission.Write) != 0 || page.WriteRetained;
+        private static bool MapsWritable(GuestPage page)
+            => (page.Permissions & GuestPagePermission.Write) != 0 || page.WriteRetained;
 
-        private static bool LeavesGpaMap(MappedPage page)
-            => NoAccessMapsDisabled && page.Permissions == WhpMemoryPermission.None;
+        private static bool LeavesGpaMap(GuestPage page)
+            => NoAccessMapsDisabled && page.Permissions == GuestPagePermission.None;
 
         // An alias may sit on read-only host memory, so only a private page is mapped writable while it has no access.
-        private static bool RetainsWriteWithoutAccess(WhpMemoryPermission perm, bool isAlias)
-            => perm == WhpMemoryPermission.None && !NoAccessMapsDisabled && !isAlias;
+        private static bool RetainsWriteWithoutAccess(GuestPagePermission perm, bool isAlias)
+            => perm == GuestPagePermission.None && !NoAccessMapsDisabled && !isAlias;
 
-        private static WhvMapGpaRangeFlags MapFlags(MappedPage page)
+        private static WhvMapGpaRangeFlags MapFlags(GuestPage page)
             => MapsWritable(page)
                 ? WhvMapGpaRangeFlags.Read | WhvMapGpaRangeFlags.Write | WhvMapGpaRangeFlags.Execute
                 : WhvMapGpaRangeFlags.Read | WhvMapGpaRangeFlags.Execute;
 
-        // NT: write watch uses the PTE dirty bit, which the processor sets here with no exit.
-        public unsafe bool WatchWrites(ulong address, ulong size)
+        public bool WatchWrites(ulong address, ulong size)
         {
-            if (DisposedCheck()) return false;
-
-            if ((address & WhpConstants.PageMask) != 0 || (size & WhpConstants.PageMask) != 0)
-            {
-                _error = WhpErrors.InvalidArgument;
-                return false;
-            }
-
-            if (!IsRangeMapped(address, size))
-            {
-                _error = WhpErrors.MemoryWriteUnmapped;
-                return false;
-            }
-
-            ulong* table = null;
-            ulong tableRange = ulong.MaxValue;
-            for (ulong off = 0; off < size; off += WhpConstants.PageSize)
-            {
-                ulong pageBase = address + off;
-                MappedPage page = _mappedPages[pageBase];
-                if (page.WriteWatched)
-                    continue;
-
-                page.WriteWatched = true;
-                page.Written = false;
-                page.Untouched = true;
-                _watchedPages++;
-                _untouchedPages++;
-
-                // x86 sets the accessed bit before it caches a translation.
-                ulong* entry = FindLeafEntry(pageBase, ref table, ref tableRange);
-                if (entry != null && (Interlocked.Exchange(ref *entry, 0) & WhpConstants.PageTableEntryAccessed) != 0)
-                    TouchWatchedPage(pageBase, page);
-            }
-
-            _error = WhpErrors.Ok;
-            return true;
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return !DisposedCheck() && SetWatchStatus(_paging.WatchWrites(address, size));
         }
 
-        // NT: the first access of a writable untouched page counts as a write.
-        private void TouchWatchedPage(ulong pageBase, MappedPage page)
+        public bool QueryWrites(ulong address, ulong pageCount, Span<ulong> written)
         {
-            page.Untouched = false;
-            _untouchedPages--;
-            if ((page.Permissions & WhpMemoryPermission.Write) != 0)
-                page.Written = true;
-            EnsureVirtualMapping(pageBase, page.Permissions);
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return !DisposedCheck() && SetWatchStatus(_paging.QueryWrites(address, pageCount, written));
         }
 
-        private bool TryTouchWatchedPage(ulong errorCode, ulong faultAddress)
+        public bool ResetWrites(ulong address, ulong pageCount, ReadOnlySpan<ulong> pages)
         {
-            if (_untouchedPages == 0 || (errorCode & GuestPageEntries.FaultPresent) != 0)
-                return false;
-
-            ulong pageBase = faultAddress & ~WhpConstants.PageMask;
-            if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || !page.Untouched || page.Permissions == WhpMemoryPermission.None ||
-                ((errorCode & GuestPageEntries.FaultWrite) != 0 && (page.Permissions & WhpMemoryPermission.Write) == 0))
-                return false;
-
-            TouchWatchedPage(pageBase, page);
-            return true;
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return !DisposedCheck() && SetWatchStatus(_paging.ResetWrites(address, pageCount, pages));
         }
 
-        private void RecordHostAccess(ulong address, ulong length, bool write)
+        private bool SetWatchStatus(WriteWatchStatus status)
         {
-            if (length == 0) return;
-
-            ulong end = address + length;
-            for (ulong pageBase = address & ~WhpConstants.PageMask; pageBase < end; pageBase += WhpConstants.PageSize)
+            _error = status switch
             {
-                if (!TryLookupPage(pageBase, out MappedPage page) || !page.WriteWatched)
-                    continue;
-
-                if (page.Untouched && page.Permissions != WhpMemoryPermission.None)
-                    TouchWatchedPage(pageBase, page);
-                if (write)
-                    page.Written = true;
-            }
+                WriteWatchStatus.Ok => WhpErrors.Ok,
+                WriteWatchStatus.InvalidArgument => WhpErrors.InvalidArgument,
+                _ => WhpErrors.MemoryWriteUnmapped,
+            };
+            return status == WriteWatchStatus.Ok;
         }
 
-        private void ForgetWatchedPage(MappedPage page)
+        public void EvictProcessors()
         {
-            if (page.WriteWatched)
-                _watchedPages--;
-            if (page.Untouched)
-                _untouchedPages--;
+            if (!DisposedCheck())
+                _gate.EvictProcessors();
         }
 
-        public unsafe bool QueryWrites(ulong address, ulong pageCount, Span<ulong> written)
-        {
-            if (DisposedCheck()) return false;
+        public ProcessorHold HoldProcessorsOutOfGuest() => DisposedCheck() ? ProcessorHold.None : _gate.HoldProcessorsOutOfGuest();
 
-            if ((address & WhpConstants.PageMask) != 0 || pageCount > (ulong)written.Length * 64)
-            {
-                _error = WhpErrors.InvalidArgument;
-                return false;
-            }
+        GuestProcessor[] IGuestEntryBackend.Processors => Volatile.Read(ref _processorSnapshot);
 
-            written.Slice(0, (int)((pageCount + 63) / 64)).Clear();
-
-            ulong* table = null;
-            ulong tableRange = ulong.MaxValue;
-            for (ulong index = 0; index < pageCount; index++)
-            {
-                ulong pageBase = address + (index << 12);
-                if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || !page.WriteWatched)
-                    continue;
-
-                bool dirty = page.Written;
-                if (!dirty)
-                {
-                    ulong* entry = FindLeafEntry(pageBase, ref table, ref tableRange);
-                    dirty = entry != null && (Volatile.Read(ref *entry) & WhpConstants.PageTableEntryDirty) != 0;
-                }
-
-                if (dirty)
-                    written[(int)(index >> 6)] |= 1UL << (int)(index & 63);
-            }
-
-            _error = WhpErrors.Ok;
-            return true;
-        }
-
-        public unsafe bool ResetWrites(ulong address, ulong pageCount, ReadOnlySpan<ulong> pages)
-        {
-            if (DisposedCheck()) return false;
-
-            if ((address & WhpConstants.PageMask) != 0 || pageCount > (ulong)pages.Length * 64)
-            {
-                _error = WhpErrors.InvalidArgument;
-                return false;
-            }
-
-            ulong* table = null;
-            ulong tableRange = ulong.MaxValue;
-            bool cleared = false;
-            int words = (int)((pageCount + 63) / 64);
-
-            for (int word = 0; word < words; word++)
-            {
-                for (ulong bits = pages[word]; bits != 0; bits &= bits - 1)
-                {
-                    ulong index = (ulong)word * 64 + (ulong)BitOperations.TrailingZeroCount(bits);
-                    if (index >= pageCount)
-                        break;
-
-                    ulong pageBase = address + (index << 12);
-                    if (!_mappedPages.TryGetValue(pageBase, out MappedPage page) || !page.WriteWatched)
-                        continue;
-
-                    cleared |= page.Written;
-                    page.Written = false;
-                    ulong* entry = FindLeafEntry(pageBase, ref table, ref tableRange);
-                    if (entry != null && (Interlocked.And(ref *entry, ~WhpConstants.PageTableEntryDirty) & WhpConstants.PageTableEntryDirty) != 0)
-                        cleared = true;
-                }
-            }
-
-            // x86: a cached dirty translation writes without setting the bit again.
-            if (cleared)
-                ShootDownGuestTlbs();
-
-            _error = WhpErrors.Ok;
-            return true;
-        }
-
-        // NT flushes every processor before a protect that removes access returns.
-        private void ShootDownGuestTlbs()
-        {
-            Interlocked.Increment(ref _tlbGeneration);
-            EvictProcessors();
-        }
-
-        public void HoldProcessorsOutOfGuest()
-        {
-            if (DisposedCheck()) return;
-            EvictProcessors();
-        }
-
-        private void EvictProcessors()
-        {
-            VirtualProcessor[] processors = Volatile.Read(ref _processorSnapshot);
-            for (int i = 0; i < processors.Length; i++)
-            {
-                if (processors[i].InGuest)
-                    CancelRun(processors[i]);
-            }
-
-            for (int i = 0; i < processors.Length; i++)
-            {
-                SpinWait spin = default;
-                while (processors[i].InGuest)
-                    spin.SpinOnce(-1);
-            }
-        }
+        void IGuestEntryBackend.Kick(GuestProcessor processor) => CancelRun((VirtualProcessor)processor);
 
         // WHP has no single-page flush. A host CR3 write flushes the whole guest TLB of the processor.
         private unsafe void FlushGuestTlb(VirtualProcessor vp)
@@ -1129,8 +956,8 @@ namespace Brovan.Core.Emulation
             uint name = (uint)WhvRegisterName.Cr3;
             byte* raw = stackalloc byte[32];
             WhvRegisterValue* aligned = AlignRegisterValue(raw);
-            *aligned = WhvRegisterValue.FromReg64(_pml4Gpa);
-            lock (_vcpuLock)
+            *aligned = WhvRegisterValue.FromReg64(_paging.Root);
+            lock (vp.RegisterLock)
             {
                 int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, vp.Index, &name, 1, aligned);
                 if (WhpNative.Failed(hr))
@@ -1140,6 +967,7 @@ namespace Brovan.Core.Emulation
 
         public bool MapMmio(ulong address, ulong size, MmioReadCallback read, MmioWriteCallback write)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return false;
 
             if (read == null || write == null ||
@@ -1207,7 +1035,7 @@ namespace Brovan.Core.Emulation
             for (ulong guest = start; guest < end; guest += WhpConstants.PageSize)
             {
                 region.HostPages[(guest - region.Address) / WhpConstants.PageSize] =
-                    _mappedPages.TryGetValue(guest, out MappedPage page) && page != null ? page.HostPage : IntPtr.Zero;
+                    _mappedPages.TryGetValue(guest, out GuestPage page) && page != null ? page.HostPage : IntPtr.Zero;
             }
         }
 
@@ -1231,16 +1059,22 @@ namespace Brovan.Core.Emulation
 
         private void EnsureMaintenanceThread()
         {
-            if (_maintenanceThread != null)
+            if (Volatile.Read(ref _maintenanceThread) != null)
                 return;
 
-            WhpNative.timeBeginPeriod(MaintenanceTimerPeriodMs);
-            _maintenanceThread = new Thread(MaintenanceLoop)
+            lock (_partitionLock)
             {
-                IsBackground = true,
-                Name = "WhpMaintenance"
-            };
-            _maintenanceThread.Start();
+                if (_maintenanceThread != null)
+                    return;
+
+                WhpNative.timeBeginPeriod(MaintenanceTimerPeriodMs);
+                _maintenanceThread = new Thread(MaintenanceLoop)
+                {
+                    IsBackground = true,
+                    Name = "WhpMaintenance"
+                };
+                _maintenanceThread.Start();
+            }
         }
 
         private void MaintenanceLoop()
@@ -1741,7 +1575,7 @@ namespace Brovan.Core.Emulation
                 FlushRegisterCache(vp);
             }
 
-            bool releaseRunLock = _runLock != null && Monitor.IsEntered(_runLock);
+            bool releaseRunLock = _gate.HoldsRunLock;
 
             try
             {
@@ -1858,11 +1692,17 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        public void UseRunLock(object runLock) => _runLock = runLock;
+        public void UseHost(IBackendHost host)
+        {
+            _gate.UseHost(host);
+            _paging.UseHost(host);
+            _frees.UseHost(host);
+        }
 
         public void StopThread(uint threadId)
         {
             if (Disposed || Disposing) return;
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (!_threadProcessors.TryGetValue(threadId, out VirtualProcessor vp)) return;
 
             vp.StopRequested = true;
@@ -1898,8 +1738,15 @@ namespace Brovan.Core.Emulation
         {
             int hr;
             vp.Running = true;
-            vp.InGuest = true;
-            if (releaseRunLock) Monitor.Exit(_runLock);
+            while (!_gate.TryEnterGuest(vp, releaseRunLock))
+            {
+                if (_gate.NeedsTlbFlush(vp, out long generation))
+                {
+                    FlushGuestTlb(vp);
+                    GuestEntryGate.TlbFlushed(vp, generation);
+                }
+            }
+
             try
             {
                 hr = WhpNative.WHvRunVirtualProcessor(_partition, vp.Index, (void*)vp.ExitContextPtr,
@@ -1907,8 +1754,7 @@ namespace Brovan.Core.Emulation
             }
             finally
             {
-                vp.InGuest = false;
-                if (releaseRunLock) Monitor.Enter(_runLock);
+                _gate.LeaveGuest(vp, releaseRunLock);
                 vp.Running = false;
             }
 
@@ -1931,6 +1777,7 @@ namespace Brovan.Core.Emulation
 
         private static bool IsUnboundedRange(ulong begin, ulong end) => end == 0 || end < begin;
 
+        // Hooks change only while no worker runs a slice, so the exits read the hook lists without a lock.
         public IntPtr AddMemoryHook(ulong begin, ulong end, BackendHookType hookType, MemoryHookCallback callback)
         {
             if (callback == null) return IntPtr.Zero;
@@ -1973,6 +1820,7 @@ namespace Brovan.Core.Emulation
 
         private void RefreshTrappedPages()
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             _trappedPages.Clear();
 
             for (int i = 0; i < _memoryHooks.Count; i++)
@@ -2115,32 +1963,7 @@ namespace Brovan.Core.Emulation
         {
             if (size == 0) return true;
             if (Volatile.Read(ref _disposing) != 0 || Volatile.Read(ref _disposed) != 0) return false;
-            if (!IsGuestRange(address, size)) return false;
-
-            ulong current = address;
-            ulong remaining = size;
-            while (remaining > 0)
-            {
-                ulong pageBase = current & ~WhpConstants.PageMask;
-                if (!TryLookupPage(pageBase, out MappedPage page))
-                {
-                    if (!_foreignStillMapped.ContainsKey(pageBase))
-                        return false;
-                    ulong stuck = pageBase + WhpConstants.PageSize - current;
-                    if (stuck > remaining) stuck = remaining;
-                    current += stuck;
-                    remaining -= stuck;
-                    continue;
-                }
-                ulong runEnd = TryGetIntactBackingEnd(page, pageBase, out ulong backingEnd)
-                    ? backingEnd
-                    : pageBase + WhpConstants.PageSize;
-                ulong chunk = runEnd - current;
-                if (chunk > remaining) chunk = remaining;
-                current += chunk;
-                remaining -= chunk;
-            }
-            return true;
+            return _paging.IsRangeMapped(address, size);
         }
 
         public void Dispose()
@@ -2180,14 +2003,14 @@ namespace Brovan.Core.Emulation
                     }
                 }
 
-                foreach (KeyValuePair<IntPtr, BackingAllocation> kv in _backingAllocations)
+                using (_paging.LockMappings())
+                    _frees.CompletePassed(true);
+                foreach (KeyValuePair<IntPtr, BackingAllocation> kv in _backings)
                     FreeAllocation(kv.Key, kv.Value);
-                _backingAllocations.Clear();
-                _backingStarts.Clear();
+                _backings.Clear();
                 _windowBlocks.Clear();
-                _mappedPages.Clear();
-                _lastLookupPageBase = ulong.MaxValue;
-                _lastLookupPage = null;
+                _paging.Clear();
+                _gate.Dispose();
 
                 if (_internalPoolPtr != IntPtr.Zero)
                 {
@@ -2207,12 +2030,12 @@ namespace Brovan.Core.Emulation
 
         ~Whp() { Dispose(); }
 
-        private static WhpMemoryPermission TranslateProtection(MemoryProtection protection)
+        private static GuestPagePermission TranslateProtection(MemoryProtection protection)
         {
-            WhpMemoryPermission perm = WhpMemoryPermission.None;
-            if ((protection & MemoryProtection.Read) != 0) perm |= WhpMemoryPermission.Read;
-            if ((protection & MemoryProtection.Write) != 0) perm |= WhpMemoryPermission.Write;
-            if ((protection & MemoryProtection.Execute) != 0) perm |= WhpMemoryPermission.Execute;
+            GuestPagePermission perm = GuestPagePermission.None;
+            if ((protection & MemoryProtection.Read) != 0) perm |= GuestPagePermission.Read;
+            if ((protection & MemoryProtection.Write) != 0) perm |= GuestPagePermission.Write;
+            if ((protection & MemoryProtection.Execute) != 0) perm |= GuestPagePermission.Execute;
             return perm;
         }
 
@@ -2273,7 +2096,7 @@ namespace Brovan.Core.Emulation
 
             if (pointer == IntPtr.Zero)
             {
-                Utils.LogError($"[Whp] Host backing commit of 0x{size:X} bytes failed with {Marshal.GetLastWin32Error()}. Live backing 0x{_backingBytes:X} bytes in {_backingAllocations.Count} allocations.");
+                Utils.LogError($"[Whp] Host backing commit of 0x{size:X} bytes failed with {Marshal.GetLastWin32Error()}. Live backing 0x{_backingBytes:X} bytes in {_backings.Count} allocations.");
                 return false;
             }
 
@@ -2312,7 +2135,7 @@ namespace Brovan.Core.Emulation
             if (!TryAllocateBackingMemory(size, out backing))
                 return false;
 
-            AddBackingAllocation(backing, new BackingAllocation
+            _backings.Add(backing, new BackingAllocation
             {
                 Size = size,
                 LivePages = (int)(size / WhpConstants.PageSize),
@@ -2359,7 +2182,7 @@ namespace Brovan.Core.Emulation
                     Size = BackingWindowSize,
                     Window = new BackingWindow(windowBase, backing),
                 };
-                AddBackingAllocation(backing, allocation);
+                _backings.Add(backing, allocation);
                 _windowBlocks[windowBase] = allocation;
                 created = true;
             }
@@ -2369,8 +2192,13 @@ namespace Brovan.Core.Emulation
             int count = (int)(size / WhpConstants.PageSize);
             if (!window.CanCommit(first, count))
             {
-                WindowStats.Fallback(WindowFallback.SlotCommitted);
-                return false;
+                // A slot frees for reuse once its deferred discard runs.
+                _frees.CompletePassedIfAny();
+                if (!window.CanCommit(first, count))
+                {
+                    WindowStats.Fallback(WindowFallback.SlotCommitted);
+                    return false;
+                }
             }
 
             IntPtr slot = window.SlotOf(first);
@@ -2378,7 +2206,7 @@ namespace Brovan.Core.Emulation
             {
                 WindowStats.Fallback(WindowFallback.CommitFailed);
                 if (created)
-                    FreeIfUnreferenced(backing, allocation);
+                    _frees.FreeUnpublished(backing, allocation);
                 return false;
             }
 
@@ -2389,10 +2217,10 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        private void ReleaseBacking(MappedPage page)
+        private void ReleaseBacking(GuestPage page)
         {
             if (page.OwnedBacking == IntPtr.Zero) return;
-            if (!_backingAllocations.TryGetValue(page.OwnedBacking, out BackingAllocation allocation)) return;
+            if (!_backings.TryGet(page.OwnedBacking, out BackingAllocation allocation)) return;
 
             if (page.IsAlias)
             {
@@ -2405,46 +2233,90 @@ namespace Brovan.Core.Emulation
             }
 
             if (!allocation.IsReferenced)
-                _releasedBackings.Add(page.OwnedBacking);
+                _frees.Released(page.OwnedBacking);
             else if (!allocation.IsDiscardable)
                 return;
             else if (!page.IsAlias)
-                _discardRuns.Add(page.OwnedBacking, page.HostPage, WhpConstants.PageSize);
+                _frees.Discards.Add(page.OwnedBacking, page.HostPage, WhpConstants.PageSize);
             else
-                allocation.Window?.AddFreedSlots(_discardRuns);
+                allocation.Window?.AddFreedSlots(_frees.Discards);
         }
 
         // Only after the rebuild unmaps the pages. Until then other processors can reach the backing.
         private void FreeReleasedBackings()
         {
-            for (int i = 0; i < _releasedBackings.Count; i++)
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            _frees.Flush();
+        }
+
+        public bool HasDeferredFrees => _frees.HasDeferred;
+
+        public bool CompleteDeferredFrees(bool all)
+        {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return _frees.CompletePassed(all);
+        }
+
+        private sealed class FreeSite : IBackingFreeSite<BackingAllocation>
+        {
+            private readonly Whp _owner;
+
+            public FreeSite(Whp owner) => _owner = owner;
+
+            public bool IsBackingStillMapped(IntPtr start, ulong size) => _owner.IsBackingStillMapped(start, size);
+
+            public void ForgetBlock(IntPtr backing, BackingAllocation allocation)
             {
-                if (_backingAllocations.TryGetValue(_releasedBackings[i], out BackingAllocation allocation))
-                    FreeIfUnreferenced(_releasedBackings[i], allocation);
+                _owner._paging.AssertMappingsHeld(nameof(ForgetBlock));
+                if (allocation.Window != null)
+                    _owner._windowBlocks.Remove(allocation.Window.GuestBase);
             }
 
-            _releasedBackings.Clear();
-
-            for (int i = 0; i < _discardRuns.Count; i++)
+            public void FreeBlock(IntPtr backing, BackingAllocation allocation)
             {
-                HostDiscardRuns.Run run = _discardRuns[i];
-                if (_backingAllocations.TryGetValue(run.Key, out BackingAllocation allocation) && allocation.IsDiscardable
-                    && !IsBackingStillMapped(run.Start, run.Size) && HostDiscard.Release(run.Start, run.Size))
-                    allocation.Window?.Discarded(run.Start, run.Size);
+                _owner._paging.AssertMappingsHeld(nameof(FreeBlock));
+                _owner.FreeAllocation(backing, allocation);
             }
 
-            _discardRuns.Clear();
+            // A window slot can be committed again after its run was queued, so only the slots still freed go.
+            public void DiscardRun(HostDiscardRuns.Run run, BackingAllocation allocation)
+            {
+                BackingWindow window = allocation.Window;
+                if (window == null)
+                {
+                    HostDiscard.Release(run.Start, run.Size);
+                    return;
+                }
+
+                long end = run.Start.ToInt64() + (long)run.Size;
+                long page = run.Start.ToInt64();
+                while (page < end)
+                {
+                    if (!window.IsFreed(new IntPtr(page)))
+                    {
+                        page += (long)WhpConstants.PageSize;
+                        continue;
+                    }
+
+                    long first = page;
+                    while (page < end && window.IsFreed(new IntPtr(page)))
+                        page += (long)WhpConstants.PageSize;
+
+                    IntPtr start = new IntPtr(first);
+                    ulong size = (ulong)(page - first);
+                    if (HostDiscard.Release(start, size))
+                        window.Discarded(start, size);
+                }
+            }
         }
 
         public IntPtr PinBacking(IntPtr hostPointer, ulong size)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck()) return IntPtr.Zero;
 
-            IntPtr backing = FindBackingAllocation(hostPointer);
-            if (backing == IntPtr.Zero || size == 0 || !_backingAllocations.TryGetValue(backing, out BackingAllocation allocation))
-                return IntPtr.Zero;
-
-            if (size > allocation.Size - (ulong)(hostPointer.ToInt64() - backing.ToInt64()))
+            IntPtr backing = _backings.FindRange(hostPointer, size, out BackingAllocation allocation);
+            if (backing == IntPtr.Zero)
                 return IntPtr.Zero;
 
             // A window is reserved past its committed slots.
@@ -2457,29 +2329,15 @@ namespace Brovan.Core.Emulation
 
         public void UnpinBacking(IntPtr pin)
         {
-            if (DisposedCheck() || !_backingAllocations.TryGetValue(pin, out BackingAllocation allocation) || allocation.Pins == 0)
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            if (DisposedCheck() || !_backings.TryGet(pin, out BackingAllocation allocation) || allocation.Pins == 0)
                 return;
 
             allocation.Pins--;
             if (allocation.Window != null && allocation.IsReferenced && allocation.IsDiscardable)
-                allocation.Window.AddFreedSlots(_discardRuns);
-            FreeIfUnreferenced(pin, allocation);
-        }
-
-        private void FreeIfUnreferenced(IntPtr backing, BackingAllocation allocation)
-        {
-            if (allocation.IsReferenced || IsBackingStillMapped(backing, allocation.Size)) return;
-
-            FreeAllocation(backing, allocation);
-            _backingAllocations.Remove(backing);
-            if (_discardRuns.Count != 0)
-                _discardRuns.Remove(backing);
-            if (allocation.Window != null)
-                _windowBlocks.Remove(allocation.Window.GuestBase);
-
-            int index = _backingStarts.BinarySearch(backing.ToInt64());
-            if (index >= 0)
-                _backingStarts.RemoveAt(index);
+                allocation.Window.AddFreedSlots(_frees.Discards);
+            _frees.FreeIfUnreferenced(pin, allocation);
+            _frees.Settle();
         }
 
         private bool IsBackingStillMapped(IntPtr backing, ulong size)
@@ -2502,36 +2360,11 @@ namespace Brovan.Core.Emulation
                 FreeBackingMemory(backing, allocation.Size);
         }
 
-        private void AddBackingAllocation(IntPtr backing, BackingAllocation allocation)
-        {
-            _backingAllocations[backing] = allocation;
-
-            int index = _backingStarts.BinarySearch(backing.ToInt64());
-            if (index < 0)
-                _backingStarts.Insert(~index, backing.ToInt64());
-        }
-
         // Adopted storage is a file view. A full populate reads the whole file in.
         private bool IsAdoptedBacking(IntPtr hostPointer)
         {
-            IntPtr backing = FindBackingAllocation(hostPointer);
-            return backing != IntPtr.Zero && _backingAllocations[backing].Owner != null;
-        }
-
-        private IntPtr FindBackingAllocation(IntPtr hostPointer)
-        {
-            long target = hostPointer.ToInt64();
-            int index = _backingStarts.BinarySearch(target);
-            if (index < 0)
-                index = ~index - 1;
-
-            if (index < 0)
-                return IntPtr.Zero;
-
-            IntPtr start = new IntPtr(_backingStarts[index]);
-            return _backingAllocations.TryGetValue(start, out BackingAllocation allocation) && (ulong)(target - start.ToInt64()) < allocation.Size
-                ? start
-                : IntPtr.Zero;
+            IntPtr backing = _backings.Find(hostPointer);
+            return backing != IntPtr.Zero && _backings.TryGet(backing, out BackingAllocation allocation) && allocation.Owner != null;
         }
 
         private IntPtr PinHookEntry(object entry)
@@ -2672,6 +2505,7 @@ namespace Brovan.Core.Emulation
 
         private unsafe VirtualProcessor CreateProcessor(uint index)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             int hr = WhpNative.WHvCreateVirtualProcessor(_partition, index, 0);
             if (WhpNative.Failed(hr))
                 throw new WhpException("WHvCreateVirtualProcessor failed", hr);
@@ -2703,16 +2537,16 @@ namespace Brovan.Core.Emulation
 
         private unsafe void AllocateProcessorTables(VirtualProcessor vp)
         {
-            vp.GdtPageGpa = AllocateInternalPage(WhpMemoryPermission.Read);
+            vp.GdtPageGpa = AllocateInternalPage(GuestPagePermission.Read);
             vp.TssPageGpa = AllocateInternalPage();
             ulong stackSize = ExceptionStackPages * WhpConstants.PageSize;
-            ulong stackTop = AllocateInternalRange(stackSize, WhpMemoryPermission.ReadWrite, out IntPtr stackHost) + stackSize;
+            ulong stackTop = AllocateInternalRange(stackSize, GuestPagePermission.ReadWrite, out IntPtr stackHost) + stackSize;
             vp.ExceptionStackTop = stackTop;
             vp.ExceptionStackTopHost = stackHost + (nint)stackSize;
 
-            if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage template)
-                || !_mappedPages.TryGetValue(vp.GdtPageGpa, out MappedPage gdtPage)
-                || !_mappedPages.TryGetValue(vp.TssPageGpa, out MappedPage tssPage))
+            if (!_mappedPages.TryGetValue(_gdtPageGpa, out GuestPage template)
+                || !_mappedPages.TryGetValue(vp.GdtPageGpa, out GuestPage gdtPage)
+                || !_mappedPages.TryGetValue(vp.TssPageGpa, out GuestPage tssPage))
                 throw new WhpException("Failed to allocate the processor tables.");
 
             byte* gdt = (byte*)gdtPage.HostPage;
@@ -2731,9 +2565,9 @@ namespace Brovan.Core.Emulation
         // Each processor has its own IDT, because int 2E enters that processor's own syscall stub.
         private unsafe void AllocateGateIdt(VirtualProcessor vp)
         {
-            vp.IdtPageGpa = AllocateInternalPage(WhpMemoryPermission.Read);
-            if (!_mappedPages.TryGetValue(_exceptionIdtPageGpa, out MappedPage template)
-                || !_mappedPages.TryGetValue(vp.IdtPageGpa, out MappedPage idtPage))
+            vp.IdtPageGpa = AllocateInternalPage(GuestPagePermission.Read);
+            if (!_mappedPages.TryGetValue(_exceptionIdtPageGpa, out GuestPage template)
+                || !_mappedPages.TryGetValue(vp.IdtPageGpa, out GuestPage idtPage))
                 throw new WhpException("Failed to allocate the processor IDT.");
 
             Unsafe.CopyBlockUnaligned((byte*)idtPage.HostPage, (byte*)template.HostPage, (uint)WhpConstants.PageSize);
@@ -2758,10 +2592,15 @@ namespace Brovan.Core.Emulation
 
         public int ProcessorLimit => (int)_processorLimit;
 
-        public bool IsThreadResident(uint threadId) => _threadProcessors.ContainsKey(threadId);
+        public bool IsThreadResident(uint threadId)
+        {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return _threadProcessors.ContainsKey(threadId);
+        }
 
         public bool TryBindThread(uint threadId)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (DisposedCheck() || threadId == 0)
                 return false;
 
@@ -2797,6 +2636,7 @@ namespace Brovan.Core.Emulation
 
         public void UnbindThread(uint threadId)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (!_threadProcessors.Remove(threadId, out VirtualProcessor vp))
                 return;
 
@@ -2811,6 +2651,7 @@ namespace Brovan.Core.Emulation
 
         public void SelectThread(uint threadId)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             SelectProcessor(_threadProcessors.TryGetValue(threadId, out VirtualProcessor vp) ? vp : _processors[(int)SharedVpIndex]);
         }
 
@@ -2836,7 +2677,7 @@ namespace Brovan.Core.Emulation
             values[8] = WhvRegisterValue.FromTable(vp.IdtPageGpa != 0 ? vp.IdtPageGpa : _exceptionIdtPageGpa,
                 (ushort)(WhpConstants.ExceptionVectorCount * 16 - 1));
             names[9] = (uint)WhvRegisterName.Cr0; values[9] = WhvRegisterValue.FromReg64(0x80010033UL);
-            names[10] = (uint)WhvRegisterName.Cr3; values[10] = WhvRegisterValue.FromReg64(_pml4Gpa);
+            names[10] = (uint)WhvRegisterName.Cr3; values[10] = WhvRegisterValue.FromReg64(_paging.Root);
             names[11] = (uint)WhvRegisterName.Cr4;
             values[11] = WhvRegisterValue.FromReg64(0x620UL | (_avxEnabled ? ControlRegister4.Osxsave : 0) | _cr4Protection);
             names[12] = (uint)WhvRegisterName.Efer;
@@ -2859,7 +2700,7 @@ namespace Brovan.Core.Emulation
                 count++;
             }
 
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 fixed (uint* n = names)
                 fixed (WhvRegisterValue* v = values)
@@ -2875,8 +2716,8 @@ namespace Brovan.Core.Emulation
         {
             if (!_guest64) return;
 
-            _syscallTrapPageGpa = AllocateInternalPage(WhpMemoryPermission.ReadExecute);
-            if (_mappedPages.TryGetValue(_syscallTrapPageGpa, out MappedPage page))
+            _syscallTrapPageGpa = AllocateInternalPage(GuestPagePermission.ReadExecute);
+            if (_mappedPages.TryGetValue(_syscallTrapPageGpa, out GuestPage page))
             {
                 byte* code = (byte*)page.HostPage;
                 code[SyscallTrapPage.CompatSyscallOffset] = 0xF4;
@@ -2886,9 +2727,9 @@ namespace Brovan.Core.Emulation
         // A plain return reloads the registers through the iretq frame, so a syscall needs no register hypercall.
         private void AllocateSyscallStub(VirtualProcessor vp)
         {
-            vp.SyscallStubGpa = AllocateInternalRange(WhpConstants.PageSize, WhpMemoryPermission.ReadExecute, out IntPtr code);
-            ulong spillGpa = AllocateInternalRange(WhpConstants.PageSize, WhpMemoryPermission.ReadWrite, out vp.SyscallSpill);
-            _guestKernel ??= new GuestKernelHost(this, WhpConstants.InternalPageTableBase,
+            vp.SyscallStubGpa = AllocateInternalRange(WhpConstants.PageSize, GuestPagePermission.ReadExecute, out IntPtr code);
+            ulong spillGpa = AllocateInternalRange(WhpConstants.PageSize, GuestPagePermission.ReadWrite, out vp.SyscallSpill);
+            _guestKernel ??= new GuestKernelHost(this, _gate, WhpConstants.InternalPageTableBase,
                 _guest64 ? WhpConstants.UserCodeSelector : WhpConstants.UserCodeSelector32, WhpConstants.UserDataSelector,
                 smap: (_cr4Protection & ControlRegister4.Smap) != 0, alwaysSpill: true,
                 _guest64 ? GuestSyscallEntry.Syscall : GuestSyscallEntry.InterruptGate);
@@ -2901,9 +2742,10 @@ namespace Brovan.Core.Emulation
 
         bool IGuestKernelBackend.TryAllocateKernelRange(ulong size, bool writable, out ulong address, out IntPtr host)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             try
             {
-                address = AllocateInternalRange(size, writable ? WhpMemoryPermission.ReadWrite : WhpMemoryPermission.Read, out host);
+                address = AllocateInternalRange(size, writable ? GuestPagePermission.ReadWrite : GuestPagePermission.Read, out host);
                 RebuildMappings();
                 return true;
             }
@@ -2917,28 +2759,37 @@ namespace Brovan.Core.Emulation
         }
 
         unsafe bool IGuestKernelBackend.MapKernelView(IntPtr host, ulong address, ulong size)
-            => !WhpNative.Failed(WhpNative.WHvMapGpaRange(_partition, (void*)host, address, size, WhvMapGpaRangeFlags.Read));
-
-        bool IGuestKernelBackend.UnmapKernelView(ulong address, ulong size) => UnmapGpaRange(address, size);
-
-        IntPtr IGuestKernelBackend.EnsureKernelPageDirectory(ulong address)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return !WhpNative.Failed(WhpNative.WHvMapGpaRange(_partition, (void*)host, address, size, WhvMapGpaRangeFlags.Read));
+        }
+
+        bool IGuestKernelBackend.UnmapKernelView(ulong address, ulong size)
+        {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return UnmapGpaRange(address, size);
+        }
+
+        // A new table page enters the GPA map before the entry that points through it.
+        bool IGuestKernelBackend.MapKernelLargePage(ulong address)
+        {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             try
             {
-                ulong pdptGpa = EnsureChildTable(_pml4Gpa, (int)((address >> 39) & 0x1FF));
-                ulong pdGpa = EnsureChildTable(pdptGpa, (int)((address >> 30) & 0x1FF));
+                _paging.EnsureDirectoryTable(address);
                 if (_mappingsDirty)
                     RebuildMappings();
-                return _pageTableViews.TryGetValue(pdGpa, out IntPtr pd) ? pd : IntPtr.Zero;
+                return _paging.SetKernelLargePage(address);
             }
             catch (WhpException ex)
             {
                 Utils.LogError($"[Whp] No page table for a kernel view at 0x{address:X}: {ex.Message}");
-                return IntPtr.Zero;
+                return false;
             }
         }
 
-        void IGuestKernelBackend.EvictProcessors() => EvictProcessors();
+
+        ulong IGuestPagingBackend.AllocateTablePage() => AllocateInternalPage(mapIntoGuest: false);
 
         private static unsafe void WriteDescriptor(byte* gdt, int index, ulong segmentBase, uint limit, byte access, byte flags)
         {
@@ -2953,8 +2804,8 @@ namespace Brovan.Core.Emulation
 
         private void InitializeGdt()
         {
-            _gdtPageGpa = AllocateInternalPage(WhpMemoryPermission.Read);
-            if (!_mappedPages.TryGetValue(_gdtPageGpa, out MappedPage gdtPage) || gdtPage.HostPage == IntPtr.Zero)
+            _gdtPageGpa = AllocateInternalPage(GuestPagePermission.Read);
+            if (!_mappedPages.TryGetValue(_gdtPageGpa, out GuestPage gdtPage) || gdtPage.HostPage == IntPtr.Zero)
                 throw new WhpException("Failed to allocate GDT page.");
 
             unsafe
@@ -2974,12 +2825,12 @@ namespace Brovan.Core.Emulation
 
         private void InitializeExceptionHandling()
         {
-            _exceptionStubPageGpa = AllocateInternalPage(WhpMemoryPermission.ReadExecute);
-            _exceptionIdtPageGpa = AllocateInternalPage(WhpMemoryPermission.Read);
+            _exceptionStubPageGpa = AllocateInternalPage(GuestPagePermission.ReadExecute);
+            _exceptionIdtPageGpa = AllocateInternalPage(GuestPagePermission.Read);
 
             unsafe
             {
-                if (_mappedPages.TryGetValue(_exceptionStubPageGpa, out MappedPage stubPage))
+                if (_mappedPages.TryGetValue(_exceptionStubPageGpa, out GuestPage stubPage))
                 {
                     byte* stubs = (byte*)stubPage.HostPage;
                     for (uint vector = 0; vector < WhpConstants.ExceptionVectorCount; vector++)
@@ -2989,7 +2840,7 @@ namespace Brovan.Core.Emulation
                     }
                 }
 
-                if (_mappedPages.TryGetValue(_exceptionIdtPageGpa, out MappedPage idtPage))
+                if (_mappedPages.TryGetValue(_exceptionIdtPageGpa, out GuestPage idtPage))
                 {
                     byte* idt = (byte*)idtPage.HostPage;
                     for (uint vector = 0; vector < WhpConstants.ExceptionVectorCount; vector++)
@@ -3013,14 +2864,11 @@ namespace Brovan.Core.Emulation
 
         private unsafe void SetUserGates(ulong idtGpa, Func<uint, bool> raisableFromUserMode)
         {
-            if (_mappedPages.TryGetValue(idtGpa, out MappedPage idtPage) && idtPage.HostPage != IntPtr.Zero)
+            if (_mappedPages.TryGetValue(idtGpa, out GuestPage idtPage) && idtPage.HostPage != IntPtr.Zero)
                 GuestInterruptGates.SetUserGates((byte*)idtPage.HostPage, WhpConstants.ExceptionVectorCount, raisableFromUserMode);
         }
 
-        private void InitializeLongModePageTables()
-        {
-            _pml4Gpa = AllocateInternalPage(mapIntoGuest: false);
-        }
+        private void InitializeLongModePageTables() => _paging.CreateRoot();
 
         private void AllocateInternalPool()
         {
@@ -3028,16 +2876,18 @@ namespace Brovan.Core.Emulation
             _internalPoolOffset = 0;
         }
 
-        private ulong AllocateInternalPage(WhpMemoryPermission permissions = WhpMemoryPermission.ReadWrite, bool mapIntoGuest = true)
+        private ulong AllocateInternalPage(GuestPagePermission permissions = GuestPagePermission.ReadWrite, bool mapIntoGuest = true)
             => AllocateInternalRange(WhpConstants.PageSize, permissions, mapIntoGuest);
 
-        private ulong AllocateInternalRange(ulong size, WhpMemoryPermission permissions, bool mapIntoGuest = true)
+        private ulong AllocateInternalRange(ulong size, GuestPagePermission permissions, bool mapIntoGuest = true)
             => AllocateInternalRange(size, permissions, out _, mapIntoGuest);
 
-        private ulong AllocateInternalRange(ulong size, WhpMemoryPermission permissions, out IntPtr host, bool mapIntoGuest = true)
+        private ulong AllocateInternalRange(ulong size, GuestPagePermission permissions, out IntPtr host, bool mapIntoGuest = true)
         {
             if ((size & WhpConstants.PageMask) != 0)
                 size = (size + WhpConstants.PageMask) & ~WhpConstants.PageMask;
+            if (size > InternalPages.PageLimit(WhpConstants.InternalPageTableBase) - _nextInternalGpa)
+                throw new WhpException($"No internal guest address space for 0x{size:X} bytes");
 
             IntPtr backing;
             if (_internalPoolPtr != IntPtr.Zero &&
@@ -3060,7 +2910,7 @@ namespace Brovan.Core.Emulation
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong pageGpa = baseGpa + off;
-                MappedPage page = new MappedPage
+                GuestPage page = new GuestPage
                 {
                     HostPage = new IntPtr(backingBase + (long)off),
                     OwnedBacking = IntPtr.Zero,
@@ -3068,126 +2918,14 @@ namespace Brovan.Core.Emulation
                     // The PTE protects an internal page. Its GPA range keeps the flags of the pages around it.
                     WriteRetained = true,
                 };
-                SetMappedPage(pageGpa, page);
-                _pageTableViews[pageGpa] = page.HostPage;
+                SetGuestPage(pageGpa, page);
 
                 if (mapIntoGuest)
-                    EnsureVirtualMapping(pageGpa, permissions);
+                    _paging.SetLeaf(pageGpa, permissions);
             }
 
             return baseGpa;
         }
-
-        private const ulong PageTableEntryDefaultFlags =
-            WhpConstants.PageTableEntryPresent | WhpConstants.PageTableEntryWritable | WhpConstants.PageTableEntryUser;
-
-        private bool EnsureVirtualMapping(ulong guestAddress, WhpMemoryPermission permissions)
-        {
-            ulong pageBase = guestAddress & ~WhpConstants.PageMask;
-            int pml4Index = (int)((pageBase >> 39) & 0x1FF);
-            int pdptIndex = (int)((pageBase >> 30) & 0x1FF);
-            int pdIndex = (int)((pageBase >> 21) & 0x1FF);
-            int ptIndex = (int)((pageBase >> 12) & 0x1FF);
-
-            ulong pdptGpa = EnsureChildTable(_pml4Gpa, pml4Index);
-            ulong pdGpa = EnsureChildTable(pdptGpa, pdptIndex);
-            ulong ptGpa = EnsureChildTable(pdGpa, pdIndex);
-
-            if (!_pageTableViews.TryGetValue(ptGpa, out IntPtr ptPtr) || ptPtr == IntPtr.Zero) return false;
-            unsafe
-            {
-                ulong* pt = (ulong*)ptPtr;
-                ulong entry = GuestPageEntries.Leaf(pageBase, permissions != WhpMemoryPermission.None,
-                    (permissions & WhpMemoryPermission.Write) != 0, (permissions & WhpMemoryPermission.Execute) != 0,
-                    WhpConstants.InternalPageTableBase);
-
-                ulong old;
-                if (_watchedPages == 0)
-                {
-                    old = pt[ptIndex];
-                    Volatile.Write(ref pt[ptIndex], entry);
-                }
-                else
-                {
-                    _mappedPages.TryGetValue(pageBase, out MappedPage page);
-
-                    // NT: an untouched page has no valid PTE until its first access.
-                    if (page != null && page.Untouched)
-                        entry = 0;
-
-                    // Another processor can set the dirty bit until the swap.
-                    old = Interlocked.Exchange(ref pt[ptIndex], entry);
-                    if ((old & WhpConstants.PageTableEntryDirty) != 0 && page != null && page.WriteWatched)
-                        page.Written = true;
-                }
-
-                return GuestPageEntries.RemovesAccess(old, entry);
-            }
-        }
-
-        private unsafe ulong* FindLeafEntry(ulong pageBase, ref ulong* table, ref ulong tableRange)
-        {
-            if (pageBase >> 21 != tableRange)
-            {
-                table = FindLeafTable(pageBase);
-                tableRange = pageBase >> 21;
-            }
-
-            return table == null ? null : table + ((pageBase >> 12) & 0x1FF);
-        }
-
-        private unsafe ulong* FindLeafTable(ulong pageBase)
-        {
-            ulong* directoryEntry = FindDirectoryEntry(pageBase);
-            if (directoryEntry == null || !NamesTable(*directoryEntry))
-                return null;
-
-            return _pageTableViews.TryGetValue(*directoryEntry & WhpConstants.PageTableEntryAddressMask, out IntPtr leaf) && leaf != IntPtr.Zero
-                ? (ulong*)leaf
-                : null;
-        }
-
-        private unsafe ulong* FindDirectoryEntry(ulong pageBase)
-        {
-            ulong table = _pml4Gpa;
-            for (int shift = 39; shift >= 30; shift -= 9)
-            {
-                if (!_pageTableViews.TryGetValue(table, out IntPtr view) || view == IntPtr.Zero)
-                    return null;
-
-                ulong entry = ((ulong*)view)[(pageBase >> shift) & 0x1FF];
-                if (!NamesTable(entry))
-                    return null;
-                table = entry & WhpConstants.PageTableEntryAddressMask;
-            }
-
-            return _pageTableViews.TryGetValue(table, out IntPtr directory) && directory != IntPtr.Zero
-                ? (ulong*)directory + ((pageBase >> 21) & 0x1FF)
-                : null;
-        }
-
-        private ulong EnsureChildTable(ulong tableGpa, int index, ulong newEntryFlags = PageTableEntryDefaultFlags)
-        {
-            if (!_pageTableViews.TryGetValue(tableGpa, out IntPtr tablePtr) || tablePtr == IntPtr.Zero)
-                return 0;
-            unsafe
-            {
-                ulong* entries = (ulong*)tablePtr;
-                ulong entry = entries[index];
-                if ((entry & (WhpConstants.PageTableEntryPresent | WhpConstants.PageTableEntryWithheld)) == 0)
-                {
-                    ulong childGpa = AllocateInternalPage(mapIntoGuest: false);
-                    entries[index] = childGpa | newEntryFlags;
-                    return childGpa;
-                }
-                return entry & WhpConstants.PageTableEntryAddressMask;
-            }
-        }
-
-        private static bool NamesTable(ulong entry) =>
-            (entry & WhpConstants.PageTableEntryPresent) != 0
-                ? (entry & WhpConstants.PageTableEntryLargePage) == 0
-                : (entry & WhpConstants.PageTableEntryWithheld) != 0;
 
         // A withheld PDE turns the first touch of a fully covered 2 MiB block into one guest #PF that populates the block.
         // The PDE keeps naming its table, so a processor that still caches it keeps a valid translation and needs no flush.
@@ -3201,70 +2939,40 @@ namespace Brovan.Core.Emulation
 
             for (ulong block = first; block < end; block += TouchBlockSize)
             {
-                ulong pdptGpa = EnsureChildTable(_pml4Gpa, (int)((block >> 39) & 0x1FF));
-                ulong pdGpa = EnsureChildTable(pdptGpa, (int)((block >> 30) & 0x1FF));
-                if (!_pageTableViews.TryGetValue(pdGpa, out IntPtr pdPtr) || pdPtr == IntPtr.Zero)
+                ulong pdGpa = _paging.EnsureDirectoryTable(block);
+                IntPtr pdPtr = _paging.PageTableView(pdGpa);
+                if (pdPtr == IntPtr.Zero)
                     return;
 
                 int pdIndex = (int)((block >> 21) & 0x1FF);
                 ulong* directoryEntry = (ulong*)pdPtr + pdIndex;
                 ulong entry = *directoryEntry;
-                if ((entry & (WhpConstants.PageTableEntryWithheld | WhpConstants.PageTableEntryLargePage)) != 0)
+                if ((entry & (GuestPageEntries.Withheld | WhpConstants.PageTableEntryLargePage)) != 0)
                     continue;
 
                 if (entry == 0)
-                    EnsureChildTable(pdGpa, pdIndex, WhpConstants.PageTableEntryWithheld);
+                    _paging.EnsureChildTable(pdGpa, pdIndex, GuestPageEntries.Withheld);
                 else
-                    Volatile.Write(ref *directoryEntry, (entry & WhpConstants.PageTableEntryAddressMask) | WhpConstants.PageTableEntryWithheld);
+                    Volatile.Write(ref *directoryEntry, (entry & WhpConstants.PageTableEntryAddressMask) | GuestPageEntries.Withheld);
 
                 _touchPopulateArmed = true;
             }
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool TryLookupPage(ulong pageBase, out MappedPage page)
+        private void SetGuestPage(ulong guestAddress, GuestPage page)
         {
-            if (pageBase == _lastLookupPageBase)
-            {
-                page = _lastLookupPage;
-                return true;
-            }
-
-            if (_mappedPages.TryGetValue(pageBase, out page) && page != null && page.HostPage != IntPtr.Zero)
-            {
-                _lastLookupPageBase = pageBase;
-                _lastLookupPage = page;
-                return true;
-            }
-
-            page = null;
-            return false;
-        }
-
-        private void SetMappedPage(ulong guestAddress, MappedPage page)
-        {
-            if (_watchedPages != 0 && _mappedPages.TryGetValue(guestAddress, out MappedPage replaced))
-                ForgetWatchedPage(replaced);
-
-            _mappedPages[guestAddress] = page;
+            _paging.SetPage(guestAddress, page);
             if (_foreignStillMapped.Count != 0)
                 _foreignStillMapped.Remove(guestAddress);
-            _sortedPageKeysDirty = true;
             _mappingsDirty = true;
             MarkSpanDirty(guestAddress, WhpConstants.PageSize);
-            _lastLookupPageBase = ulong.MaxValue;
-            _lastLookupPage = null;
         }
 
-        private void RemoveMappedPage(ulong guestAddress)
+        private void RemoveGuestPage(ulong guestAddress)
         {
-            if (!_mappedPages.Remove(guestAddress, out MappedPage removed)) return;
-            ForgetWatchedPage(removed);
-            _sortedPageKeysDirty = true;
+            if (!_paging.RemovePage(guestAddress)) return;
             _mappingsDirty = true;
             MarkSpanDirty(guestAddress, WhpConstants.PageSize);
-            _lastLookupPageBase = ulong.MaxValue;
-            _lastLookupPage = null;
         }
 
         private void MarkSpanDirty(ulong address, ulong size)
@@ -3321,22 +3029,9 @@ namespace Brovan.Core.Emulation
             if (index >= 0) _activeMapStarts.RemoveAt(index);
         }
 
-        private ulong[] GetSortedPageKeys()
-        {
-            if (!_sortedPageKeysDirty) return _sortedPageKeys;
-
-            int count = _mappedPages.Count;
-            if (_sortedPageKeys.Length < count)
-                _sortedPageKeys = new ulong[Math.Max(count, _sortedPageKeys.Length * 2)];
-
-            _mappedPages.Keys.CopyTo(_sortedPageKeys, 0);
-            Array.Sort(_sortedPageKeys, 0, count);
-            _sortedPageKeysDirty = false;
-            return _sortedPageKeys;
-        }
-
         private void RebuildMappings()
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             _mappingsDirty = false;
 
             if (!_fullRebuildRequired)
@@ -3355,31 +3050,24 @@ namespace Brovan.Core.Emulation
 
         private void RebuildMappingsFull()
         {
-            ulong[] sortedKeys = GetSortedPageKeys();
-            int keyCount = _mappedPages.Count;
             bool anyTrapped = _trappedPages.Count != 0;
 
             _desiredMaps.Clear();
             MarkIntactMaps(0, ulong.MaxValue);
             bool anyKept = _keptMapStarts.Count != 0;
 
-            for (int i = 0; i < keyCount;)
+            ulong cursor = 0;
+            while (_mappedPages.TryGetNext(cursor, out ulong runAddress, out GuestPage page))
             {
-                ulong runAddress = sortedKeys[i];
                 if (TryGetKeptMapEnd(runAddress, out ulong keptEnd))
                 {
-                    while (i < keyCount && sortedKeys[i] < keptEnd) i++;
+                    cursor = keptEnd;
                     continue;
                 }
 
-                if (!_mappedPages.TryGetValue(runAddress, out MappedPage page)
-                    || page == null
-                    || page.HostPage == IntPtr.Zero
-                    || LeavesGpaMap(page))
-                {
-                    i++;
+                cursor = runAddress + WhpConstants.PageSize;
+                if (page.HostPage == IntPtr.Zero || LeavesGpaMap(page))
                     continue;
-                }
 
                 if (anyTrapped && _trappedPages.TryGetValue(runAddress, out bool writeOnly))
                 {
@@ -3392,27 +3080,24 @@ namespace Brovan.Core.Emulation
                             Flags = WhvMapGpaRangeFlags.Read | WhvMapGpaRangeFlags.Execute,
                         };
                     }
-                    i++;
                     continue;
                 }
 
                 long runHostBaseLong = page.HostPage.ToInt64();
                 WhvMapGpaRangeFlags runFlags = MapFlags(page);
                 ulong runSize = WhpConstants.PageSize;
-                bool holdsNoAccess = page.Permissions == WhpMemoryPermission.None;
+                bool holdsNoAccess = page.Permissions == GuestPagePermission.None;
 
-                int j = i + 1;
-                while (j < keyCount)
+                while (true)
                 {
-                    if (sortedKeys[j] != runAddress + runSize) break;
-                    if (anyKept && _keptMapStarts.Contains(sortedKeys[j])) break;
-                    if (!_mappedPages.TryGetValue(sortedKeys[j], out MappedPage next) || next == null) break;
+                    ulong nextAddress = runAddress + runSize;
+                    if (anyKept && _keptMapStarts.Contains(nextAddress)) break;
+                    if (!_mappedPages.TryGetValue(nextAddress, out GuestPage next)) break;
                     if (LeavesGpaMap(next) || MapFlags(next) != runFlags) break;
-                    if (anyTrapped && _trappedPages.ContainsKey(sortedKeys[j])) break;
+                    if (anyTrapped && _trappedPages.ContainsKey(nextAddress)) break;
                     if (next.HostPage.ToInt64() != runHostBaseLong + (long)runSize) break;
-                    holdsNoAccess |= next.Permissions == WhpMemoryPermission.None;
+                    holdsNoAccess |= next.Permissions == GuestPagePermission.None;
                     runSize += WhpConstants.PageSize;
-                    j++;
                 }
 
                 _desiredMaps[runAddress] = new InstalledMap
@@ -3422,7 +3107,7 @@ namespace Brovan.Core.Emulation
                     Flags = runFlags,
                     HoldsNoAccess = holdsNoAccess,
                 };
-                i = j;
+                cursor = runAddress + runSize;
             }
 
             _staleMapKeys.Clear();
@@ -3536,7 +3221,7 @@ namespace Brovan.Core.Emulation
             for (ulong off = 0; off < map.Size; off += WhpConstants.PageSize)
             {
                 ulong address = start + off;
-                if (!_mappedPages.TryGetValue(address, out MappedPage page)
+                if (!_mappedPages.TryGetValue(address, out GuestPage page)
                     || page == null
                     || page.HostPage == IntPtr.Zero
                     || LeavesGpaMap(page))
@@ -3817,7 +3502,7 @@ namespace Brovan.Core.Emulation
                     continue;
                 }
 
-                if (!_mappedPages.TryGetValue(address, out MappedPage page)
+                if (!_mappedPages.TryGetValue(address, out GuestPage page)
                     || page == null
                     || page.HostPage == IntPtr.Zero
                     || LeavesGpaMap(page))
@@ -3844,17 +3529,17 @@ namespace Brovan.Core.Emulation
                 long runHostBaseLong = page.HostPage.ToInt64();
                 WhvMapGpaRangeFlags runFlags = MapFlags(page);
                 ulong runSize = WhpConstants.PageSize;
-                bool holdsNoAccess = page.Permissions == WhpMemoryPermission.None;
+                bool holdsNoAccess = page.Permissions == GuestPagePermission.None;
 
                 while (address + runSize < spanEnd)
                 {
                     if (anyKept && _keptMapStarts.Contains(address + runSize)) break;
-                    if (!_mappedPages.TryGetValue(address + runSize, out MappedPage next) || next == null) break;
+                    if (!_mappedPages.TryGetValue(address + runSize, out GuestPage next) || next == null) break;
                     if (LeavesGpaMap(next) || MapFlags(next) != runFlags) break;
                     if (next.HostPage == IntPtr.Zero) break;
                     if (anyTrapped && _trappedPages.ContainsKey(address + runSize)) break;
                     if (next.HostPage.ToInt64() != runHostBaseLong + (long)runSize) break;
-                    holdsNoAccess |= next.Permissions == WhpMemoryPermission.None;
+                    holdsNoAccess |= next.Permissions == GuestPagePermission.None;
                     runSize += WhpConstants.PageSize;
                 }
 
@@ -3872,6 +3557,7 @@ namespace Brovan.Core.Emulation
         private unsafe void MapGpaRange(ulong gpa, ulong size, IntPtr host, WhvMapGpaRangeFlags flags,
             bool overLiveRange = false, bool holdsNoAccess = false)
         {
+            _paging.AssertMappingsHeld(nameof(MapGpaRange));
             int hr = WhpNative.WHvMapGpaRange(_partition, (void*)host, gpa, size, flags);
             if (WhpNative.Failed(hr))
                 throw new WhpException($"WHvMapGpaRange failed (gpa=0x{gpa:X}, size=0x{size:X})", hr);
@@ -3894,7 +3580,7 @@ namespace Brovan.Core.Emulation
             ulong runStart = gpa;
             for (ulong page = gpa; page < gpa + size; page += WhpConstants.PageSize)
             {
-                if (!TryLookupPage(page, out MappedPage mapped) || mapped.Permissions != WhpMemoryPermission.None)
+                if (!_paging.TryLookupPage(page, out GuestPage mapped) || mapped.Permissions != GuestPagePermission.None)
                     continue;
 
                 if (page > runStart)
@@ -3918,10 +3604,11 @@ namespace Brovan.Core.Emulation
         // the block. Upper levels are never cleared, so the retry cannot loop.
         private unsafe bool TryPopulateOnTouch(ulong errorCode, ulong faultAddress)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (!_touchPopulateArmed || (errorCode & GuestPageEntries.FaultPresent) != 0 || !IsGuestRange(faultAddress & ~WhpConstants.PageMask, WhpConstants.PageSize))
                 return false;
 
-            ulong* directoryEntry = FindDirectoryEntry(faultAddress);
+            ulong* directoryEntry = _paging.FindDirectoryEntry(faultAddress);
             if (directoryEntry == null)
                 return false;
 
@@ -3930,14 +3617,14 @@ namespace Brovan.Core.Emulation
             {
                 ulong* table = null;
                 ulong tableRange = ulong.MaxValue;
-                ulong* leaf = FindLeafEntry(faultAddress & ~WhpConstants.PageMask, ref table, ref tableRange);
+                ulong* leaf = _paging.FindLeafEntry(faultAddress & ~WhpConstants.PageMask, ref table, ref tableRange);
                 return leaf != null && (*leaf & WhpConstants.PageTableEntryPresent) != 0;
             }
 
-            if ((entry & WhpConstants.PageTableEntryWithheld) == 0)
+            if ((entry & GuestPageEntries.Withheld) == 0)
                 return false;
 
-            Volatile.Write(ref *directoryEntry, (entry & WhpConstants.PageTableEntryAddressMask) | PageTableEntryDefaultFlags);
+            Volatile.Write(ref *directoryEntry, (entry & WhpConstants.PageTableEntryAddressMask) | GuestPageEntries.TableFlags);
             PopulateTouchedBlock(faultAddress & ~WhpConstants.PageMask);
             return true;
         }
@@ -3954,7 +3641,7 @@ namespace Brovan.Core.Emulation
             bool dense = blockBase >= TouchBlockSize && IsBlockDense(blockBase - TouchBlockSize);
 
             // A fresh block usually holds nothing resident. The faulting page stands in for the block-wide query.
-            if (!dense && (!TryLookupPage(faultPage, out MappedPage page) || !IsHostPageResident(page.HostPage)))
+            if (!dense && (!_paging.TryLookupPage(faultPage, out GuestPage page) || !IsHostPageResident(page.HostPage)))
                 return;
 
             ulong blockEnd = blockBase + TouchBlockSize;
@@ -3985,24 +3672,25 @@ namespace Brovan.Core.Emulation
         // UnmapMemory leaves PTEs in place, so an accessed bit counts only on a page that is still mapped.
         private unsafe bool IsBlockDense(ulong blockBase)
         {
-            ulong* directoryEntry = FindDirectoryEntry(blockBase);
+            ulong* directoryEntry = _paging.FindDirectoryEntry(blockBase);
             if (directoryEntry == null)
                 return false;
 
             ulong entry = *directoryEntry;
-            if ((entry & WhpConstants.PageTableEntryPresent) == 0 || (entry & WhpConstants.PageTableEntryLargePage) != 0
-                || !_pageTableViews.TryGetValue(entry & WhpConstants.PageTableEntryAddressMask, out IntPtr view) || view == IntPtr.Zero)
+            if ((entry & WhpConstants.PageTableEntryPresent) == 0 || (entry & WhpConstants.PageTableEntryLargePage) != 0)
                 return false;
 
-            ulong* table = (ulong*)view;
+            ulong* table = (ulong*)_paging.PageTableView(entry & WhpConstants.PageTableEntryAddressMask);
+            if (table == null)
+                return false;
             int accessed = 0;
             for (int i = 0; i < TouchBlockPages; i++)
             {
                 if ((Volatile.Read(ref table[i]) & WhpConstants.PageTableEntryAccessed) == 0)
                     continue;
 
-                if (TryLookupPage(blockBase + (ulong)i * WhpConstants.PageSize, out MappedPage page)
-                    && page.Permissions != WhpMemoryPermission.None && ++accessed >= TouchDensePages)
+                if (_paging.TryLookupPage(blockBase + (ulong)i * WhpConstants.PageSize, out GuestPage page)
+                    && page.Permissions != GuestPagePermission.None && ++accessed >= TouchDensePages)
                     return true;
             }
 
@@ -4011,6 +3699,7 @@ namespace Brovan.Core.Emulation
 
         private bool UnmapGpaRange(ulong gpa, ulong size)
         {
+            _paging.AssertMappingsHeld(nameof(UnmapGpaRange));
             int hr = WhpNative.WHvUnmapGpaRange(_partition, gpa, size);
             if (!WhpNative.Failed(hr))
                 return true;
@@ -4022,63 +3711,9 @@ namespace Brovan.Core.Emulation
         private bool TryReadMemoryInternal(ulong address, Span<byte> buffer)
             => IsGuestRange(address, (ulong)buffer.Length) && TryReadPages(address, buffer);
 
-        private unsafe bool TryReadPages(ulong address, Span<byte> buffer)
-        {
-            if (_untouchedPages != 0) RecordHostAccess(address, (ulong)buffer.Length, false);
+        private bool TryReadPages(ulong address, Span<byte> buffer) => _paging.TryReadPages(address, buffer);
 
-            ulong current = address;
-            int offset = 0;
-            int remaining = buffer.Length;
-
-            while (remaining > 0)
-            {
-                ulong pageBase = current & ~WhpConstants.PageMask;
-                if (!TryLookupPage(pageBase, out MappedPage page))
-                    return false;
-
-                ulong pageOffset = current - pageBase;
-                int chunk = (int)Math.Min((ulong)remaining, WhpConstants.PageSize - pageOffset);
-                Unsafe.CopyBlockUnaligned(
-                    ref Unsafe.AsRef<byte>(ref buffer[offset]),
-                    ref Unsafe.AsRef<byte>((void*)(page.HostPage + (int)pageOffset)),
-                    (uint)chunk);
-
-                current += (ulong)chunk;
-                offset += chunk;
-                remaining -= chunk;
-            }
-            return true;
-        }
-
-        private unsafe bool TryWriteMemoryInternal(ulong address, ReadOnlySpan<byte> buffer)
-        {
-            if (!IsGuestRange(address, (ulong)buffer.Length)) return false;
-
-            ulong current = address;
-            int offset = 0;
-            int remaining = buffer.Length;
-
-            while (remaining > 0)
-            {
-                ulong pageBase = current & ~WhpConstants.PageMask;
-                if (!TryLookupPage(pageBase, out MappedPage page))
-                    return false;
-
-                ulong pageOffset = current - pageBase;
-                int chunk = (int)Math.Min((ulong)remaining, WhpConstants.PageSize - pageOffset);
-                Unsafe.CopyBlockUnaligned(
-                    ref Unsafe.AsRef<byte>((void*)(page.HostPage + (int)pageOffset)),
-                    ref Unsafe.AsRef<byte>(in buffer[offset]),
-                    (uint)chunk);
-
-                current += (ulong)chunk;
-                offset += chunk;
-                remaining -= chunk;
-            }
-
-            if (_watchedPages != 0) RecordHostAccess(address, (ulong)buffer.Length, true);
-            return true;
-        }
+        private bool TryWriteMemoryInternal(ulong address, ReadOnlySpan<byte> buffer) => _paging.TryWritePages(address, buffer);
 
         private bool HandleInvalidInstructionHook()
         {
@@ -4144,7 +3779,7 @@ namespace Brovan.Core.Emulation
                     return HandleKernelFault(vp, faultVector);
                 }
                 ulong faultAddress = faultVector == 14 ? ReadRegister(Registers.UC_X86_REG_CR2) : 0;
-                if (faultVector == 14 && (TryPopulateOnTouch(errorCode, faultAddress) || TryTouchWatchedPage(errorCode, faultAddress)
+                if (faultVector == 14 && (TryPopulateOnTouch(errorCode, faultAddress) || _paging.TryTouchWatchedPage(errorCode, faultAddress)
                     || IsStaleFault(vp, errorCode, faultAddress)))
                     return true;
 
@@ -4198,9 +3833,15 @@ namespace Brovan.Core.Emulation
                     return true;
             }
 
-            if (vector == 1 && _mappedPages.TryGetValue(_exceptionIdtPageGpa, out MappedPage idtPage)
-                && GuestInterruptGates.IsUserGateEntry((byte*)idtPage.HostPage, _exceptionStubPageGpa, WhpConstants.ExceptionVectorCount,
-                    WhpConstants.ExceptionStubStride, rip))
+            bool atUserGate = false;
+            if (vector == 1)
+            {
+                using RankedLock.Scope mappingHold = _paging.LockMappings();
+                atUserGate = _mappedPages.TryGetValue(_exceptionIdtPageGpa, out GuestPage idtPage)
+                    && GuestInterruptGates.IsUserGateEntry((byte*)idtPage.HostPage, _exceptionStubPageGpa, WhpConstants.ExceptionVectorCount,
+                        WhpConstants.ExceptionStubStride, rip);
+            }
+            if (atUserGate)
                 return HandleHltExit(vp, rip + 1, Spilled: false);
 
             Utils.LogError($"[Whp] Vector 0x{vector:X} faulted in ring 0 at 0x{rip:X}.");
@@ -4286,17 +3927,18 @@ namespace Brovan.Core.Emulation
 
         private bool IsStaleFault(VirtualProcessor vp, ulong errorCode, ulong faultAddress)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             ulong page = faultAddress & ~WhpConstants.PageMask;
             if (!IsGuestRange(page, WhpConstants.PageSize) || _trappedPages.ContainsKey(page)
-                || !_mappedPages.TryGetValue(page, out MappedPage mapped) || mapped.HostPage == IntPtr.Zero)
+                || !_mappedPages.TryGetValue(page, out GuestPage mapped) || mapped.HostPage == IntPtr.Zero)
                 return false;
 
-            WhpMemoryPermission perm = mapped.Permissions;
-            if (!GuestPageEntries.IsStaleFault(errorCode, (perm & WhpMemoryPermission.Read) != 0,
-                    (perm & WhpMemoryPermission.Write) != 0, (perm & WhpMemoryPermission.Execute) != 0))
+            GuestPagePermission perm = mapped.Permissions;
+            if (!GuestPageEntries.IsStaleFault(errorCode, (perm & GuestPagePermission.Read) != 0,
+                    (perm & GuestPagePermission.Write) != 0, (perm & GuestPagePermission.Execute) != 0))
                 return false;
 
-            EnsureVirtualMapping(page, perm);
+            _paging.SetLeaf(page, perm);
             vp.TlbFlushPending = true;
             return true;
         }
@@ -4314,37 +3956,41 @@ namespace Brovan.Core.Emulation
             const uint len = 1;
 
             ulong faultPage = gpa & ~WhpConstants.PageMask;
-            bool mapped = TryLookupPage(faultPage, out _);
-
-            if (vp.CompletionActive)
+            bool mapped;
+            using (_paging.LockMappings())
             {
-                // Another processor re-trapped the page mid-step, so the step is armed again. A fault
-                // elsewhere belongs to the stepped instruction itself and ends the step.
-                if (faultPage == vp.CompletionPageGpa)
+                mapped = _paging.TryLookupPage(faultPage, out _);
+
+                if (vp.CompletionActive)
                 {
-                    ArmSteppedCompletion(vp, faultPage);
+                    // Another processor re-trapped the page mid-step, so the step is armed again. A fault
+                    // elsewhere belongs to the stepped instruction itself and ends the step.
+                    if (faultPage == vp.CompletionPageGpa)
+                    {
+                        ArmSteppedCompletion(vp, faultPage);
+                        return true;
+                    }
+
+                    AbandonSteppedCompletion(vp);
+                }
+
+                if (mapped && _trappedPages.ContainsKey(faultPage))
+                {
+                    BeginSteppedCompletion(vp, faultPage, gpa, len, isWrite);
                     return true;
                 }
 
-                AbandonSteppedCompletion(vp);
-            }
-
-            if (mapped && _trappedPages.ContainsKey(faultPage))
-            {
-                BeginSteppedCompletion(vp, faultPage, gpa, len, isWrite);
-                return true;
-            }
-
-            if (mapped && IsAccessInstalled(gpa, isWrite))
-                return true;
-
-            // Mapping installs are deferred, so a processor can reach a recorded page before its range is
-            // installed. Install it and retry the access instead of reporting a fault.
-            if (_mappingsDirty)
-            {
-                RebuildMappings();
                 if (mapped && IsAccessInstalled(gpa, isWrite))
                     return true;
+
+                // Mapping installs are deferred, so a processor can reach a recorded page before its range is
+                // installed. Install it and retry the access instead of reporting a fault.
+                if (_mappingsDirty)
+                {
+                    RebuildMappings();
+                    if (mapped && IsAccessInstalled(gpa, isWrite))
+                        return true;
+                }
             }
 
             BackendHookType required = mapped ? BackendHookType.MemoryProtected : BackendHookType.MemoryUnmapped;
@@ -4369,7 +4015,8 @@ namespace Brovan.Core.Emulation
 
         private void BeginSteppedCompletion(VirtualProcessor vp, ulong pageGpa, ulong gpa, uint len, bool isWrite)
         {
-            if (!_mappedPages.TryGetValue(pageGpa, out MappedPage page) || page.HostPage == IntPtr.Zero)
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            if (!_mappedPages.TryGetValue(pageGpa, out GuestPage page) || page.HostPage == IntPtr.Zero)
                 return;
 
             vp.CompletionActive = true;
@@ -4382,7 +4029,8 @@ namespace Brovan.Core.Emulation
 
         private void ArmSteppedCompletion(VirtualProcessor vp, ulong pageGpa)
         {
-            if (!_mappedPages.TryGetValue(pageGpa, out MappedPage page) || page.HostPage == IntPtr.Zero)
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            if (!_mappedPages.TryGetValue(pageGpa, out GuestPage page) || page.HostPage == IntPtr.Zero)
                 return;
 
             UnmapGpaRange(pageGpa, WhpConstants.PageSize);
@@ -4405,7 +4053,9 @@ namespace Brovan.Core.Emulation
             bool isWrite = vp.CompletionIsWrite;
             vp.CompletionActive = false;
 
-            ulong value = ReadMemoryULong(gpa);
+            ulong value;
+            using (_paging.LockMappings())
+                value = ReadMemoryULong(gpa);
             BackendHookType required = isWrite ? BackendHookType.MemoryWrite : BackendHookType.MemoryRead;
             BackendMemoryAccessType type = isWrite ? BackendMemoryAccessType.Write : BackendMemoryAccessType.Read;
             for (int i = 0; i < _memoryHooks.Count; i++)
@@ -4438,6 +4088,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         private void AbandonSteppedCompletion(VirtualProcessor vp)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             if (!vp.CompletionActive)
                 return;
 
@@ -4455,6 +4106,7 @@ namespace Brovan.Core.Emulation
 
         private void ReTrapPage(ulong pageGpa)
         {
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
             UnmapGpaRange(pageGpa, WhpConstants.PageSize);
 
             if (_activeMapStarts.Count != 0)
@@ -4467,7 +4119,7 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            if (!_mappedPages.TryGetValue(pageGpa, out MappedPage page) || page == null
+            if (!_mappedPages.TryGetValue(pageGpa, out GuestPage page) || page == null
                 || page.HostPage == IntPtr.Zero || LeavesGpaMap(page))
                 return;
 
@@ -4489,18 +4141,21 @@ namespace Brovan.Core.Emulation
             ref WhpRegisters regs = ref GetRegistersRef(vp);
             ulong frameAddress = regs.Rsp;
 
-            if (ExceptionHasErrorCode(vector))
-            {
-                Span<byte> ecBytes = stackalloc byte[sizeof(ulong)];
-                ecBytes.Clear();
-                TryReadPages(frameAddress, ecBytes);
-                errorCode = BitConverter.ToUInt64(ecBytes);
-                frameAddress += sizeof(ulong);
-            }
-
             Span<byte> frameBytes = stackalloc byte[40];
             frameBytes.Clear();
-            TryReadPages(frameAddress, frameBytes);
+            using (_paging.LockMappings())
+            {
+                if (ExceptionHasErrorCode(vector))
+                {
+                    Span<byte> ecBytes = stackalloc byte[sizeof(ulong)];
+                    ecBytes.Clear();
+                    TryReadPages(frameAddress, ecBytes);
+                    errorCode = BitConverter.ToUInt64(ecBytes);
+                    frameAddress += sizeof(ulong);
+                }
+
+                TryReadPages(frameAddress, frameBytes);
+            }
 
             ulong frameRip = BitConverter.ToUInt64(frameBytes);
             ulong frameCs = BitConverter.ToUInt64(frameBytes.Slice(8));
@@ -4740,7 +4395,12 @@ namespace Brovan.Core.Emulation
             if (exception == 14)
             {
                 // An untouched watched page has no valid PTE, but its faults are still protection faults.
-                bool present = (errorCode & GuestPageEntries.FaultPresent) != 0 || _mappedPages.ContainsKey(faultAddress & ~WhpConstants.PageMask);
+                bool present = (errorCode & GuestPageEntries.FaultPresent) != 0;
+                if (!present)
+                {
+                    using RankedLock.Scope mappingHold = _paging.LockMappings();
+                    present = _mappedPages.ContainsKey(faultAddress & ~WhpConstants.PageMask);
+                }
                 bool write = (errorCode & GuestPageEntries.FaultWrite) != 0;
                 bool fetch = (errorCode & GuestPageEntries.FaultFetch) != 0;
 
@@ -4838,10 +4498,10 @@ namespace Brovan.Core.Emulation
             if (vp.Running)
                 return !Write;
 
-            _xsaveImage ??= new byte[XsaveImageSize];
-            lock (_vcpuLock)
+            vp.XsaveImage ??= new byte[XsaveImageSize];
+            lock (vp.RegisterLock)
             {
-                fixed (byte* image = _xsaveImage)
+                fixed (byte* image = vp.XsaveImage)
                 {
                     uint size = 0;
                     int hr = WhpNative.WHvGetVirtualProcessorXsaveState(_partition, vp.Index, image, XsaveImageSize, &size);
@@ -4907,7 +4567,7 @@ namespace Brovan.Core.Emulation
 
         private unsafe bool LoadXmmRegisters(VirtualProcessor vp)
         {
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 fixed (uint* Names = VectorRegNames)
                 fixed (WhvRegisterValue* Vals = vp.Xmm)
@@ -4924,7 +4584,7 @@ namespace Brovan.Core.Emulation
 
         private unsafe void StoreXmmRegisters(VirtualProcessor vp)
         {
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 fixed (uint* Names = VectorRegNames)
                 fixed (WhvRegisterValue* Vals = vp.Xmm)
@@ -4944,7 +4604,7 @@ namespace Brovan.Core.Emulation
         private unsafe void LoadRegisters(VirtualProcessor vp)
         {
             Span<WhvRegisterValue> values = stackalloc WhvRegisterValue[GpRegNames.Length];
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 fixed (uint* names = GpRegNames)
                 fixed (WhvRegisterValue* vals = values)
@@ -5005,7 +4665,7 @@ namespace Brovan.Core.Emulation
             values[13] = WhvRegisterValue.FromReg64(regs.R14);
             values[14] = WhvRegisterValue.FromReg64(regs.R15);
 
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 fixed (uint* n = ReturnRegNames)
                 fixed (WhvRegisterValue* vals = values)
@@ -5064,7 +4724,7 @@ namespace Brovan.Core.Emulation
                 vp.XmmDirty = false;
             }
 
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 fixed (uint* n = names)
                 fixed (WhvRegisterValue* vals = values)
@@ -5082,12 +4742,10 @@ namespace Brovan.Core.Emulation
             if (vp.ReturnPending != PendingReturn.None && (vp.RegsDirty || vp.SegmentsDirty))
                 AbandonReturn(vp);
 
-            long tlbGeneration = Volatile.Read(ref _tlbGeneration);
-            if (vp.TlbFlushPending || vp.TlbGeneration != tlbGeneration)
+            if (_gate.NeedsTlbFlush(vp, out long tlbGeneration))
             {
                 FlushGuestTlb(vp);
-                vp.TlbFlushPending = false;
-                vp.TlbGeneration = tlbGeneration;
+                GuestEntryGate.TlbFlushed(vp, tlbGeneration);
             }
 
             if (vp.RegsDirty || vp.SegmentsDirty)
@@ -5111,13 +4769,14 @@ namespace Brovan.Core.Emulation
 
         private unsafe void SetSingleRegister(WhvRegisterName name, WhvRegisterValue value)
         {
+            VirtualProcessor vp = CurrentVp;
             uint n = (uint)name;
             byte* raw = stackalloc byte[32];
             WhvRegisterValue* aligned = AlignRegisterValue(raw);
             *aligned = value;
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
-                int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, CurrentVp.Index, &n, 1, aligned);
+                int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, vp.Index, &n, 1, aligned);
                 if (WhpNative.Failed(hr))
                     throw new WhpException($"WHvSetVirtualProcessorRegisters({name}) failed", hr);
             }
@@ -5132,7 +4791,7 @@ namespace Brovan.Core.Emulation
             uint n = (uint)name;
             byte* raw = stackalloc byte[32];
             WhvRegisterValue* aligned = AlignRegisterValue(raw);
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, vp.Index, &n, 1, aligned);
                 if (WhpNative.Failed(hr))
@@ -5337,7 +4996,7 @@ namespace Brovan.Core.Emulation
 
         private unsafe void GetRegisterValues(VirtualProcessor vp, uint* names, uint count, WhvRegisterValue* values)
         {
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 int hr = WhpNative.WHvGetVirtualProcessorRegisters(_partition, vp.Index, names, count, values);
                 if (WhpNative.Failed(hr))
@@ -5372,7 +5031,8 @@ namespace Brovan.Core.Emulation
         {
             int index = selector >> 3;
             if (index != WhpConstants.UserFsSelector32 >> 3) return;
-            if (!_mappedPages.TryGetValue(CurrentVp.GdtPageGpa, out MappedPage gdtPage) || gdtPage.HostPage == IntPtr.Zero) return;
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            if (!_mappedPages.TryGetValue(CurrentVp.GdtPageGpa, out GuestPage gdtPage) || gdtPage.HostPage == IntPtr.Zero) return;
 
             byte* descriptor = (byte*)gdtPage.HostPage + index * 8;
             descriptor[2] = (byte)segmentBase;
@@ -5416,7 +5076,7 @@ namespace Brovan.Core.Emulation
             if (changed == 0)
                 return;
 
-            lock (_vcpuLock)
+            lock (vp.RegisterLock)
             {
                 int hr = WhpNative.WHvSetVirtualProcessorRegisters(_partition, vp.Index, names, changed, aligned);
                 if (WhpNative.Failed(hr))
@@ -5625,61 +5285,7 @@ namespace Brovan.Core.Emulation
         }
 
         private unsafe bool TryGetHostPointer(ulong address, int accessSize, bool write, out byte* ptr, out long offset)
-        {
-            ptr = null;
-            offset = 0;
-            if (accessSize <= 0 || !IsGuestRange(address, (ulong)accessSize)) return false;
-
-            ulong pageBase = address & ~WhpConstants.PageMask;
-            if (!TryLookupPage(pageBase, out MappedPage page))
-                return false;
-
-            ulong accessEnd = address + (ulong)accessSize;
-            ulong firstPageEnd = pageBase + WhpConstants.PageSize;
-            if (accessEnd > firstPageEnd && !(TryGetIntactBackingEnd(page, pageBase, out ulong backingEnd) && accessEnd <= backingEnd))
-            {
-                ulong cursor = firstPageEnd;
-                while (cursor < accessEnd)
-                {
-                    if (!_mappedPages.TryGetValue(cursor, out MappedPage next) || next == null || next.HostPage == IntPtr.Zero
-                        || next.OwnedBacking != page.OwnedBacking)
-                        return false;
-                    long expectedHost = page.HostPage.ToInt64() + (long)(cursor - pageBase);
-                    long actualHost = next.HostPage.ToInt64();
-                    if (expectedHost != actualHost) return false;
-                    cursor += WhpConstants.PageSize;
-                }
-            }
-
-            ptr = (byte*)page.HostPage;
-            offset = (long)(address - pageBase);
-            if (write ? _watchedPages != 0 : _untouchedPages != 0) RecordHostAccess(address, (ulong)accessSize, write);
-            return true;
-        }
-
-        private bool TryGetIntactBackingEnd(MappedPage page, ulong pageBase, out ulong backingEnd)
-        {
-            backingEnd = 0;
-            if (page.OwnedBacking == IntPtr.Zero || page.IsAlias) return false;
-            if (!_backingAllocations.TryGetValue(page.OwnedBacking, out BackingAllocation allocation)) return false;
-
-            if (allocation.Window != null)
-            {
-                int livePages = allocation.Window.LiveRunFrom(page.HostPage);
-                if (livePages == 0) return false;
-
-                backingEnd = pageBase + (ulong)livePages * WhpConstants.PageSize;
-                return true;
-            }
-
-            if (allocation.LivePages != (int)(allocation.Size / WhpConstants.PageSize)) return false;
-
-            ulong hostOffset = (ulong)(page.HostPage.ToInt64() - page.OwnedBacking.ToInt64());
-            if (hostOffset > pageBase || hostOffset >= allocation.Size) return false;
-
-            backingEnd = pageBase - hostOffset + allocation.Size;
-            return true;
-        }
+            => _paging.TryGetHostPointer(address, accessSize, write, out ptr, out offset);
 
         private bool DisposedCheck()
         {

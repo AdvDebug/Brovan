@@ -18,11 +18,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_TIMEOUT;
             }
 
-            Thread.State = EmulatedThreadState.Waiting;
-            WinEmulatedThread.GetState(Thread).ApcAlertable = WinEmulatedThread.GetState(Thread).WaitAlertable;
-            Instance._emulator.WriteRegister(Instance.IPRegister, WinEmulatedThread.GetState(Thread).WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ContinueParked(Thread);
         }
 
         public NTSTATUS Handle(BinaryEmulator Instance)
@@ -64,22 +60,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Deadline == Instance.EmulatedTickCount64)
                 return NTSTATUS.STATUS_TIMEOUT;
 
-            Thread.WaitActive = true;
             Thread.WaitOnSingleHandle(Handle);
-            Thread.WaitAll = true;
-            Thread.WaitDeadline = Deadline;
-            WinEmulatedThread.GetState(Thread).WaitCompleted = false;
-            WinEmulatedThread.GetState(Thread).WaitStatus = NTSTATUS.STATUS_PENDING;
-            WinEmulatedThread.GetState(Thread).WaitResumeRIP = Instance.WinHelper.GetSyscallRip();
-            WinEmulatedThread.GetState(Thread).WaitReturnRIP = WinEmulatedThread.GetState(Thread).WaitResumeRIP + 2;
-            WinEmulatedThread.GetState(Thread).WaitAlertable = Alertable;
-
-            Thread.State = EmulatedThreadState.Waiting;
-            WinEmulatedThread.GetState(Thread).ApcAlertable = Alertable;
-            Instance._emulator.WriteRegister(Instance.IPRegister, WinEmulatedThread.GetState(Thread).WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ParkUntil(Thread, Deadline, Alertable, Thread.WaitHandles, WaitAll: true);
         }
     }
 }

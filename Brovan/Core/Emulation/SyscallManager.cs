@@ -83,7 +83,7 @@ namespace Brovan.Core.Emulation
                 _traceEnabled = value;
                 if (!value)
                     ClearHistory();
-                _emu?.RefreshGuestKernel();
+                _emu?.RefreshDispatchObservation();
             }
         }
 
@@ -172,7 +172,7 @@ namespace Brovan.Core.Emulation
                 Volatile.Write(ref _ruleCount, _rules.Count);
             }
 
-            _emu?.RefreshGuestKernel();
+            _emu?.RefreshDispatchObservation();
         }
 
         public bool RemoveRule(string idOrName)
@@ -187,7 +187,7 @@ namespace Brovan.Core.Emulation
             if (removed == 0)
                 return false;
 
-            _emu?.RefreshGuestKernel();
+            _emu?.RefreshDispatchObservation();
             return true;
         }
 

@@ -1227,7 +1227,6 @@ namespace Brovan.EmulationMenu
                         {
                             EmuThread.Context.RIP = Emulator.ReadRegister(Emulator.IPRegister);
                             EmuThread.State = EmulatedThreadState.Running;
-                            Emulator.Threads[ThreadId] = EmuThread;
                         }
                     }
 

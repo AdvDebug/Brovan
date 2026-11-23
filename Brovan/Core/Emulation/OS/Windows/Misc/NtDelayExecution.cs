@@ -48,7 +48,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return Interval == 0 ? Status : NTSTATUS.STATUS_SUCCESS;
             }
 
-            if (Instance.WinHelper.PendingConnectReplies.Count != 0)
+            if (Instance.WinHelper.HasPendingConnectReplies)
                 AlpcMessaging.DeliverConnectReplies(Instance, Thread.ThreadId);
 
             return Instance.WinHelper.ParkUntil(Thread, Instance.CreateEmulatedDeadlineMilliseconds(DelayMs), Alertable);

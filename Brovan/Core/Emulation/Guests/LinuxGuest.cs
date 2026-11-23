@@ -1023,8 +1023,7 @@ namespace Brovan.Core.Emulation.Guests
 
             Instance.SaveContext(Thread);
             Helper.RegisterThread(Thread);
-            Instance.Threads[Thread.ThreadId] = Thread;
-            Instance.ThreadOrder.Add((int)Thread.ThreadId);
+            Instance.InsertThread(Thread);
             if (Instance.CurrentThreadId == -1)
                 Instance.CurrentThreadId = (int)Thread.ThreadId;
 
@@ -1088,8 +1087,7 @@ namespace Brovan.Core.Emulation.Guests
             }
 
             Helper.RegisterThread(Thread);
-            Instance.Threads[Thread.ThreadId] = Thread;
-            Instance.ThreadOrder.Add((int)Thread.ThreadId);
+            Instance.InsertThread(Thread);
             if (Instance.CurrentThreadId == -1)
                 Instance.CurrentThreadId = (int)Thread.ThreadId;
 

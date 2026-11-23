@@ -39,9 +39,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             KernelFileInformation Information = new KernelFileInformation(Instance, Table);
             bool Query = Guest.TryGetSyscallNumber(nameof(NtQueryInformationFile), out uint QueryNumber)
-                && Table.Kernel.RegisterSyscall(QueryNumber, nameof(NtQueryInformationFile), Information.EmitQuery, Information.FinishQuery);
+                && Instance.RegisterGuestKernelSyscall(Table.Kernel, QueryNumber, nameof(NtQueryInformationFile), Information.EmitQuery, Information.FinishQuery);
             bool Set = Guest.TryGetSyscallNumber(nameof(NtSetInformationFile), out uint SetNumber)
-                && Table.Kernel.RegisterSyscall(SetNumber, nameof(NtSetInformationFile), Information.EmitSet, Information.FinishSet);
+                && Instance.RegisterGuestKernelSyscall(Table.Kernel, SetNumber, nameof(NtSetInformationFile), Information.EmitSet, Information.FinishSet);
             Information.QueryRegistered = Query;
             return Query || Set ? Information : null;
         }

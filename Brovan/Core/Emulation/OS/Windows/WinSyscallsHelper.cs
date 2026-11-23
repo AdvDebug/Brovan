@@ -17,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         private static readonly Lazy<IReadOnlyDictionary<string, IWinDevice>> DeviceRegistry = new Lazy<IReadOnlyDictionary<string, IWinDevice>>(BuildDeviceRegistry);
 
-        public WindowsSharedBuffer Shared { get; private set; }
+        public WindowsSharedBuffer Shared => Call.Shared;
 
         internal SteamAppContext Steam;
 
@@ -371,6 +371,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private bool TryParkForSyscallRetry(long Deadline, Task HostWork, WinPendingIo? SyncIo)
         {
+            using RankedLock.Scope SchedulerScope = Emulator.SchedulerLock.EnterScope();
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null)
                 return false;
@@ -446,6 +447,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // A request that is not complete by the deadline ends with STATUS_TIMEOUT.
         internal void ParkForIoRequest(ParkedIoRequest Request, long Deadline = -1)
         {
+            using RankedLock.Scope SchedulerScope = Emulator.SchedulerLock.EnterScope();
             EmulatedThread Thread = Emulator.CurrentThread;
             if (Thread == null)
                 return;
@@ -469,12 +471,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.StopEmulation();
         }
 
-        internal NTSTATUS ParkUntil(EmulatedThread Thread, long Deadline, bool Alertable)
+        internal NTSTATUS ParkUntil(EmulatedThread Thread, long Deadline, bool Alertable, List<ulong>? Handles = null, bool WaitAll = false)
         {
+            using RankedLock.Scope SchedulerScope = Emulator.SchedulerLock.EnterScope();
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.WaitActive = true;
-            Thread.WaitHandles = null;
-            Thread.WaitAll = false;
+            Thread.WaitHandles = Handles;
+            Thread.WaitAll = WaitAll;
             Thread.WaitDeadline = Deadline;
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_PENDING;
@@ -487,14 +490,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal NTSTATUS ContinueParked(EmulatedThread Thread)
         {
+            using RankedLock.Scope SchedulerScope = Emulator.SchedulerLock.EnterScope();
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            State.ApcAlertable = State.WaitAlertable;
             Thread.State = EmulatedThreadState.Waiting;
-            Emulator._emulator.WriteRegister(Emulator.IPRegister, WinEmulatedThread.GetState(Thread).WaitResumeRIP);
+            Emulator._emulator.WriteRegister(Emulator.IPRegister, State.WaitResumeRIP);
             Emulator._emulator.StopEmulation();
             return NTSTATUS.STATUS_PENDING;
         }
 
         public void ClearWaitState(EmulatedThread Thread, bool ClearAlertByThreadId = false)
         {
+            using RankedLock.Scope SchedulerScope = Emulator.SchedulerLock.EnterScope();
             if (Thread == null)
                 return;
 
@@ -506,6 +513,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Thread.WaitDeadline = -1;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
+            Thread.WaitClaimed = false;
             State.WaitResumeRIP = 0;
             State.WaitReturnRIP = 0;
             State.WaitAlertable = false;
@@ -548,7 +556,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinEmulatedThread.TryGetState(Thread)?.MmcssRegistration?.Leave(Emulator);
 
             bool Current = Emulator.CurrentThreadId == (int)Thread.ThreadId;
-            if (!Current && Thread.HostWorker != -1)
+            if (Thread.HostWorker != -1 && !Emulator.OwnsThread(Thread))
                 return;
 
             if (!Current)
@@ -582,7 +590,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread.StackAddress == 0 || Thread.State != EmulatedThreadState.Terminated || OwnProcess.Exiting)
                 return;
 
-            if (Emulator.CurrentThreadId != (int)Thread.ThreadId && Thread.HostWorker != -1)
+            if (Thread.HostWorker != -1 && !Emulator.OwnsThread(Thread))
                 return;
 
             List<WinSentMessageReply> Sends = WinEmulatedThread.TryGetState(Thread)?.PendingSends;
@@ -621,11 +629,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             Thread.Unreferenced = true;
-            if (Thread.HostWorker != -1 || Emulator.CurrentThreadId == (int)Thread.ThreadId)
+            if ((Thread.HostWorker != -1 && !Emulator.OwnsThread(Thread)) || Emulator.CurrentThreadId == (int)Thread.ThreadId)
                 return;
 
             Emulator.ReleaseThreadProcessor(Thread);
-            Emulator.Threads.Remove(Thread.ThreadId);
+            Emulator.ForgetThread(Thread.ThreadId);
         }
 
         public void ClearTerminationState(EmulatedThread Thread, bool ClearAlertByThreadId = false)
@@ -644,6 +652,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (State == null)
                 return;
 
+            using RankedLock.Scope SchedulerScope = Emulator.SchedulerLock.EnterScope();
             if (State.ExitTime == 0)
                 State.ExitTime = Emulator.GetEmulatedSystemTimeFileTimeUtc();
 
@@ -2219,16 +2228,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public ulong GetArg64(int Index, bool UInt = false)
         {
-            if (_argCache.Valid)
+            ref SyscallArgCache Args = ref Call.Args;
+            if (Args.Valid)
             {
                 switch (Index)
                 {
-                    case 0: return _argCache.R10;
-                    case 1: return _argCache.RDX;
-                    case 2: return _argCache.R8;
-                    case 3: return _argCache.R9;
+                    case 0: return Args.R10;
+                    case 1: return Args.RDX;
+                    case 2: return Args.R8;
+                    case 3: return Args.R9;
                 }
-                ulong StackArgAddress = _argCache.RSP + 0x28UL + (ulong)((Index - 4) * 8);
+                ulong StackArgAddress = Args.RSP + 0x28UL + (ulong)((Index - 4) * 8);
                 return UInt ? Emulator._emulator.ReadMemoryUInt(StackArgAddress) : Emulator._emulator.ReadMemoryULong(StackArgAddress);
             }
 
@@ -2247,7 +2257,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Emulator._binary.Architecture == BinaryArchitecture.x64)
                 return GetArg64(Index);
 
-            return Emulator._emulator.ReadMemoryUInt(_argCache.ArgBase + (ulong)(Index * 4));
+            return Emulator._emulator.ReadMemoryUInt(Call.Args.ArgBase + (ulong)(Index * 4));
         }
 
         public uint GetArg32(int Index) => (uint)GetArg(Index);
@@ -2763,7 +2773,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             public ulong ArgBase;
         }
 
-        private SyscallArgCache _argCache;
+        private sealed class CallState
+        {
+            public SyscallArgCache Args;
+            public readonly ulong[] X64ArgValues = new ulong[5];
+            public readonly WindowsSharedBuffer Shared = new WindowsSharedBuffer();
+        }
+
+        private CallState Call => Emulator.WorkerCallState as CallState ?? CreateCallState();
+
+        private CallState CreateCallState()
+        {
+            CallState State = new CallState();
+            Emulator.WorkerCallState = State;
+            return State;
+        }
 
         internal bool X86GateArgs = true;
 
@@ -2776,25 +2800,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             (int)Registers.UC_X86_REG_RSP,
         };
 
-        private readonly ulong[] _winX64SyscallArgValues = new ulong[5];
-
         /// <summary>
         /// Runs once before each syscall handler and caches what GetArg reads.
         /// </summary>
         public void BeginSyscall()
         {
+            CallState State = Call;
+            ref SyscallArgCache Args = ref State.Args;
             if (Emulator._binary.Architecture != BinaryArchitecture.x64)
             {
-                _argCache.Valid = false;
+                Args.Valid = false;
                 if (Emulator._binary.Architecture == BinaryArchitecture.x86)
                 {
                     uint ESP = Emulator._emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
-                    _argCache.ArgBase = X86GateArgs ? ESP + (uint)GuestKernelCallBuilder.GateArgumentsOffset : ESP + 4u;
+                    Args.ArgBase = X86GateArgs ? ESP + (uint)GuestKernelCallBuilder.GateArgumentsOffset : ESP + 4u;
                     RefreshWow64FileRedirect();
                 }
                 return;
             }
-            ulong[] Vals = _winX64SyscallArgValues;
+            ulong[] Vals = State.X64ArgValues;
             if (!Emulator._emulator.ReadRegisterBatch(WinX64SyscallArgRegs, Vals, 5))
             {
                 Vals[0] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R10);
@@ -2803,12 +2827,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Vals[3] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R9);
                 Vals[4] = Emulator._emulator.ReadRegister(Registers.UC_X86_REG_RSP);
             }
-            _argCache.R10 = Vals[0];
-            _argCache.RDX = Vals[1];
-            _argCache.R8 = Vals[2];
-            _argCache.R9 = Vals[3];
-            _argCache.RSP = Vals[4];
-            _argCache.Valid = true;
+            Args.R10 = Vals[0];
+            Args.RDX = Vals[1];
+            Args.R8 = Vals[2];
+            Args.R9 = Vals[3];
+            Args.RSP = Vals[4];
+            Args.Valid = true;
         }
 
         // RtlWow64EnableFsRedirectionEx writes it, and ntdll turns redirection off through it
@@ -2822,7 +2846,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void EndSyscall()
         {
-            _argCache.Valid = false;
+            Call.Args.Valid = false;
         }
 
         // The host work inside the using block must read no handle, object, guest memory or helper state.
@@ -2830,26 +2854,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal readonly struct KernelLockRelease : IDisposable
         {
-            private readonly WinSysHelper Helper;
-            // Syscalls on other workers replace the argument cache while the lock is out.
-            private readonly SyscallArgCache Args;
-            public readonly bool Left;
+            private readonly BinaryEmulator Emulator;
+            private readonly RankedLock.LeftLocks LeftLocks;
 
             public KernelLockRelease(WinSysHelper Helper)
             {
-                this.Helper = Helper;
-                Args = Helper._argCache;
-                Left = Helper.Emulator.TryLeaveKernelLock();
+                Emulator = Helper.Emulator;
+                LeftLocks = Emulator.TryLeaveKernelLock();
             }
 
-            public void Dispose()
-            {
-                if (!Left)
-                    return;
+            public bool Left => LeftLocks.Any;
 
-                Helper.Emulator.EnterKernelLock();
-                Helper._argCache = Args;
-            }
+            public void Dispose() => Emulator?.ReturnKernelLock(LeftLocks);
         }
 
         public List<WinSemaphore> WinSemaphores = new List<WinSemaphore>();
@@ -3026,7 +3042,31 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public List<WinPort> WinPorts = new List<WinPort>();
-        internal readonly List<AlpcConnection> PendingConnectReplies = new List<AlpcConnection>();
+        private readonly List<AlpcConnection> _pendingConnectReplies = new List<AlpcConnection>();
+        private int _pendingConnectReplyCount;
+
+        // Changed under KernelLock. The count is read without it as a hint, and the delivery reads the list again.
+        internal IReadOnlyList<AlpcConnection> PendingConnectReplies => _pendingConnectReplies;
+
+        internal bool HasPendingConnectReplies => Volatile.Read(ref _pendingConnectReplyCount) != 0;
+
+        internal void AddPendingConnectReply(AlpcConnection Connection)
+        {
+            _pendingConnectReplies.Add(Connection);
+            Volatile.Write(ref _pendingConnectReplyCount, _pendingConnectReplies.Count);
+        }
+
+        internal void RemovePendingConnectReplyAt(int Index)
+        {
+            _pendingConnectReplies.RemoveAt(Index);
+            Volatile.Write(ref _pendingConnectReplyCount, _pendingConnectReplies.Count);
+        }
+
+        internal void RemovePendingConnectReply(AlpcConnection Connection)
+        {
+            if (_pendingConnectReplies.Remove(Connection))
+                Volatile.Write(ref _pendingConnectReplyCount, _pendingConnectReplies.Count);
+        }
         public ulong EtwNotificationEventHandle;
         internal PebLdrTracker LdrTracker;
         public readonly Dictionary<ulong, WinWindow> WinWindows = new();
@@ -3250,7 +3290,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinSysHelper(BinaryEmulator Emulator)
         {
-            Shared = new WindowsSharedBuffer();
             this.Emulator = Emulator;
             HostProcess = System.Diagnostics.Process.GetCurrentProcess();
             HostUserTimeAtBoot = HostProcess.UserProcessorTime;
@@ -4085,7 +4124,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinEmulatedThread.GetState(EmuThread).DispatchException = true;
             WinEmulatedThread.GetState(EmuThread).ExceptionInformation = ExceptionInformation;
             EmuThread.ExitCode = (int)Exception;
-            Emulator.Threads[(uint)Emulator.CurrentThreadId] = EmuThread;
             return true;
         }
 
@@ -4283,7 +4321,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             WindowsThreadContext64.WriteContext(Emulator, Thread, NewRsp, ApcContextFlags, XStateAreaOffset: XStateAreaOffset, Frame: StackLayout);
             Emulator.WriteMemory(NewRsp, StackLayout);
 
-            State.PendingUserApcs.RemoveAt(ApcIndex);
+            using (Emulator.SchedulerLock.EnterScope())
+                State.PendingUserApcs.RemoveAt(ApcIndex);
             Thread.Context.RSP = NewRsp;
             Thread.Context.RIP = Dispatcher;
             Emulator.WriteRegister(Registers.UC_X86_REG_RSP, NewRsp);
@@ -4295,7 +4334,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         // WOW64 drops the APC instead (Wow64ApcRoutineInternal).
         private bool FailUserApcFrame(WindowsThreadState State, int ApcIndex, ulong StackPointer, ulong NewStackPointer, ulong FaultAddress)
         {
-            State.PendingUserApcs.RemoveAt(ApcIndex);
+            using (Emulator.SchedulerLock.EnterScope())
+                State.PendingUserApcs.RemoveAt(ApcIndex);
             if ((Emulator.Settings.Flags & LogFlags.Issues) != 0)
                 Emulator.TriggerEventMessage($"[-] DispatchNextUserApc failed: the APC frame does not fit on the stack (SP=0x{StackPointer:X}, NewSP=0x{NewStackPointer:X}).", LogFlags.Issues);
 
@@ -4333,7 +4373,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             WriteUInt32(Frame, (int)ExceptionRegistrationOffset, 0xFFFFFFFF);
 
             Emulator.WriteMemory(NewEsp, Frame);
-            State.PendingUserApcs.RemoveAt(ApcIndex);
+            using (Emulator.SchedulerLock.EnterScope())
+                State.PendingUserApcs.RemoveAt(ApcIndex);
 
             Thread.Context.RSP = NewEsp;
             Thread.Context.RIP = Dispatcher;
@@ -11383,7 +11424,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Shared == IntPtr.Zero)
                 return false;
 
-            Emulator._emulator.HoldProcessorsOutOfGuest();
+            using ProcessorHold Hold = Emulator._emulator.HoldProcessorsOutOfGuest();
             Buffer.MemoryCopy((void*)Section.Storage, (void*)Shared, StorageSize, StorageSize);
 
             List<WinSectionView> Views = Section.Views;

@@ -17,11 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             Thread.WaitDeadline = Win32kHelper.GetNextTimerDue(Instance, State.GetMessageHwndFilter, Thread.ThreadId, State.GetMessageMinMessage, State.GetMessageMaxMessage);
-            Thread.State = EmulatedThreadState.Waiting;
-            WinEmulatedThread.GetState(Thread).ApcAlertable = WinEmulatedThread.GetState(Thread).WaitAlertable;
-            Instance._emulator.WriteRegister(Instance.IPRegister, WinEmulatedThread.GetState(Thread).WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ContinueParked(Thread);
         }
 
         private static NTSTATUS CompleteRead(BinaryEmulator Instance, ulong MessagePtr, in Win32kMessage Message, WindowsThreadState State)
@@ -95,12 +91,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             State.GetMessageMinMessage = MinMessage;
             State.GetMessageMaxMessage = MaxMessage;
 
-            Thread.State = EmulatedThreadState.Waiting;
-            State.ApcAlertable = false;
-            Instance._emulator.WriteRegister(Instance.IPRegister, State.WaitResumeRIP);
-            Instance._emulator.StopEmulation();
-
-            return NTSTATUS.STATUS_PENDING;
+            return Instance.WinHelper.ContinueParked(Thread);
         }
     }
 }

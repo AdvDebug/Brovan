@@ -38,7 +38,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return null;
 
             KernelFileReads Reads = new KernelFileReads(Instance, Table);
-            return Table.Kernel.RegisterSyscall(Number, nameof(NtReadFile), Reads.EmitRead, Reads.FinishRead) ? Reads : null;
+            return Instance.RegisterGuestKernelSyscall(Table.Kernel, Number, nameof(NtReadFile), Reads.EmitRead, Reads.FinishRead) ? Reads : null;
         }
 
         private void EmitRead(GuestKernelCallBuilder Builder)
