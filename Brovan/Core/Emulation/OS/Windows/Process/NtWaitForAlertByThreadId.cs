@@ -39,19 +39,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
-            if (!State.AlertByThreadIdWaitActive)
+            if (State.WaitKind != WindowsWaitKind.Alert)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
             if (Instance.IsEmulatedDeadlineExpired(Thread.WaitDeadline))
             {
-                Instance.WinHelper.ClearWaitState(Thread, true);
+                Instance.WinHelper.ClearWaitState(Thread);
                 return NTSTATUS.STATUS_TIMEOUT;
             }
 
             if (State.AlertByThreadIdPending)
             {
                 State.AlertByThreadIdPending = false;
-                Instance.WinHelper.ClearWaitState(Thread, true);
+                Instance.WinHelper.ClearWaitState(Thread);
                 return NTSTATUS.STATUS_ALERTED;
             }
 
@@ -97,23 +97,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_TIMEOUT;
             }
 
-            ulong SyscallRip = Instance.WinHelper.GetSyscallRip();
-            Thread.WaitActive = true;
-            WinSysHelper.ResetWaitSet(Thread, State);
-            Thread.WaitAll = false;
-            Thread.WaitDeadline = Timeout.Infinite ? -1 : Timeout.Deadline;
-            Thread.WaitTimedOut = false;
-            Thread.WaitSatisfiedIndex = -1;
-            State.WaitCompleted = false;
-            State.WaitStatus = NTSTATUS.STATUS_PENDING;
-            State.WaitResumeRIP = SyscallRip;
-            State.WaitReturnRIP = SyscallRip + 2;
-            State.WaitAlertable = false;
-            State.ApcAlertable = false;
-            State.AlertByThreadIdWaitActive = true;
             State.AlertByThreadIdAddress = Address;
-
-            return Instance.WinHelper.ContinueParked(Thread);
+            return Instance.WinHelper.ParkUntil(Thread, Timeout.Infinite ? -1 : Timeout.Deadline, false, WindowsWaitKind.Alert);
         }
     }
 }

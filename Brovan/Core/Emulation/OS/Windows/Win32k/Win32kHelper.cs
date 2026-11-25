@@ -3653,8 +3653,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 return NTSTATUS.STATUS_SUCCESS;
 
             State.RetrySyscallNumber = Instance.WinHelper.ReadSyscallNumber();
-            State.SendReplyWaitActive = true;
-            return Instance.WinHelper.ParkUntil(Thread, -1, Alertable: false);
+            return Instance.WinHelper.ParkUntil(Thread, -1, false, WindowsWaitKind.SendReply);
         }
 
         internal static bool IsSendRerun(BinaryEmulator Instance)
@@ -4038,12 +4037,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State == null || (!State.GetMessageWaitActive && !State.WaitMessageActive && !State.MsgWaitActive))
+                if (State == null || !State.WaitKind.TakesQueuePort())
                     continue;
 
-                if (State.MsgWaitActive)
+                if (State.WaitKind == WindowsWaitKind.MessageObjects)
                     Thread.WaitDeadline = GetMsgWaitDeadline(Instance, Thread.ThreadId, State.MsgWaitMask, State.MsgWaitTimeout);
-                else if (State.GetMessageWaitActive)
+                else if (State.WaitKind == WindowsWaitKind.GetMessage)
                     Thread.WaitDeadline = GetNextTimerDue(Instance, State.GetMessageHwndFilter, Thread.ThreadId, State.GetMessageMinMessage, State.GetMessageMaxMessage);
                 else
                     Thread.WaitDeadline = GetNextTimerDue(Instance, 0, Thread.ThreadId, 0, 0);

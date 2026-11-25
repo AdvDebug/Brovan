@@ -2693,7 +2693,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State != null && State.WorkerFactoryWaitActive && State.WorkerFactory == Factory)
+                if (State != null && State.WaitKind == WindowsWaitKind.WorkerFactory && State.WorkerFactory == Factory)
                     return true;
             }
 

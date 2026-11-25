@@ -122,10 +122,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             }
 
             long WaitDeadline = Win32kHelper.GetMsgWaitDeadline(Instance, Thread.ThreadId, WakeMask, Deadline);
-            State.MsgWaitActive = true;
             State.MsgWaitMask = WakeMask;
             State.MsgWaitTimeout = Deadline;
-            return Instance.WinHelper.ParkUntil(Thread, WaitDeadline, Alertable, OnObjects: true, WaitAll);
+            return Instance.WinHelper.ParkUntil(Thread, WaitDeadline, Alertable, WindowsWaitKind.MessageObjects, WaitAll);
         }
     }
 }

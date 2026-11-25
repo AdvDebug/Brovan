@@ -380,15 +380,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong SyscallRip = GetSyscallRip();
 
             State.RetrySyscallNumber = ReadSyscallNumber();
-            State.RetrySyscallActive = true;
-            State.HostWorkWaitActive = HostWork != null;
             if (HostWork != null)
                 State.HostWork = HostWork;
             State.ResetSyncIo();
             State.SyncIo = SyncIo;
 
             Thread.WaitActive = true;
-            ResetWaitSet(Thread, State);
+            StartWaitSet(Thread, State, HostWork != null ? WindowsWaitKind.HostWorkRetry : WindowsWaitKind.Retry);
             Thread.WaitAll = false;
             Thread.WaitDeadline = Deadline;
             State.WaitCompleted = false;
@@ -454,7 +452,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.WaitActive = true;
-            ResetWaitSet(Thread, State);
+            StartWaitSet(Thread, State, WindowsWaitKind.IoRequest);
             Thread.WaitAll = false;
             Thread.WaitDeadline = Deadline;
             State.WaitCompleted = false;
@@ -471,18 +469,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.StopEmulation();
         }
 
-        internal static void ResetWaitSet(EmulatedThread Thread, WindowsThreadState State, bool KeepObjects = false)
+        // A wait on objects keeps the entries its handler resolved.
+        private static void StartWaitSet(EmulatedThread Thread, WindowsThreadState State, WindowsWaitKind Kind)
         {
             Thread.NewWaitGeneration();
-            if (!KeepObjects)
-                State.ClearWaitObjects();
+            State.StartWait(Kind);
         }
 
-        internal NTSTATUS ParkUntil(EmulatedThread Thread, long Deadline, bool Alertable, bool OnObjects = false, bool WaitAll = false)
+        internal static void EndWaitSet(EmulatedThread Thread, WindowsThreadState State)
+        {
+            Thread.NewWaitGeneration();
+            Thread.WaitTimedOut = false;
+            Thread.WaitSatisfiedIndex = -1;
+            State.EndWait();
+        }
+
+        internal NTSTATUS ParkUntil(EmulatedThread Thread, long Deadline, bool Alertable, WindowsWaitKind Kind, bool WaitAll = false)
         {
             using RankedLock.Scope SchedulerScope = Emulator.SchedulerLock.EnterScope();
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
-            ResetWaitSet(Thread, State, KeepObjects: OnObjects);
+            StartWaitSet(Thread, State, Kind);
             Thread.WaitActive = true;
             Thread.WaitAll = WaitAll;
             Thread.WaitDeadline = Deadline;
@@ -506,7 +512,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_PENDING;
         }
 
-        public void ClearWaitState(EmulatedThread Thread, bool ClearAlertByThreadId = false)
+        public void ClearWaitState(EmulatedThread Thread)
         {
             using RankedLock.Scope SchedulerScope = Emulator.SchedulerLock.EnterScope();
             if (Thread == null)
@@ -515,35 +521,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator.UnfileWait(Thread);
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.WaitActive = false;
-            ResetWaitSet(Thread, State);
+            EndWaitSet(Thread, State);
             Thread.WaitAll = false;
             Thread.WaitDeadline = -1;
-            Thread.WaitTimedOut = false;
-            Thread.WaitSatisfiedIndex = -1;
             Thread.WaitClaimed = false;
-            State.WaitResumeRIP = 0;
-            State.WaitReturnRIP = 0;
-            State.WaitAlertable = false;
-            State.ApcAlertable = false;
-            State.MsgWaitActive = false;
-            State.MsgWaitMask = 0;
-            State.WaitMessageActive = false;
-            State.GetMessageWaitActive = false;
-            State.SendReplyWaitActive = false;
-            State.RetrySyscallActive = false;
-            State.RetrySyscallNumber = 0;
-            State.HostWorkWaitActive = false;
             State.ResetSyncIo();
             State.PipeWaitHandle = 0;
             State.PipeWaitDeadline = -1;
-            State.IoRequest = null;
-            State.ResetIoCompletionWait();
-
-            if (ClearAlertByThreadId)
-            {
-                State.AlertByThreadIdWaitActive = false;
-                State.AlertByThreadIdAddress = 0;
-            }
         }
 
         // NT frees the TEB and the initial stack when a thread ends, and keeps the thread object while a
@@ -643,12 +627,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator.ForgetThread(Thread.ThreadId);
         }
 
-        public void ClearTerminationState(EmulatedThread Thread, bool ClearAlertByThreadId = false)
+        public void ClearTerminationState(EmulatedThread Thread)
         {
             if (Thread == null)
                 return;
 
-            ClearWaitState(Thread, true);
+            ClearWaitState(Thread);
 
             // NT cancels thread I/O while its IO_STATUS_BLOCKs are still mapped.
             PipeRequests.CancelThread(Emulator, (int)Thread.ThreadId);
@@ -665,18 +649,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
-            State.ClearWaitObjects();
             State.DispatchException = false;
             State.ExceptionInformation = null;
-            State.WorkerFactoryWaitActive = false;
-            State.WorkerFactory = null;
-            State.WorkerFactoryMiniPackets = 0;
-            State.WorkerFactoryPacketsReturned = 0;
-            State.WorkerFactoryMaxPackets = 0;
-            State.WorkerFactoryReservedEntries?.Clear();
             State.AlertByThreadIdPending = false;
-            State.AlertByThreadIdWaitActive = false;
-            State.AlertByThreadIdAddress = 0;
         }
 
         /// <summary>
@@ -4206,37 +4181,30 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            WindowsWaitKind Kind = State.WaitKind;
             Thread.WaitActive = false;
-            ResetWaitSet(Thread, State);
             Thread.WaitDeadline = -1;
             Thread.WaitAll = false;
-            State.WaitAlertable = false;
-            State.ApcAlertable = false;
 
             NTSTATUS InterruptStatus = NTSTATUS.STATUS_USER_APC;
-            if (State.IoCompletionWaitActive && State.IoCompletionEntriesRemovedPtr != 0
+            if (Kind == WindowsWaitKind.IoCompletion && State.IoCompletionEntriesRemovedPtr != 0
                 && !Emulator._emulator.WriteMemory(State.IoCompletionEntriesRemovedPtr, 0u, 4))
                 InterruptStatus = NTSTATUS.STATUS_ACCESS_VIOLATION;
-            State.ResetIoCompletionWait();
-            State.IoRequest = null;
 
-            if (State.RetrySyscallActive)
+            if (Kind.IsRetry())
             {
                 Thread.Context.RIP = State.WaitResumeRIP;
                 Thread.Context.RAX = State.RetrySyscallNumber;
-                State.RetrySyscallActive = false;
-                State.RetrySyscallNumber = 0;
                 State.ResetSyncIo();
             }
             else
             {
-                ulong ResumeRip = WinEmulatedThread.GetState(Thread).WaitReturnRIP != 0 ? WinEmulatedThread.GetState(Thread).WaitReturnRIP : (WinEmulatedThread.GetState(Thread).WaitResumeRIP != 0 ? WinEmulatedThread.GetState(Thread).WaitResumeRIP + 2 : Thread.Context.RIP);
+                ulong ResumeRip = State.WaitReturnRIP != 0 ? State.WaitReturnRIP : (State.WaitResumeRIP != 0 ? State.WaitResumeRIP + 2 : Thread.Context.RIP);
                 Thread.Context.RIP = ResumeRip;
                 Thread.Context.RAX = (ulong)InterruptStatus;
             }
 
-            WinEmulatedThread.GetState(Thread).WaitResumeRIP = 0;
-            WinEmulatedThread.GetState(Thread).WaitReturnRIP = 0;
+            EndWaitSet(Thread, State);
             if (Emulator.CurrentThread == Thread)
                 WindowsGuest.WriteWaitReturn(Emulator, Thread.Context, false);
         }

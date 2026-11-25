@@ -29,7 +29,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             using RankedLock.Scope SchedulerScope = Instance.SchedulerLock.EnterScope();
             State.AlertByThreadIdPending = true;
 
-            if (State.AlertByThreadIdWaitActive && TargetThread.State == EmulatedThreadState.Waiting && Instance.TryWakeWaiter(TargetThread)
+            if (State.WaitKind == WindowsWaitKind.Alert && TargetThread.State == EmulatedThreadState.Waiting && Instance.TryWakeWaiter(TargetThread)
                 && TargetThread != Instance.CurrentThread)
                 Instance.YieldSliceAfterWake(TargetThread);
 

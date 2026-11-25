@@ -2556,29 +2556,26 @@ namespace Brovan
             }
             else if (Thread.GuestState is WindowsThreadState WindowsState)
             {
-                if (WindowsState.WaitObjectCount > 0)
-                    return $"objects={WindowsState.WaitObjectCount}";
-
-                if (WindowsState.WorkerFactoryWaitActive)
-                    return $"worker-factory {WindowsState.WorkerFactory?.Name}";
-
-                if (WindowsState.IoCompletionWaitActive)
-                    return $"io-completion {WindowsState.IoCompletion?.Name}";
-
-                if (WindowsState.IoRequest != null)
-                    return WindowsState.IoRequest.WaitLabel;
-
-                if (WindowsState.SendReplyWaitActive && WindowsState.InnermostSend is { } Send)
-                    return $"send-reply hwnd 0x{Send.Hwnd:X} msg 0x{Send.Message:X}";
+                string Label = !Thread.WaitActive ? null : WindowsState.WaitKind switch
+                {
+                    WindowsWaitKind.Objects => $"objects={WindowsState.WaitObjectCount}",
+                    WindowsWaitKind.MessageObjects => $"message-objects={WindowsState.WaitObjectCount}",
+                    WindowsWaitKind.WorkerFactory => $"worker-factory {WindowsState.WorkerFactory?.Name}",
+                    WindowsWaitKind.IoCompletion => $"io-completion {WindowsState.IoCompletion?.Name}",
+                    WindowsWaitKind.IoRequest => WindowsState.IoRequest?.WaitLabel,
+                    WindowsWaitKind.SendReply => WindowsState.InnermostSend is { } Send ? $"send-reply hwnd 0x{Send.Hwnd:X} msg 0x{Send.Message:X}" : "send-reply",
+                    WindowsWaitKind.HostWorkRetry when WindowsState.SyncIo == null => $"host-work {(WindowsState.HostWork?.IsCompleted == true ? "done" : "running")}",
+                    WindowsWaitKind.Retry when WindowsState.SyncIo == null => "retry",
+                    WindowsWaitKind.Alert => $"alertbythreadid 0x{WindowsState.AlertByThreadIdAddress:X}",
+                    WindowsWaitKind.GetMessage => "get-message",
+                    WindowsWaitKind.WaitMessage => "wait-message",
+                    _ => null,
+                };
+                if (Label != null)
+                    return Label;
 
                 if (WindowsState.SyncIo is WinPendingIo SyncIo)
                     return $"sync-io iosb=0x{SyncIo.IoStatusBlock:X}{(WindowsState.SyncIoCancelled ? " cancelled" : "")}";
-
-                if (WindowsState.HostWorkWaitActive)
-                    return $"host-work {(WindowsState.HostWork?.IsCompleted == true ? "done" : "running")}";
-
-                if (WindowsState.AlertByThreadIdWaitActive)
-                    return $"alertbythreadid 0x{WindowsState.AlertByThreadIdAddress:X}";
 
                 if (WindowsState.ApcAlertable)
                     return "alertable";

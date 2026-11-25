@@ -37,7 +37,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 AlpcMessaging.DeliverConnectReplies(Instance, Thread.ThreadId);
 
             long Deadline = Math.Min(Instance.WinHelper.GetNextVerticalBlankTick(), Instance.CreateEmulatedDeadlineMilliseconds(TimeoutMilliseconds));
-            return Instance.WinHelper.ParkUntil(Thread, Deadline, Alertable: false);
+            return Instance.WinHelper.ParkUntil(Thread, Deadline, false, WindowsWaitKind.Timeout);
         }
     }
 }

@@ -23,23 +23,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             Win32kQueuePort.TakePackets(Instance, State);
             if (Win32kHelper.HasQueuedInputEvent(Instance, Win32kHelper.QS_ALLINPUT, Thread.ThreadId))
             {
+                if (Thread.WaitActive)
+                    Instance.WinHelper.ClearWaitState(Thread);
                 Instance.SetRawSyscallReturn(1);
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
             if (!Thread.WaitActive)
-            {
-                Thread.WaitActive = true;
-                WinSysHelper.ResetWaitSet(Thread, State);
-                Thread.WaitAll = false;
-                Thread.WaitDeadline = Win32kHelper.GetNextTimerDue(Instance, 0, Thread.ThreadId, 0, 0);
-                State.WaitCompleted = false;
-                State.WaitStatus = NTSTATUS.STATUS_PENDING;
-                State.WaitResumeRIP = Instance.WinHelper.GetSyscallRip();
-                State.WaitReturnRIP = State.WaitResumeRIP + 2;
-                State.WaitAlertable = false;
-                State.WaitMessageActive = true;
-            }
+                return Instance.WinHelper.ParkUntil(Thread, Win32kHelper.GetNextTimerDue(Instance, 0, Thread.ThreadId, 0, 0), false, WindowsWaitKind.WaitMessage);
 
             return Instance.WinHelper.ContinueParked(Thread);
         }

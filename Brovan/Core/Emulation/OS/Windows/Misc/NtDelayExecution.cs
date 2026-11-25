@@ -51,7 +51,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Instance.WinHelper.HasPendingConnectReplies)
                 AlpcMessaging.DeliverConnectReplies(Instance, Thread.ThreadId);
 
-            return Instance.WinHelper.ParkUntil(Thread, Instance.CreateEmulatedDeadlineMilliseconds(DelayMs), Alertable);
+            return Instance.WinHelper.ParkUntil(Thread, Instance.CreateEmulatedDeadlineMilliseconds(DelayMs), Alertable, WindowsWaitKind.Timeout);
         }
     }
 }

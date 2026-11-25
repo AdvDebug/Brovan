@@ -75,23 +75,12 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Win32kHelper.TryDeliverWindowPosChanged(Instance, 0, SyscallRip))
                 return NTSTATUS.STATUS_SUCCESS;
 
-            Thread.WaitActive = true;
-            WinSysHelper.ResetWaitSet(Thread, State);
-            Thread.WaitAll = false;
-            Thread.WaitDeadline = Win32kHelper.GetNextTimerDue(Instance, HwndFilter, Thread.ThreadId, MinMessage, MaxMessage);
-            State.WaitCompleted = false;
-            State.WaitStatus = NTSTATUS.STATUS_PENDING;
-            State.WaitResumeRIP = SyscallRip;
-            State.WaitReturnRIP = State.WaitResumeRIP + 2;
             State.RetrySyscallNumber = Instance.WinHelper.ReadSyscallNumber();
-            State.WaitAlertable = false;
-            State.GetMessageWaitActive = true;
             State.GetMessageMessagePtr = MessagePtr;
             State.GetMessageHwndFilter = HwndFilter;
             State.GetMessageMinMessage = MinMessage;
             State.GetMessageMaxMessage = MaxMessage;
-
-            return Instance.WinHelper.ContinueParked(Thread);
+            return Instance.WinHelper.ParkUntil(Thread, Win32kHelper.GetNextTimerDue(Instance, HwndFilter, Thread.ThreadId, MinMessage, MaxMessage), false, WindowsWaitKind.GetMessage);
         }
     }
 }

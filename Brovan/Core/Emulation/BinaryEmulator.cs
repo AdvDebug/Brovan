@@ -591,8 +591,7 @@ namespace Brovan.Core.Emulation
 
         internal bool KernelLockCovered => !_passWithoutBig || KernelLock.IsHeld;
 
-        // Only the thread's own park entries set its wait kind and others only clear it, so an answer read before a
-        // section never goes from "no KernelLock" to "needs KernelLock".
+        // Only the thread's own park sets a kind that needs no KernelLock, so an earlier answer stays valid.
         private bool WaitNeedsKernelLock(EmulatedThread Thread) => Thread.WaitActive && Guest.WaitNeedsKernelLock(this, Thread);
 
         internal void AssertWaitLockHeld(EmulatedThread Thread, string Where)

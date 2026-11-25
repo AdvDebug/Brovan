@@ -334,7 +334,7 @@ namespace Brovan.Core.Emulation
                 return NTSTATUS.STATUS_TIMEOUT;
             }
 
-            return WinHelper.ParkUntil(Thread, Deadline, Alertable, OnObjects: true, WaitAll);
+            return WinHelper.ParkUntil(Thread, Deadline, Alertable, WindowsWaitKind.Objects, WaitAll);
         }
 
         internal NTSTATUS ContinueObjectWait(EmulatedThread Thread, WindowsThreadState State)
@@ -568,7 +568,7 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State != null && (State.WorkerFactoryWaitActive || State.IoCompletionWaitActive))
+                if (State != null && State.WaitKind.TakesCompletions())
                 {
                     HasCompletionPacketWaiter = true;
                     break;
@@ -671,7 +671,7 @@ namespace Brovan.Core.Emulation
                 if (State == null || State.WaitFiled)
                     continue;
 
-                if (State.WorkerFactoryWaitActive || State.IoCompletionWaitActive || WaitsOn(State, Target))
+                if (State.WaitKind.TakesCompletions() || WaitsOn(State, Target))
                     Candidates.Add(Thread);
             }
 
@@ -777,12 +777,6 @@ namespace Brovan.Core.Emulation
 
         internal bool TrySatisfyThreadWait(EmulatedThread Thread) => TrySatisfyThreadWait(Thread, EmulatedTickCount64);
 
-        // An alert-only wait is satisfied from its pending flag or deadline and completed into the thread's context,
-        // so scheduler state alone covers it.
-        internal static bool IsAlertWaitOnly(EmulatedThread Thread, WindowsThreadState State)
-            => State.AlertByThreadIdWaitActive && State.WaitObjectCount == 0 && !State.WorkerFactoryWaitActive && State.IoRequest == null
-               && !State.SyncIoCancelled && !State.HostWorkWaitActive && !State.IoCompletionWaitActive && !State.RetrySyscallActive;
-
         // A wait on objects alone stays unsatisfiable until one signals or the deadline passes.
         internal bool CanSkipWaitCheck(EmulatedThread Thread, long Now)
         {
@@ -833,10 +827,7 @@ namespace Brovan.Core.Emulation
             State.WaitCheckedFileable = false;
             State.WaitCheckedEpoch = ScanEpoch;
 
-            if (State.WaitObjectCount == 0
-                || State.WorkerFactoryWaitActive || State.IoCompletionWaitActive || State.AlertByThreadIdWaitActive || State.IoRequest != null
-                || State.WaitMessageActive || State.GetMessageWaitActive || State.SendReplyWaitActive || State.MsgWaitActive
-                || State.RetrySyscallActive || State.PipeWaitHandle != 0 || State.WaitAlertable || State.ApcAlertable)
+            if (State.WaitKind != WindowsWaitKind.Objects || State.WaitAlertable || State.ApcAlertable)
                 return;
 
             // A signal reaches a filed waiter only through an object that entered the handle table.
@@ -1088,13 +1079,12 @@ namespace Brovan.Core.Emulation
             if (State == null || Thread.State != EmulatedThreadState.Waiting || !Thread.WaitActive)
                 return null;
 
-            if (State.WorkerFactoryWaitActive)
-                return State.WorkerFactory?.Completion;
-
-            if (State.IoCompletionWaitActive)
-                return State.IoCompletion;
-
-            return State.WaitMessageActive || State.GetMessageWaitActive || State.MsgWaitActive ? State.QueuePort : null;
+            return State.WaitKind switch
+            {
+                WindowsWaitKind.WorkerFactory => State.WorkerFactory?.Completion,
+                WindowsWaitKind.IoCompletion => State.IoCompletion,
+                _ => State.WaitKind.TakesQueuePort() ? State.QueuePort : null,
+            };
         }
 
         // Completion and message waits are never filed, so the scan list holds every thread parked on a completion port.
@@ -1137,195 +1127,178 @@ namespace Brovan.Core.Emulation
             Thread.WaitSatisfiedIndex = -1;
 
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-            if (State != null && State.WorkerFactoryWaitActive)
+            if (State == null)
+                return (Thread.WaitHandles is { Count: > 0 } Handles && TrySatisfyGuestHandles(Thread, Handles)) || TimedOutBy(Thread, Now);
+
+            switch (State.WaitKind)
             {
-                if (State.WorkerFactory is WinWorkerFactory Factory)
-                {
-                    if (Factory.Shutdown)
+                case WindowsWaitKind.WorkerFactory:
+                    if (State.WorkerFactory is WinWorkerFactory Factory)
+                    {
+                        if (Factory.Shutdown)
+                            return true;
+
+                        if (State.WorkerFactoryReservedEntries == null)
+                            State.WorkerFactoryReservedEntries = new List<WinIoCompletionEntry>();
+
+                        if (ReserveWorkerFactoryEntries(Factory, State.WorkerFactoryMaxPackets, State.WorkerFactoryReservedEntries))
+                        {
+                            Thread.WaitSatisfiedIndex = 0;
+                            return true;
+                        }
+                    }
+
+                    return TimedOutBy(Thread, Now);
+
+                case WindowsWaitKind.IoRequest:
+                    if (!State.IoRequest.Completed)
+                    {
+                        if (!IsDeadlineExpired(Thread.WaitDeadline, Now))
+                            return false;
+
+                        State.IoRequest.Finish(NTSTATUS.STATUS_TIMEOUT);
+                    }
+
+                    Thread.WaitSatisfiedIndex = 0;
+                    return true;
+
+                case WindowsWaitKind.Retry:
+                case WindowsWaitKind.HostWorkRetry:
+                    if (State.SyncIoCancelled)
                         return true;
 
-                    if (State.WorkerFactoryReservedEntries == null)
-                        State.WorkerFactoryReservedEntries = new List<WinIoCompletionEntry>();
+                    if (State.WaitKind == WindowsWaitKind.HostWorkRetry)
+                        return State.HostWork == null || State.HostWork.IsCompleted;
 
-                    if (ReserveWorkerFactoryEntries(Factory, State.WorkerFactoryMaxPackets, State.WorkerFactoryReservedEntries))
+                    return TimedOutBy(Thread, Now);
+
+                case WindowsWaitKind.IoCompletion:
+                    if (TryReserveIoCompletionEntries(State))
                     {
                         Thread.WaitSatisfiedIndex = 0;
                         return true;
                     }
-                }
 
-                if (IsDeadlineExpired(Thread.WaitDeadline, Now))
-                {
-                    Thread.WaitTimedOut = true;
-                    return true;
-                }
+                    return TimedOutBy(Thread, Now);
 
-                return false;
-            }
+                case WindowsWaitKind.Alert:
+                    if (State.AlertByThreadIdPending)
+                    {
+                        State.AlertByThreadIdPending = false;
+                        Thread.WaitSatisfiedIndex = 0;
+                        return true;
+                    }
 
-            if (State != null && State.IoRequest != null)
-            {
-                if (!State.IoRequest.Completed)
-                {
-                    if (!IsDeadlineExpired(Thread.WaitDeadline, Now))
+                    return TimedOutBy(Thread, Now);
+
+                case WindowsWaitKind.WaitMessage:
+                    Win32kQueuePort.TakePackets(this, State);
+                    if (!Win32kHelper.HasQueuedInputEvent(this, Win32kHelper.QS_ALLINPUT, Thread.ThreadId))
                         return false;
 
-                    State.IoRequest.Finish(NTSTATUS.STATUS_TIMEOUT);
-                }
+                    State.ChangeKindInScan(WindowsWaitKind.None);
+                    Thread.WaitSatisfiedIndex = 1;
+                    State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
+                    return true;
+
+                case WindowsWaitKind.SendReply:
+                    if (!Win32kHelper.IsSendReplyReady(this, Thread, State))
+                        return false;
+
+                    State.ChangeKindInScan(WindowsWaitKind.Retry);
+                    return true;
+
+                case WindowsWaitKind.GetMessage:
+                    return TrySatisfyGetMessage(Thread, State);
+
+                case WindowsWaitKind.MessageObjects:
+                    return TrySatisfyMessageObjects(Thread, State, Now);
+
+                case WindowsWaitKind.Objects:
+                    if (TryTakeWaitObjects(Thread, State, Thread.WaitAll, out int Index, out NTSTATUS WaitStatus))
+                    {
+                        Thread.WaitSatisfiedIndex = Index;
+                        State.WaitStatus = WaitStatus;
+                        return true;
+                    }
+
+                    return TimedOutBy(Thread, Now);
+
+                default:
+                    return TimedOutBy(Thread, Now);
+            }
+        }
+
+        private bool TrySatisfyGetMessage(EmulatedThread Thread, WindowsThreadState State)
+        {
+            Win32kHelper.DrainHostEvents(this);
+            if (Win32kHelper.HasSentMessageFor(this, Thread.ThreadId))
+            {
+                State.ChangeKindInScan(WindowsWaitKind.Retry);
+                return true;
+            }
+
+            Win32kQueuePort.TakePackets(this, State);
+            if (!Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, false, Thread.ThreadId, out Win32kMessage Next))
+                return false;
+
+            if (Win32kHelper.IsSentWhenRemoved(this, Next, out _))
+            {
+                State.ChangeKindInScan(WindowsWaitKind.Retry);
+                return true;
+            }
+
+            if (!Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
+                return false;
+
+            Win32kHelper.WriteMessage(this, State.GetMessageMessagePtr, Message, State);
+            State.ChangeKindInScan(WindowsWaitKind.None);
+            Thread.WaitSatisfiedIndex = Message.Message == Win32kHelper.WM_QUIT ? 0 : 1;
+            State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
+            return true;
+        }
+
+        private bool TrySatisfyMessageObjects(EmulatedThread Thread, WindowsThreadState State, long Now)
+        {
+            if (IsDeadlineExpired(Thread.WaitDeadline, Now) && !IsDeadlineExpired(State.MsgWaitTimeout, Now))
+                Thread.WaitDeadline = Win32kHelper.GetMsgWaitDeadline(this, Thread.ThreadId, State.MsgWaitMask, State.MsgWaitTimeout);
+
+            bool MessageReady = Win32kHelper.HasQueuedInputEvent(this, State.MsgWaitMask, Thread.ThreadId);
+
+            if (Thread.WaitAll)
+            {
+                if (!AreWaitObjectsSignaled(Thread, State) || !MessageReady)
+                    return TimedOutBy(Thread, Now);
 
                 Thread.WaitSatisfiedIndex = 0;
+                State.WaitStatus = TakeAllWaitObjects(Thread, State);
                 return true;
             }
 
-            if (State != null && State.SyncIoCancelled)
+            if (TryTakeAnyWaitObject(Thread, State, out int Taken, out NTSTATUS TakenStatus))
+            {
+                Thread.WaitSatisfiedIndex = Taken;
+                State.WaitStatus = TakenStatus;
                 return true;
-
-            if (State != null && State.HostWorkWaitActive)
-                return State.HostWork == null || State.HostWork.IsCompleted;
-
-            if (State != null && State.IoCompletionWaitActive)
-            {
-                if (TryReserveIoCompletionEntries(State))
-                {
-                    Thread.WaitSatisfiedIndex = 0;
-                    return true;
-                }
-
-                if (IsDeadlineExpired(Thread.WaitDeadline, Now))
-                {
-                    Thread.WaitTimedOut = true;
-                    return true;
-                }
-
-                return false;
             }
 
-            if (State != null && State.AlertByThreadIdWaitActive)
+            if (MessageReady || Win32kQueuePort.TryEndMsgWait(this, Thread, State, State.MsgWaitMask))
             {
-                if (State.AlertByThreadIdPending)
-                {
-                    State.AlertByThreadIdPending = false;
-                    Thread.WaitSatisfiedIndex = 0;
-                    return true;
-                }
-
-                if (IsDeadlineExpired(Thread.WaitDeadline, Now))
-                {
-                    Thread.WaitTimedOut = true;
-                    return true;
-                }
-
-                return false;
-            }
-
-            if (State != null && State.WaitMessageActive)
-            {
-                Win32kQueuePort.TakePackets(this, State);
-                if (!Win32kHelper.HasQueuedInputEvent(this, Win32kHelper.QS_ALLINPUT, Thread.ThreadId))
-                    return false;
-
-                State.WaitMessageActive = false;
-                Thread.WaitSatisfiedIndex = 1;
+                Thread.WaitSatisfiedIndex = State.WaitObjectCount;
                 State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
                 return true;
             }
 
-            if (State != null && State.SendReplyWaitActive)
-            {
-                if (!Win32kHelper.IsSendReplyReady(this, Thread, State))
-                    return false;
+            return TimedOutBy(Thread, Now);
+        }
 
-                State.SendReplyWaitActive = false;
-                State.RetrySyscallActive = true;
-                return true;
-            }
-
-            if (State != null && State.GetMessageWaitActive)
-            {
-                Win32kHelper.DrainHostEvents(this);
-                if (Win32kHelper.HasSentMessageFor(this, Thread.ThreadId))
-                {
-                    State.GetMessageWaitActive = false;
-                    State.RetrySyscallActive = true;
-                    return true;
-                }
-
-                Win32kQueuePort.TakePackets(this, State);
-                if (!Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, false, Thread.ThreadId, out Win32kMessage Next))
-                    return false;
-
-                if (Win32kHelper.IsSentWhenRemoved(this, Next, out _))
-                {
-                    State.GetMessageWaitActive = false;
-                    State.RetrySyscallActive = true;
-                    return true;
-                }
-
-                if (Win32kHelper.TryGetMessage(this, State.GetMessageHwndFilter, State.GetMessageMinMessage, State.GetMessageMaxMessage, Win32kHelper.QS_ALLINPUT, true, Thread.ThreadId, out Win32kMessage Message))
-                {
-                    Win32kHelper.WriteMessage(this, State.GetMessageMessagePtr, Message, State);
-                    State.GetMessageWaitActive = false;
-                    Thread.WaitSatisfiedIndex = Message.Message == Win32kHelper.WM_QUIT ? 0 : 1;
-                    State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
-                    return true;
-                }
-
+        private bool TimedOutBy(EmulatedThread Thread, long Now)
+        {
+            if (!IsDeadlineExpired(Thread.WaitDeadline, Now))
                 return false;
-            }
 
-            if (State != null && State.MsgWaitActive)
-            {
-                if (IsDeadlineExpired(Thread.WaitDeadline, Now) && !IsDeadlineExpired(State.MsgWaitTimeout, Now))
-                    Thread.WaitDeadline = Win32kHelper.GetMsgWaitDeadline(this, Thread.ThreadId, State.MsgWaitMask, State.MsgWaitTimeout);
-
-                bool MessageReady = Win32kHelper.HasQueuedInputEvent(this, State.MsgWaitMask, Thread.ThreadId);
-
-                if (Thread.WaitAll)
-                {
-                    if (!AreWaitObjectsSignaled(Thread, State) || !MessageReady)
-                        goto CheckTimeout;
-
-                    Thread.WaitSatisfiedIndex = 0;
-                    State.WaitStatus = TakeAllWaitObjects(Thread, State);
-                    return true;
-                }
-
-                if (TryTakeAnyWaitObject(Thread, State, out int Taken, out NTSTATUS TakenStatus))
-                {
-                    Thread.WaitSatisfiedIndex = Taken;
-                    State.WaitStatus = TakenStatus;
-                    return true;
-                }
-
-                if (MessageReady || Win32kQueuePort.TryEndMsgWait(this, Thread, State, State.MsgWaitMask))
-                {
-                    Thread.WaitSatisfiedIndex = State.WaitObjectCount;
-                    State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
-                    return true;
-                }
-
-                goto CheckTimeout;
-            }
-
-            if (State != null && State.WaitObjectCount > 0
-                && TryTakeWaitObjects(Thread, State, Thread.WaitAll, out int Index, out NTSTATUS WaitStatus))
-            {
-                Thread.WaitSatisfiedIndex = Index;
-                State.WaitStatus = WaitStatus;
-                return true;
-            }
-
-            if (State == null && Thread.WaitHandles is { Count: > 0 } Handles && TrySatisfyGuestHandles(Thread, Handles))
-                return true;
-
-        CheckTimeout:
-            if (IsDeadlineExpired(Thread.WaitDeadline, Now))
-            {
-                Thread.WaitTimedOut = true;
-                return true;
-            }
-
-            return false;
+            Thread.WaitTimedOut = true;
+            return true;
         }
 
         internal bool HasPendingHostIo() => WinHelper != null &&
@@ -1342,7 +1315,7 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State != null && State.HostWorkWaitActive)
+                if (State != null && State.WaitKind == WindowsWaitKind.HostWorkRetry)
                     return true;
             }
 
@@ -1358,7 +1331,7 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State != null && (State.GetMessageWaitActive || State.MsgWaitActive || State.WaitMessageActive))
+                if (State != null && State.WaitKind.TakesQueuePort())
                     return true;
             }
 

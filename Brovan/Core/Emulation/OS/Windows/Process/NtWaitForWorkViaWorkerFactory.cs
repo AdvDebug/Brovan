@@ -102,7 +102,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WinIoCompletion Completion = Factory.Completion;
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             State.BoundIoCompletion = Completion;
-            if (State.WaitCompleted && State.WorkerFactoryWaitActive == false && State.WorkerFactory == null)
+            if (State.WaitCompleted && State.WorkerFactory == null)
             {
                 NTSTATUS Status = State.WaitStatus;
                 State.WaitCompleted = false;
@@ -138,12 +138,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_TIMEOUT;
 
             State.WorkerFactoryReservedEntries?.Clear();
-            State.WorkerFactoryWaitActive = true;
             State.WorkerFactory = Factory;
             State.WorkerFactoryMiniPackets = MiniPackets;
             State.WorkerFactoryPacketsReturned = PacketsReturnedPtr;
             State.WorkerFactoryMaxPackets = Count;
-            return Instance.WinHelper.ParkUntil(Thread, Deadline, false);
+            return Instance.WinHelper.ParkUntil(Thread, Deadline, false, WindowsWaitKind.WorkerFactory);
         }
     }
 }

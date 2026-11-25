@@ -435,9 +435,8 @@ namespace Brovan.Core.Emulation.Guests
         public bool WaitNeedsKernelLock(BinaryEmulator Instance, EmulatedThread Thread)
         {
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-            return State == null || !BinaryEmulator.IsAlertWaitOnly(Thread, State);
+            return State == null || State.WaitKind.NeedsKernelLock();
         }
-
 
         public void OnThreadWaitSatisfied(BinaryEmulator Instance, EmulatedThread Thread)
         {
@@ -445,28 +444,24 @@ namespace Brovan.Core.Emulation.Guests
                 return;
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
-            if (State.WorkerFactoryWaitActive)
+            switch (State.WaitKind)
             {
-                CompleteWorkerFactoryWait(Instance, Thread, State);
-                return;
-            }
+                case WindowsWaitKind.WorkerFactory:
+                    CompleteWorkerFactoryWait(Instance, Thread, State);
+                    return;
 
-            if (State.IoCompletionWaitActive)
-            {
-                CompleteIoCompletionWait(Instance, Thread, State);
-                return;
-            }
+                case WindowsWaitKind.IoCompletion:
+                    CompleteIoCompletionWait(Instance, Thread, State);
+                    return;
 
-            if (State.IoRequest != null)
-            {
-                CompleteIoRequestWait(Instance, Thread, State);
-                return;
-            }
+                case WindowsWaitKind.IoRequest:
+                    CompleteIoRequestWait(Instance, Thread, State);
+                    return;
 
-            if (State.RetrySyscallActive)
-            {
-                CompleteSyscallRetry(Instance, Thread, State);
-                return;
+                case WindowsWaitKind.Retry:
+                case WindowsWaitKind.HostWorkRetry:
+                    CompleteSyscallRetry(Instance, Thread, State);
+                    return;
             }
 
             NTSTATUS WaitStatus = State.WaitStatus;
@@ -474,33 +469,17 @@ namespace Brovan.Core.Emulation.Guests
                 WaitStatus = NTSTATUS.STATUS_SUCCESS;
 
             if (Thread.WaitTimedOut)
-            {
-                WaitStatus = NTSTATUS.STATUS_TIMEOUT;
-                if (!State.AlertByThreadIdWaitActive && !State.MsgWaitActive && State.WaitObjectCount == 0)
-                    WaitStatus = NTSTATUS.STATUS_SUCCESS;
-            }
-            else if (State.AlertByThreadIdWaitActive)
+                WaitStatus = State.WaitKind.EndsWithTimeoutStatus() ? NTSTATUS.STATUS_TIMEOUT : NTSTATUS.STATUS_SUCCESS;
+            else if (State.WaitKind == WindowsWaitKind.Alert)
                 WaitStatus = NTSTATUS.STATUS_ALERTED;
             else if (Thread.WaitSatisfiedIndex >= 0 && WaitStatus == NTSTATUS.STATUS_SUCCESS)
                 WaitStatus = (NTSTATUS)(uint)Thread.WaitSatisfiedIndex;
 
             ReturnFromWait(Instance, Thread, State, WaitStatus);
 
+            WinSysHelper.EndWaitSet(Thread, State);
             State.WaitCompleted = false;
             State.WaitStatus = WaitStatus;
-            State.WaitResumeRIP = 0;
-            State.WaitReturnRIP = 0;
-            State.WaitAlertable = false;
-            State.ClearWaitObjects();
-            State.ApcAlertable = false;
-            State.AlertByThreadIdWaitActive = false;
-            State.AlertByThreadIdAddress = 0;
-            State.MsgWaitActive = false;
-            State.MsgWaitMask = 0;
-            State.WaitMessageActive = false;
-            State.GetMessageWaitActive = false;
-            Thread.WaitTimedOut = false;
-            Thread.WaitSatisfiedIndex = -1;
         }
 
         /// <summary>
@@ -527,7 +506,7 @@ namespace Brovan.Core.Emulation.Guests
             }
 
             // A rerun after host work or sync I/O continues the same request.
-            if (Cancelled || (State.SyncIo == null && !State.HostWorkWaitActive))
+            if (Cancelled || (State.SyncIo == null && State.WaitKind != WindowsWaitKind.HostWorkRetry))
             {
                 State.ResetSyncIo();
             }
@@ -538,18 +517,9 @@ namespace Brovan.Core.Emulation.Guests
                 State.SyncIoSyscall = State.RetrySyscallNumber;
             }
 
-            State.RetrySyscallActive = false;
-            State.RetrySyscallNumber = 0;
-            State.HostWorkWaitActive = false;
+            WinSysHelper.EndWaitSet(Thread, State);
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
-            State.WaitResumeRIP = 0;
-            State.WaitReturnRIP = 0;
-            State.WaitAlertable = false;
-            State.ClearWaitObjects();
-            State.ApcAlertable = false;
-            Thread.WaitTimedOut = false;
-            Thread.WaitSatisfiedIndex = -1;
 
             if (Instance.CurrentThread == Thread)
                 WriteWaitReturn(Instance, Thread.Context, ExitRegisters);
@@ -562,16 +532,9 @@ namespace Brovan.Core.Emulation.Guests
 
             ReturnFromWait(Instance, Thread, State, Status);
 
-            State.IoRequest = null;
+            WinSysHelper.EndWaitSet(Thread, State);
             State.WaitCompleted = false;
             State.WaitStatus = Status;
-            State.WaitResumeRIP = 0;
-            State.WaitReturnRIP = 0;
-            State.WaitAlertable = false;
-            State.ClearWaitObjects();
-            State.ApcAlertable = false;
-            Thread.WaitTimedOut = false;
-            Thread.WaitSatisfiedIndex = -1;
         }
 
         private void CompleteIoCompletionWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
@@ -597,16 +560,9 @@ namespace Brovan.Core.Emulation.Guests
 
             ReturnFromWait(Instance, Thread, State, WaitStatus);
 
-            State.ResetIoCompletionWait();
+            WinSysHelper.EndWaitSet(Thread, State);
             State.WaitCompleted = false;
             State.WaitStatus = WaitStatus;
-            State.WaitResumeRIP = 0;
-            State.WaitReturnRIP = 0;
-            State.WaitAlertable = false;
-            State.ClearWaitObjects();
-            State.ApcAlertable = false;
-            Thread.WaitTimedOut = false;
-            Thread.WaitSatisfiedIndex = -1;
         }
 
         private void CompleteWorkerFactoryWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
@@ -652,19 +608,9 @@ namespace Brovan.Core.Emulation.Guests
 
             ReturnFromWait(Instance, Thread, State, WaitStatus);
 
-            State.WorkerFactoryWaitActive = false;
-            State.WorkerFactory = null;
-            State.WorkerFactoryMiniPackets = 0;
-            State.WorkerFactoryPacketsReturned = 0;
-            State.WorkerFactoryMaxPackets = 0;
-            State.WorkerFactoryReservedEntries?.Clear();
+            WinSysHelper.EndWaitSet(Thread, State);
             State.WaitCompleted = false;
             State.WaitStatus = WaitStatus;
-            State.WaitResumeRIP = 0;
-            State.WaitReturnRIP = 0;
-            State.WaitAlertable = false;
-            State.ClearWaitObjects();
-            State.ApcAlertable = false;
         }
 
         public bool ExecuteThreadSlice(BinaryEmulator Instance, EmulatedThread Thread, uint QuantumInstructions, out bool State)

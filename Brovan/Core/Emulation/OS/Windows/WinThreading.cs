@@ -17,6 +17,42 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool IsSpecial => (Flags & SpecialUserApc) != 0;
     }
 
+    internal enum WindowsWaitKind : byte
+    {
+        None,
+        Timeout,
+        Objects,
+        MessageObjects,
+        Alert,
+        IoCompletion,
+        WorkerFactory,
+        IoRequest,
+        Retry,
+        HostWorkRetry,
+        WaitMessage,
+        GetMessage,
+        SendReply,
+    }
+
+    internal static class WindowsWaitKinds
+    {
+        internal static bool HoldsObjects(this WindowsWaitKind Kind) => Kind is WindowsWaitKind.Objects or WindowsWaitKind.MessageObjects;
+
+        internal static bool IsRetry(this WindowsWaitKind Kind) => Kind is WindowsWaitKind.Retry or WindowsWaitKind.HostWorkRetry;
+
+        internal static bool TakesQueuePort(this WindowsWaitKind Kind)
+            => Kind is WindowsWaitKind.WaitMessage or WindowsWaitKind.GetMessage or WindowsWaitKind.MessageObjects;
+
+        internal static bool TakesCompletions(this WindowsWaitKind Kind) => Kind is WindowsWaitKind.WorkerFactory or WindowsWaitKind.IoCompletion;
+
+        // NT: an object or alert wait that reaches its deadline returns STATUS_TIMEOUT, and a park on a deadline alone
+        // returns success.
+        internal static bool EndsWithTimeoutStatus(this WindowsWaitKind Kind) => Kind.HoldsObjects() || Kind == WindowsWaitKind.Alert;
+
+        // An alert wait needs only scheduler state.
+        internal static bool NeedsKernelLock(this WindowsWaitKind Kind) => Kind != WindowsWaitKind.Alert;
+    }
+
     public sealed class WindowsThreadState
     {
         public int ImpersonationTokenHandle { get; set; }
@@ -55,13 +91,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public ulong Win32ThreadInfo { get; set; }
         public ExceptionInformation ExceptionInformation { get; set; }
-        public bool WorkerFactoryWaitActive { get; set; }
         public WinWorkerFactory WorkerFactory { get; set; }
         public ulong WorkerFactoryMiniPackets { get; set; }
         public ulong WorkerFactoryPacketsReturned { get; set; }
         public uint WorkerFactoryMaxPackets { get; set; }
         public List<WinIoCompletionEntry> WorkerFactoryReservedEntries { get; set; } = new();
-        public bool IoCompletionWaitActive { get; set; }
         public WinIoCompletion IoCompletion { get; set; }
         public ulong IoCompletionKeyContextPtr { get; set; }
         public ulong IoCompletionApcContextPtr { get; set; }
@@ -79,7 +113,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal ParkedIoRequest IoRequest { get; set; }
 
         // HostWork outlives the wait. The re-run consumes it.
-        internal bool HostWorkWaitActive { get; set; }
         internal Task HostWork { get; set; }
 
         // Kept across the retries of one syscall, which NT sees as one wait.
@@ -101,6 +134,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool WaitAlertable { get; set; }
         public bool WaitCompleted { get; set; }
         public NTSTATUS WaitStatus { get; set; }
+        internal WindowsWaitKind WaitKind { get; private set; }
 
         // NT: a wait holds the objects its handles named at entry.
         internal WaitEntry[] WaitObjects = Array.Empty<WaitEntry>();
@@ -127,15 +161,77 @@ namespace Brovan.Core.Emulation.OS.Windows
             WaitObjects[WaitObjectCount++] = new WaitEntry { Object = Object, Waitable = Waitable };
         }
 
+        internal void StartWait(WindowsWaitKind Kind)
+        {
+            if (!Kind.HoldsObjects())
+                ClearWaitObjects();
+            WaitKind = Kind;
+        }
+
+        // Data that outlives a wait stays with its owner: HostWork, the sync I/O and pipe retry state,
+        // AlertByThreadIdPending and PendingSends.
+        internal void EndWait()
+        {
+            switch (WaitKind)
+            {
+                case WindowsWaitKind.WorkerFactory:
+                    WorkerFactory = null;
+                    WorkerFactoryMiniPackets = 0;
+                    WorkerFactoryPacketsReturned = 0;
+                    WorkerFactoryMaxPackets = 0;
+                    WorkerFactoryReservedEntries?.Clear();
+                    break;
+
+                case WindowsWaitKind.IoCompletion:
+                    ResetIoCompletionWait();
+                    break;
+
+                case WindowsWaitKind.IoRequest:
+                    IoRequest = null;
+                    break;
+
+                case WindowsWaitKind.Retry:
+                case WindowsWaitKind.HostWorkRetry:
+                case WindowsWaitKind.GetMessage:
+                    RetrySyscallNumber = 0;
+                    break;
+
+                case WindowsWaitKind.MessageObjects:
+                    MsgWaitMask = 0;
+                    break;
+
+                case WindowsWaitKind.Alert:
+                    AlertByThreadIdAddress = 0;
+                    break;
+            }
+
+            ClearWaitObjects();
+            WaitKind = WindowsWaitKind.None;
+            WaitResumeRIP = 0;
+            WaitReturnRIP = 0;
+            WaitAlertable = false;
+            ApcAlertable = false;
+        }
+
+        // The scan turns a send-reply or get-message wait into a retry of its syscall. Both stay KernelLock kinds.
+        internal void ChangeKindInScan(WindowsWaitKind To)
+        {
+            bool Allowed = To == WindowsWaitKind.Retry
+                ? WaitKind is WindowsWaitKind.SendReply or WindowsWaitKind.GetMessage
+                : To == WindowsWaitKind.None && WaitKind is WindowsWaitKind.WaitMessage or WindowsWaitKind.GetMessage;
+            if (!Allowed && RankedLock.OrderChecked)
+                Environment.FailFast($"[WaitKind] A scan changed a {WaitKind} wait into {To}.");
+
+            WaitKind = To;
+        }
+
         internal void ClearWaitObjects()
         {
             Array.Clear(WaitObjects, 0, WaitObjectCount);
             WaitObjectCount = 0;
         }
         public bool AlertByThreadIdPending { get; set; }
-        public bool AlertByThreadIdWaitActive { get; set; }
         public ulong AlertByThreadIdAddress { get; set; }
-        public bool MsgWaitActive { get; set; }
         public uint MsgWaitMask { get; set; }
         public long MsgWaitTimeout { get; set; } = -1;
         internal WinIoCompletion QueuePort;
@@ -143,14 +239,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal ulong[] CoreMessagingWindows;
         public ulong ClientThreadInfo { get; set; }
         public ulong ClientFocusInfo { get; set; }
-        public bool WaitMessageActive { get; set; }
-        public bool GetMessageWaitActive { get; set; }
-        public bool SendReplyWaitActive { get; set; }
 
         // Innermost last. The rerun of a send finds its record by callback depth.
         internal List<WinSentMessageReply> PendingSends { get; set; }
         internal WinSentMessageReply InnermostSend => PendingSends is { Count: > 0 } Sends ? Sends[^1] : null;
-        public bool RetrySyscallActive { get; set; }
         public uint RetrySyscallNumber { get; set; }
         public ulong PipeWaitHandle { get; set; }
         public long PipeWaitDeadline { get; set; } = -1;
@@ -187,7 +279,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void ResetIoCompletionWait()
         {
-            IoCompletionWaitActive = false;
             IoCompletion = null;
             IoCompletionKeyContextPtr = 0;
             IoCompletionApcContextPtr = 0;

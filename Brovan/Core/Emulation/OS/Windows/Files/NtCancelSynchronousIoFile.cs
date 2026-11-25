@@ -41,7 +41,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             ParkedIoRequest Request = State.IoRequest;
-            if (Thread.WaitActive && Request != null)
+            if (Thread.WaitActive && State.WaitKind == WindowsWaitKind.IoRequest)
             {
                 if (Request.Completed)
                     return false;
@@ -53,7 +53,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             // Between two runs of a retried call the thread still waits for the I/O.
-            bool InCall = (Thread.WaitActive && State.RetrySyscallActive) || State.SyncIoBetweenRetries;
+            bool InCall = (Thread.WaitActive && State.WaitKind.IsRetry()) || State.SyncIoBetweenRetries;
             if (!InCall || State.SyncIoCancelled || State.SyncIo is not WinPendingIo Io)
                 return false;
 
