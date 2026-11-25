@@ -3,7 +3,7 @@
 //
 // Set22000_258: 46 versions, extracted, not run
 // Set22621_169: 33 versions, extracted, not run
-// Set26100_8972: 4 versions, extracted, not run
+// Set26100_8972: 5 versions, extracted, not run
 // Set28000_2605: 2 versions, extracted, not run
 //
 // Left out:
@@ -125,7 +125,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             (22621, 6197) => Set22621_169,
             (22621, 6270) => Set22621_169,
             (22621, 7079) => Set22621_169,
-            (22621, 7711) => Set22621_169,
+            (22621, 7714) => Set22621_169,
             (26100, 1) => Set22000_258,
             (26100, 560) => Set22000_258,
             (26100, 1000) => Set22000_258,
@@ -161,6 +161,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             (26100, 9278) => Set26100_8972,
             (26100, 9549) => Set26100_8972,
             (26100, 9818) => Set26100_8972,
+            (26100, 10068) => Set26100_8972,
             (28000, 1761) => Set22000_258,
             (28000, 1830) => Set22000_258,
             (28000, 2179) => Set22000_258,
