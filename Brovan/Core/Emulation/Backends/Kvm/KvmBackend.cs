@@ -211,6 +211,9 @@ namespace Brovan.Core.Emulation
         public bool IsRangeMapped(ulong address, ulong size)
             => Inner.IsRangeMapped(address, size);
 
+        public bool IsRangeAccessible(ulong address, ulong size, bool write)
+            => Inner.IsRangeAccessible(address, size, write);
+
         public void Dispose()
         {
             Inner?.Dispose();

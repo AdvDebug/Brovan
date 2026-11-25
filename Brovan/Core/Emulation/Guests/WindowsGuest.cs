@@ -882,9 +882,9 @@ namespace Brovan.Core.Emulation.Guests
             if (Domain == WinSyscallDomain.Resolved)
                 Domain = ResolveDomain(Instance, Entry, ref Begun);
 
-            // A scheduler-domain call that falls back to KernelLock runs its handler under KernelLock alone, as every other
-            // call does.
-            bool WithoutKernelLock = Domain == WinSyscallDomain.Scheduler && !Instance.KernelLockCovered && !NeedsKernelLockAroundCall(Instance);
+            // A scheduler-domain or self-locking call that falls back runs its handler under KernelLock alone.
+            bool WithoutKernelLock = (Domain == WinSyscallDomain.Scheduler || Domain == WinSyscallDomain.Self)
+                && !Instance.KernelLockCovered && !NeedsKernelLockAroundCall(Instance);
 
             using RankedLock.Scope KernelScope = WithoutKernelLock ? default : Instance.EnterKernelLockScope();
             if (!WithoutKernelLock)
@@ -954,10 +954,11 @@ namespace Brovan.Core.Emulation.Guests
                     if (Syscall >= Win32kServiceBase)
                         Instance.WinHelper.FlushGdiBatch();
 
-                    RankedLock HeldLock = WithoutKernelLock ? Instance.SchedulerLock : Instance.KernelLock;
-                    bool CountHold = HeldLock.CountsHolds;
-                    long HeldBefore = CountHold ? HeldLock.HeldTicks() : 0;
-                    using (WithoutKernelLock ? HeldLock.EnterScope() : default)
+                    RankedLock? HeldLock = !WithoutKernelLock ? Instance.KernelLock
+                        : Domain == WinSyscallDomain.Scheduler ? Instance.SchedulerLock : null;
+                    bool CountHold = HeldLock?.CountsHolds == true;
+                    long HeldBefore = CountHold ? HeldLock!.HeldTicks() : 0;
+                    using (WithoutKernelLock && HeldLock != null ? HeldLock.EnterScope() : default)
                     {
                         if (!Begun)
                             Instance.WinHelper.BeginSyscall();
@@ -969,7 +970,7 @@ namespace Brovan.Core.Emulation.Guests
                         {
                             Instance.WinHelper.EndSyscall();
                             if (CountHold)
-                                HeldLock.NoteCall(Syscall, HandlerName, HeldBefore);
+                                HeldLock!.NoteCall(Syscall, HandlerName, HeldBefore);
                         }
 
                         Waiting = Instance.CurrentThread?.State == EmulatedThreadState.Waiting;
@@ -1216,7 +1217,7 @@ namespace Brovan.Core.Emulation.Guests
                 Domain = WinSyscallDomain.KernelLock;
             }
 
-            if (Domain == WinSyscallDomain.Scheduler)
+            if (Domain == WinSyscallDomain.Scheduler || Domain == WinSyscallDomain.Self)
                 return Domain;
 
             SyscallDomainStats.FellBack(SyscallDomainStats.Reason.ObjectNeedsKernelLock);
@@ -1238,7 +1239,7 @@ namespace Brovan.Core.Emulation.Guests
             return false;
         }
 
-        private static class SyscallDomainStats
+        internal static class SyscallDomainStats
         {
             internal enum Reason
             {
@@ -1248,11 +1249,21 @@ namespace Brovan.Core.Emulation.Guests
                 ObjectNeedsKernelLock,
             }
 
+            // Why a request on a file object needs KernelLock: a breakdown of ObjectNeedsKernelLock.
+            internal enum FileReason
+            {
+                Kind,
+                KernelView,
+                Check,
+                Change,
+            }
+
             private static readonly PeriodicStats Log = new PeriodicStats("BROVAN_SYSCALL_DOMAIN_STATS", "Syscalls off KernelLock:", Describe);
             private static readonly int Reasons = Enum.GetValues<Reason>().Length;
-            private static readonly int ServedIndex = Reasons;
-            private static readonly int TickIndex = Reasons + 1;
-            private static readonly StatsSlots Slots = new StatsSlots(Reasons + 2);
+            private static readonly int FileReasons = Enum.GetValues<FileReason>().Length;
+            private static readonly int ServedIndex = Reasons + FileReasons;
+            private static readonly int TickIndex = ServedIndex + 1;
+            private static readonly StatsSlots Slots = new StatsSlots(TickIndex + 1);
 
             internal static void Served()
             {
@@ -1275,11 +1286,27 @@ namespace Brovan.Core.Emulation.Guests
                 return true;
             }
 
+            // False, so a resolve can return it.
+            internal static bool FileFellBack(FileReason Why)
+            {
+                if (Log.Enabled)
+                {
+                    long[] S = Slots.Current.Values;
+                    S[Reasons + (int)Why]++;
+                    Log.TickSlot(ref S[TickIndex]);
+                }
+                return false;
+            }
+
             private static void Describe(StringBuilder sb)
             {
                 sb.Append(" served=").Append(Slots.Sum(ServedIndex));
                 for (int i = 0; i < Reasons; i++)
                     sb.Append(' ').Append((Reason)i).Append('=').Append(Slots.Sum(i));
+                sb.Append(" (file requests:");
+                for (int i = 0; i < FileReasons; i++)
+                    sb.Append(' ').Append((FileReason)i).Append('=').Append(Slots.Sum(Reasons + i));
+                sb.Append(')');
             }
         }
 

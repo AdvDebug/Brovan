@@ -113,7 +113,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             if (File.KernelCell is not KernelFileCell Cell)
             {
-                if (KernelFileReads.IsReadEligible(File) || File.Locks.Count != 0
+                if (KernelFileReads.IsReadEligible(File) || File.Fcb.LockCount != 0
                     || !KernelFileTable.CanHoldCell(File) || !Table.TryCreateCell(File, out Cell))
                     return;
             }

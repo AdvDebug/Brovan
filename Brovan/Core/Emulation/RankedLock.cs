@@ -373,7 +373,7 @@ namespace Brovan.Core.Emulation
         }
 
         // A lock order fault is a bug in Brovan, and no handler may catch it.
-        private static void FailOrder(string Message)
+        internal static void FailOrder(string Message)
         {
             Utils.LogError($"[RankedLock] {Message}");
             Environment.FailFast($"[RankedLock] {Message}");

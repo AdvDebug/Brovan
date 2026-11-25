@@ -786,18 +786,33 @@ namespace Brovan.Core.Emulation.OS.Windows
             GetEventByHandle(EventHandle, AccessMask.GiveTemp)?.SetState(false);
         }
 
-        // NT references and resets the event once per request, so a re-run skips it.
-        // Event handles keep the raw DesiredAccess, so EVENT_MODIFY_STATE is not checked.
-        internal NTSTATUS ReferenceIoEvent(ulong EventHandle)
+        internal NTSTATUS ReferenceIoEvent(ulong EventHandle) => ReferenceIoEvent(EventHandle, null, out _);
+
+        // NT references and resets the event once per request, so a re-run skips the reset. Event handles keep the raw
+        // DesiredAccess, so EVENT_MODIFY_STATE is not checked.
+        internal NTSTATUS ReferenceIoEvent(ulong EventHandle, WinEvent? Resolved, out WinEvent? Event)
         {
-            if (EventHandle == 0 || WinEmulatedThread.TryGetState(Emulator.CurrentThread)?.SyncIoRerun == true)
+            Event = Resolved;
+            if (EventHandle == 0)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            NTSTATUS Status = ReferenceObjectByHandle(EventHandle, AccessMask.GiveTemp, out WinEvent Event);
-            if (Status != NTSTATUS.STATUS_SUCCESS)
-                return Status;
+            bool Rerun = WinEmulatedThread.TryGetState(Emulator.CurrentThread)?.SyncIoRerun == true;
+            if (Event == null)
+            {
+                if (Rerun)
+                {
+                    Event = GetEventByHandle(EventHandle, AccessMask.GiveTemp);
+                    return NTSTATUS.STATUS_SUCCESS;
+                }
 
-            Event.SetState(false);
+                NTSTATUS Status = ReferenceObjectByHandle(EventHandle, AccessMask.GiveTemp, out WinEvent Found);
+                if (Status != NTSTATUS.STATUS_SUCCESS)
+                    return Status;
+                Event = Found;
+            }
+
+            if (!Rerun)
+                Event.SetState(false);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -811,6 +826,48 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             GetEventByHandle(EventHandle, AccessMask.GiveTemp)?.SetState(true);
         }
+
+        internal static void SignalIoEvent(WinEvent? Event, NTSTATUS Status)
+        {
+            if (Status != NTSTATUS.STATUS_PENDING)
+                Event?.SetState(true);
+        }
+
+        // NT: the cleanup of the file's last handle came first. The request completes with its status and its event.
+        internal NTSTATUS CompleteOnCleanedUpFile(ulong IoStatusBlockPtr, WinEvent? Event)
+        {
+            WriteIoStatusBlock(Emulator, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_CLOSED, 0);
+            SignalIoEvent(Event, NTSTATUS.STATUS_FILE_CLOSED);
+            return NTSTATUS.STATUS_FILE_CLOSED;
+        }
+
+        // False leaves the call to KernelLock, whose path answers every failure in NT's order.
+        internal bool TryResolveFileRequest(ulong FileHandle, ulong EventHandle, ulong IoStatusBlockPtr, out WinFile File,
+            out AccessMask Granted, out WinEvent? Event)
+        {
+            Event = null;
+            if (ReferenceObjectByHandle(FileHandle, AccessMask.GiveTemp, out File, out Granted) != NTSTATUS.STATUS_SUCCESS)
+                return WindowsGuest.SyscallDomainStats.FileFellBack(WindowsGuest.SyscallDomainStats.FileReason.Check);
+            if (File.Domain != WinSyscallDomain.Self)
+                return WindowsGuest.SyscallDomainStats.FileFellBack(WindowsGuest.SyscallDomainStats.FileReason.Kind);
+            if (File.KernelCell is { HasView: true })
+                return WindowsGuest.SyscallDomainStats.FileFellBack(WindowsGuest.SyscallDomainStats.FileReason.KernelView);
+            if (!IsAccessibleUserRange(IoStatusBlockPtr, sizeof(uint), true))
+                return WindowsGuest.SyscallDomainStats.FileFellBack(WindowsGuest.SyscallDomainStats.FileReason.Check);
+            if (EventHandle != 0)
+            {
+                if (ReferenceObjectByHandle(EventHandle, AccessMask.GiveTemp, out WinEvent Found) != NTSTATUS.STATUS_SUCCESS)
+                    return WindowsGuest.SyscallDomainStats.FileFellBack(WindowsGuest.SyscallDomainStats.FileReason.Check);
+                Event = Found;
+            }
+
+            return true;
+        }
+
+        // From the page records, with no KernelLock. False for a guard page or an untouched page.
+        internal bool IsAccessibleUserRange(ulong Address, ulong Length, bool Write)
+            => Length == 0 || (NtWow64GetNativeSystemInformation.IsUserRange(Address, Length)
+                               && Emulator._emulator.IsRangeAccessible(Address, Length, Write));
 
         // NT write-probes only the ULONG Status at the start of the block.
         internal bool TryProbeIoStatusBlock(ulong IoStatusBlockPtr, out NTSTATUS Status)
@@ -2808,6 +2865,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             public ulong ResolvedHandle;
             public IHandleObject? Resolved;
             public bool WaitResolved;
+            public AccessMask ResolvedAccess;
+            public ulong ResolvedEventHandle;
+            public WinEvent? ResolvedEvent;
+            public FileControlBlock? AdmittedChange;
         }
 
         private CallState Call => Emulator.WorkerCallState as CallState ?? CreateCallState();
@@ -2887,6 +2948,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         private void DropResolved(CallState State)
         {
             State.Resolved = null;
+            State.ResolvedAccess = 0;
+            State.ResolvedEventHandle = 0;
+            State.ResolvedEvent = null;
+            EndUnlockedChange(State);
             if (!State.WaitResolved)
                 return;
 
@@ -2908,6 +2973,37 @@ namespace Brovan.Core.Emulation.OS.Windows
             IHandleObject? Object = State.Resolved;
             State.Resolved = null;
             return State.ResolvedHandle == Handle ? Object as T : null;
+        }
+
+        // A write also holds its file's admission for a change without KernelLock until the call ends.
+        internal void SetFileRequest(ulong FileHandle, WinFile File, AccessMask Granted, ulong EventHandle, WinEvent? Event,
+            bool AdmittedChange)
+        {
+            CallState State = Call;
+            State.ResolvedHandle = FileHandle;
+            State.Resolved = File;
+            State.ResolvedAccess = Granted;
+            State.ResolvedEventHandle = EventHandle;
+            State.ResolvedEvent = Event;
+            State.AdmittedChange = AdmittedChange ? File.Fcb : null;
+        }
+
+        internal bool TakeFileRequest(ulong FileHandle, ulong EventHandle, out WinFile File, out AccessMask Granted,
+            out WinEvent? Event)
+        {
+            CallState State = Call;
+            File = TakeResolvedObject<WinFile>(FileHandle)!;
+            Granted = State.ResolvedAccess;
+            Event = State.ResolvedEvent;
+            State.ResolvedEvent = null;
+            return File != null && State.ResolvedEventHandle == EventHandle;
+        }
+
+        private static void EndUnlockedChange(CallState State)
+        {
+            FileControlBlock? Admitted = State.AdmittedChange;
+            State.AdmittedChange = null;
+            Admitted?.EndUnlockedChange();
         }
 
         // ResolveDomain filled the current thread's WaitObjects. A set the handler does not take is dropped.
@@ -9533,7 +9629,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else if (Opens.Count != 0)
             {
-                File.Locks = Opens[0].Locks;
+                File.Fcb = Opens[0].Fcb;
             }
 
             Opens.Add(File);
@@ -9586,11 +9682,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Opens.Count == 0)
                 OpenFilesByPath.Remove(OldPath);
 
-            // The byte range locks belong to the file, so they move with it.
+            // The file control block belongs to the file, so it moves with it.
             if (!OpenFilesByPath.TryGetValue(File.Path, out List<WinFile> Moved))
             {
                 Moved = new List<WinFile>(1);
                 OpenFilesByPath[File.Path] = Moved;
+            }
+
+            for (int i = 0; i < Moved.Count; i++)
+            {
+                if (Moved[i].Fcb == File.Fcb)
+                    continue;
+
+                Moved[i].Fcb.MarkPathShared();
+                File.Fcb.MarkPathShared();
             }
 
             Moved.Add(File);
@@ -11777,11 +11882,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             using (Closing.ObjectLock.EnterScope())
             {
                 KernelFiles?.ReleaseFile(Closing);
-                Closing.Locks.ReleaseOwnedBy(Closing);
+                Closing.Fcb.ReleaseLocksOf(Closing);
                 if (!Delete)
                     Closing.ReleaseFileStream();
 
                 Closing.ReleaseSharedPosition();
+                Closing.CleanedUp = true;
             }
 
             UnregisterOpenFile(Closing);

@@ -29,7 +29,7 @@ namespace Brovan.Core.Emulation
 
         public WinSyscallDomain Domain => WinSyscallDomain.KernelLock;
 
-        // For a Resolved call: KernelLock or Scheduler, answered before the dispatch takes a lock.
+        // For a Resolved call: KernelLock, Scheduler or Self, answered before the dispatch takes a lock.
         public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) => WinSyscallDomain.KernelLock;
     }
 
@@ -43,6 +43,9 @@ namespace Brovan.Core.Emulation
 
         // The objects the call names decide, through IWinSyscall.ResolveDomain.
         Resolved,
+
+        // The handler takes the locks it needs and runs with none held.
+        Self,
     }
 
     public enum SyscallAbi

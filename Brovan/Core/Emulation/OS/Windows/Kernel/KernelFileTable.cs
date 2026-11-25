@@ -42,7 +42,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     }
 
     // While bit 63 of the offset is set, the host owns it and guest ring 0 sends every call on the file to the host.
-    // Nothing may leave KernelLock between Claim and Release, because a second claim does not own the offset.
+    // A claim holds the file object lock until Release, because a second claim does not own the offset.
     internal sealed unsafe class KernelFileCell
     {
         internal const long HostOwned = long.MinValue;
@@ -73,6 +73,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal long Claim()
         {
+            File.ObjectLock.AssertHeld("A guest kernel cell claim");
             long Value;
             do
             {
@@ -183,12 +184,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
 
             WindowsFileStream Stream = File.GetFileStream();
-            if (Stream == null || !Stream.TryAcquireReadLease(MetadataGuards + Cell.Index, out HostFileReadLease? Lease, out long End, out long Allocation))
+            if (Stream == null || !File.Fcb.TryAddKernelBacking())
                 return false;
+
+            if (!Stream.TryAcquireReadLease(MetadataGuards + Cell.Index, out HostFileReadLease? Lease, out long End, out long Allocation))
+            {
+                File.Fcb.RemoveKernelBacking();
+                return false;
+            }
 
             if (!TryGetMetadataDeadline(Lease, Start, out ulong Deadline))
             {
                 Lease.Dispose();
+                File.Fcb.RemoveKernelBacking();
                 return false;
             }
 
@@ -373,19 +381,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             Cell.MetadataLease = Lease;
             Cell.MetadataDeadline = Deadline;
             LiveMetadata++;
-            Cell.Claim();
-            try
+            using (Cell.File.ObjectLock.EnterScope())
             {
-                if (!Created)
-                    Kernel.EvictProcessors();
-                Cell.Data->MetadataEnd = EndOfFile;
-                Cell.Data->MetadataAllocation = AllocationSize;
-                Cell.Data->MetadataDeadline = Deadline;
-                Volatile.Write(ref Cell.Data->MetadataGuard, MetadataGuardsAddress + (ulong)Cell.Index * sizeof(int));
-            }
-            finally
-            {
-                Cell.Release();
+                Cell.Claim();
+                try
+                {
+                    if (!Created)
+                        Kernel.EvictProcessors();
+                    Cell.Data->MetadataEnd = EndOfFile;
+                    Cell.Data->MetadataAllocation = AllocationSize;
+                    Cell.Data->MetadataDeadline = Deadline;
+                    Volatile.Write(ref Cell.Data->MetadataGuard, MetadataGuardsAddress + (ulong)Cell.Index * sizeof(int));
+                }
+                finally
+                {
+                    Cell.Release();
+                }
             }
         }
 
@@ -542,12 +553,37 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Any;
         }
 
-        // The event is process-wide, so a change from another emulator here counts as one from another process. Without
-        // SMP no thread takes KernelLock, and only the thread that built this runs the guest.
+        // The event is process-wide, so a change from another emulator counts as one from another process. A change
+        // without KernelLock was admitted only while the file had no backing.
+        private bool MayChangeTable => Emulator.KernelLock.IsHeld || (!Emulator.SmpEnabled && Environment.CurrentManagedThreadId == OwnerThreadId);
+
+        // Retiring the path's cells takes their files' locks, so a change does it before it takes its own file's lock.
+        internal void ReleasePathBeforeChange(string GuestPath)
+        {
+            if (MayChangeTable)
+                ReleasePath(GuestPath, null);
+        }
+
         private void OnHostFileChanging(string GuestPath)
         {
-            if (Emulator.KernelLock.IsHeld || (!Emulator.SmpEnabled && Environment.CurrentManagedThreadId == OwnerThreadId))
+            if (MayChangeTable)
                 ReleasePath(GuestPath, null);
+            else if (RankedLock.OrderChecked && Emulator.OnOwnWorker && HoldsBackingOf(GuestPath))
+                RankedLock.FailOrder($"A change of {GuestPath} without KernelLock meets a guest kernel backing of it.");
+        }
+
+        // A diagnostic without KernelLock: each reference is read once, so it can miss a cell but not fault.
+        private bool HoldsBackingOf(string GuestPath)
+        {
+            for (int i = 0; i < CellObjects.Length; i++)
+            {
+                KernelFileCell Cell = CellObjects[i];
+                if (Cell != null && Cell.IsLive && (Cell.HasView || Cell.HasMetadata)
+                    && WinSysHelper.MatchesGuestPath(Cell.File.Path, GuestPath, null))
+                    return true;
+            }
+
+            return false;
         }
 
         // Runs before the backend is disposed, because the unmap goes through it.
@@ -638,9 +674,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                         Cell.View.Dispose();
                     else
                         StillMapped.Add(Cell.View);
+                    Cell.File.Fcb.RemoveKernelBacking();
                 }
 
-                Cell.MetadataLease?.Dispose();
+                if (Cell.HasMetadata)
+                {
+                    Cell.MetadataLease.Dispose();
+                    Cell.File.Fcb.RemoveKernelBacking();
+                }
                 CellObjects[Cell.Index] = null;
                 FreeCells.Push(Cell.Index);
             }

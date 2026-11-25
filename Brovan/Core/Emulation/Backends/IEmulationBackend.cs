@@ -1538,6 +1538,9 @@ namespace Brovan.Core.Emulation
 
         bool IsRangeMapped(ulong address, ulong size);
 
+        // Every page present with the access and not trapped, read with no KernelLock. False when unsure.
+        bool IsRangeAccessible(ulong address, ulong size, bool write);
+
         /// <summary>
         /// Reuse translated guest code from a previous run. Called once execution is about
         /// to begin, because a backend that verifies restored code against guest memory

@@ -116,43 +116,50 @@ namespace Brovan.Core.Emulation.OS.Windows
         private void FinishRead(ReadOnlySpan<ulong> Saved)
             => Emulator.WinHelper.WriteIoStatusBlock(Emulator, Saved[SavedIoStatusBlock], NTSTATUS.STATUS_SUCCESS, Saved[SavedLength]);
 
-        internal void NoteRead(ulong Handle, WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ByteOffsetPtr, ulong KeyPtr, uint Length)
+        // Under the file object lock, after a read that succeeded. True when NoteRead has table work under KernelLock.
+        internal bool CountRead(ulong Handle, WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ByteOffsetPtr, ulong KeyPtr, uint Length)
         {
             if (Handle > uint.MaxValue || (EventHandle | ApcRoutine | ByteOffsetPtr | KeyPtr) != 0 || Length == 0
                 || Length > MaxReadBytes)
-                return;
+                return false;
 
-            if (File.KernelCell is not { HasView: true })
-            {
-                // A view pays for itself only when as many reads of this size remain as it took to qualify.
-                if (!IsReadEligible(File) || !Table.Enabled || ++File.KernelNotes.Reads < ReadsBeforeView
-                    || !TryCreateViewCell(File, File.Position + (long)Length * ReadsBeforeView))
-                    return;
-            }
+            if (File.KernelCell is { HasView: true })
+                return true;
+
+            // A view pays for itself only when as many reads of this size remain as it took to qualify.
+            return IsReadEligible(File) && Table.Enabled && ++File.KernelNotes.Reads >= ReadsBeforeView;
+        }
+
+        internal void NoteRead(ulong Handle, WinFile File, uint Length)
+        {
+            if (File.KernelCell is not { HasView: true }
+                && (!IsReadEligible(File) || !TryCreateViewCell(File, File.Position + (long)Length * ReadsBeforeView)))
+                return;
 
             Table.SetSlot(Handle, File.KernelCell, KernelFileTable.ReadRight);
         }
 
         internal static bool IsReadEligible(WinFile File)
             => KernelFileTable.CanHoldCell(File) && !File.AllowsWrite(File.GrantedAccess)
-               && (File.ShareAccess & WinSysHelper.FILE_SHARE_WRITE) == 0 && File.Locks.Count == 0;
+               && (File.ShareAccess & WinSysHelper.FILE_SHARE_WRITE) == 0 && File.Fcb.LockCount == 0;
 
         // A file too short for the view is looked at again after more reads. Any other failure backs off longer.
         private bool TryCreateViewCell(WinFile File, long MinLength)
         {
-            File.KernelNotes.Reads = ReadsBeforeView - ReadsAfterFailure;
+            SetReads(File, ReadsBeforeView - ReadsAfterFailure);
             WindowsFileStream Stream = File.GetFileStream();
-            if (Stream == null)
+            if (Stream == null || !File.Fcb.TryAddKernelBacking())
                 return false;
 
             WinImageLayoutCache.View View = null;
+            bool Attached = false;
             try
             {
                 View = Stream.TryMapReadView(MemoryBudget.KernelReadViewBytes, MinLength, out long Length);
                 if (View == null)
                 {
                     if (Length != 0)
-                        File.KernelNotes.Reads = 0;
+                        SetReads(File, 0);
                     return false;
                 }
 
@@ -160,6 +167,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return false;
 
                 View = null;
+                Attached = true;
                 return true;
             }
             catch (Exception Ex) when (Ex is IOException || Ex is UnauthorizedAccessException || Ex is ArgumentException)
@@ -170,7 +178,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             finally
             {
                 View?.Dispose();
+                if (!Attached)
+                    File.Fcb.RemoveKernelBacking();
             }
+        }
+
+        private static void SetReads(WinFile File, int Reads)
+        {
+            using (File.ObjectLock.EnterScope())
+                File.KernelNotes.Reads = Reads;
         }
 
         // A read that ends inside the view means the host file shrank under it.

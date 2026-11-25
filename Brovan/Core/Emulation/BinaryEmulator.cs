@@ -667,6 +667,8 @@ namespace Brovan.Core.Emulation
 
         internal bool OwnsThread(EmulatedThread Thread) => OwnWorker is SchedulerWorker Own && Thread.HostWorker == Own.Index;
 
+        internal bool OnOwnWorker => OwnWorker != null;
+
         // A claim owns a thread no worker runs, as a dispatch does: no worker dispatches it and a waker leaves its wait
         // to the release. Only a worker claims, and it holds one claim at a time.
         private bool TryClaimThread(EmulatedThread Thread, out ThreadClaim Claim)

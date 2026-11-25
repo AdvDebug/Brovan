@@ -302,6 +302,9 @@ namespace Brovan.Core.Emulation
         public bool IsRangeMapped(ulong address, ulong size)
             => Inner.IsRangeMapped(address, size);
 
+        // Unicorn keeps no page records, and runs no call without KernelLock.
+        public bool IsRangeAccessible(ulong address, ulong size, bool write) => false;
+
         public IntPtr GetHostPointer(ulong address, ulong size)
             => Inner.GetHostPointer(address, size);
 

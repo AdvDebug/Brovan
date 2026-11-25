@@ -1839,6 +1839,13 @@ namespace Brovan.Core.Emulation
             return _paging.IsRangeMapped(address, size);
         }
 
+        public bool IsRangeAccessible(ulong address, ulong size, bool write)
+        {
+            if (Volatile.Read(ref _disposing) != 0 || Volatile.Read(ref _disposed) != 0) return false;
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return _paging.IsRangeAccessible(address, size, write, _trappedPages);
+        }
+
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposing, 1) == 1) return;
@@ -3723,12 +3730,7 @@ namespace Brovan.Core.Emulation
         private bool IsPageAccessible(ulong pageAddress, bool write)
         {
             using RankedLock.Scope mappingHold = _paging.LockMappings();
-            if (!TryGetBackedPage(pageAddress, out GuestPage page))
-                return false;
-
-            GuestPagePermission perm = page.Permissions;
-            return GuestPageEntries.Allows((perm & GuestPagePermission.Read) != 0, (perm & GuestPagePermission.Write) != 0,
-                (perm & GuestPagePermission.Execute) != 0, write ? GuestAccess.Write : GuestAccess.Read);
+            return _paging.IsRangeAccessible(pageAddress, KvmConstants.PageSize, write, _trappedPages);
         }
 
         private bool TryGetBackedPage(ulong pageAddress, out GuestPage page)

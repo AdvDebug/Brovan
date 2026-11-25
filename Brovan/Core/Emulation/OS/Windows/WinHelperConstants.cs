@@ -327,6 +327,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         STATUS_INVALID_ADDRESS = 0xC0000141,
         STATUS_MAPPED_FILE_SIZE_ZERO = 0xC000011E,
         STATUS_TOO_MANY_OPENED_FILES = 0xC000011F,
+        STATUS_FILE_CLOSED = 0xC0000128,
         STATUS_TOO_MANY_THREADS = 0xC0000129,
         STATUS_FILE_INVALID = 0xC0000098,
         STATUS_PRIVILEGED_INSTRUCTION = 0xC0000096,
@@ -1773,6 +1774,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static void ReportObjectLocks() => ObjectLockKind.Report();
 
+        // NT: a request that reaches the file after the cleanup of its last handle gets STATUS_FILE_CLOSED. Under the lock.
+        internal bool CleanedUp;
+
+        // A regular file's reads and writes take their own locks. Every other kind runs its requests under KernelLock.
+        internal WinSyscallDomain Domain
+            => !Device && !Directory && Pipe == null && HostStream == HostStreamKind.None && ConsoleKind == ConsoleObjectKind.None
+               && !string.IsNullOrEmpty(Path) ? WinSyscallDomain.Self : WinSyscallDomain.KernelLock;
+
         public long Position
         {
             get => KernelCell != null ? KernelCell.Offset : SharedPosition != null ? SharedPosition.Value : LocalPosition;
@@ -1825,7 +1834,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint ShareAccess;
         public string OpenId = Guid.NewGuid().ToString("N");
 
-        public FileRangeLocks Locks = new FileRangeLocks();
+        public FileControlBlock Fcb = new FileControlBlock();
 
         /// <summary>
         /// Completion port bound with FileCompletionInformation. A request with an APC context and no APC routine
@@ -1894,6 +1903,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WindowsFileStream GetFileStream(bool CreateWriteDirectories = false)
         {
+            // Only a KernelLock path or a holder of this lock disposes a stream, after a rename or a release.
+            WindowsFileStream Current = Volatile.Read(ref FileStream);
+            if (Current != null && string.Equals(Current.GuestPath, Path, StringComparison.OrdinalIgnoreCase))
+                return Current;
+
             using (ObjectLock.EnterScope())
             {
                 if (string.IsNullOrEmpty(Path))
@@ -1935,8 +1949,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public HandleType ObjectType => HandleType.FileHandle;
     }
 
-    // NT keeps byte range locks per file, so every open of a path shares one record. Its monitor takes nothing inside.
-    public sealed class FileRangeLocks
+    // NT's per-file state, shared by every open of a path and kept across a rename: the byte range locks and the
+    // gate between changes without KernelLock and the guest kernel table's backings.
+    public sealed class FileControlBlock
     {
         private sealed class Range
         {
@@ -1948,8 +1963,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         private readonly List<Range> Ranges = new List<Range>();
+        private int UnlockedChanges;
+        private int KernelBackings;
+        private bool PathShared;
 
-        public int Count
+        public int LockCount
         {
             get
             {
@@ -1968,7 +1986,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return LeftOffset <= RightEnd && RightOffset <= LeftEnd;
         }
 
-        public bool TryAdd(WinFile Owner, ulong Offset, ulong Length, ulong Key, bool ExclusiveLock)
+        public bool TryLock(WinFile Owner, ulong Offset, ulong Length, ulong Key, bool ExclusiveLock)
         {
             lock (Ranges)
             {
@@ -1995,7 +2013,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        public bool Remove(WinFile Owner, ulong Offset, ulong Length, ulong Key)
+        public bool Unlock(WinFile Owner, ulong Offset, ulong Length, ulong Key)
         {
             lock (Ranges)
             {
@@ -2014,7 +2032,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT drops a file object's locks when the process closes its last handle to it (IopCloseFile).
-        public void ReleaseOwnedBy(WinFile Owner)
+        public void ReleaseLocksOf(WinFile Owner)
         {
             lock (Ranges)
             {
@@ -2045,6 +2063,52 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return false;
+        }
+
+        // A change without KernelLock cannot release the table's backings, so it runs only while the file has none, and
+        // none is made while it runs.
+        internal bool TryBeginUnlockedChange()
+        {
+            lock (Ranges)
+            {
+                if (KernelBackings != 0 || PathShared)
+                    return false;
+
+                UnlockedChanges++;
+                return true;
+            }
+        }
+
+        internal void EndUnlockedChange()
+        {
+            lock (Ranges)
+                UnlockedChanges--;
+        }
+
+        // Taken before the table captures the file's bytes or size, and given back when the capture is unmapped.
+        internal bool TryAddKernelBacking()
+        {
+            lock (Ranges)
+            {
+                if (UnlockedChanges != 0)
+                    return false;
+
+                KernelBackings++;
+                return true;
+            }
+        }
+
+        internal void RemoveKernelBacking()
+        {
+            lock (Ranges)
+                KernelBackings--;
+        }
+
+        // Another record names the same path, so a backing made through it would not be counted here.
+        internal void MarkPathShared()
+        {
+            lock (Ranges)
+                PathShared = true;
         }
     }
 

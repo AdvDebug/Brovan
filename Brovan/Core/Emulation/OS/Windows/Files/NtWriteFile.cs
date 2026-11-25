@@ -6,6 +6,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtWriteFile : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) => NtReadFile.ResolveRequest(Instance, Write: true);
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong FileHandle = Instance.WinHelper.GetArg(0);
@@ -18,7 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong ByteOffsetPtr = Instance.WinHelper.GetArg(7);
             ulong KeyPtr = Instance.WinHelper.GetArg(8);
 
-            NTSTATUS Status = NtReadFile.BeginRequest(Instance, FileHandle, EventHandle, IoStatusBlockPtr, BufferPtr, Length, ApcRoutine, ByteOffsetPtr, KeyPtr, Write: true, out WinFile FileObj, out long Offset, out uint Key);
+            NTSTATUS Status = NtReadFile.BeginRequest(Instance, FileHandle, EventHandle, IoStatusBlockPtr, BufferPtr, Length, ApcRoutine, ByteOffsetPtr, KeyPtr, Write: true, out WinFile FileObj, out long Offset, out uint Key, out WinEvent? Event);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -36,10 +40,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                // Retiring the path's cells takes their files' locks, so it runs before this file's lock.
-                Instance.WinHelper.KernelFiles?.ReleasePath(FileObj.Path, null);
+                Instance.WinHelper.KernelFiles?.ReleasePathBeforeChange(FileObj.Path);
                 using (FileObj.ObjectLock.EnterScope())
                 {
+                    if (FileObj.CleanedUp)
+                        return Instance.WinHelper.CompleteOnCleanedUpFile(IoStatusBlockPtr, Event);
+
                     if (Offset == NtReadFile.FileUseFilePointerPosition)
                         Offset = FileObj.ClaimPosition();
 
@@ -54,7 +60,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            Instance.WinHelper.SignalIoEvent(EventHandle, Status);
+            WinSysHelper.SignalIoEvent(Event, Status);
             return Status;
         }
 
@@ -93,14 +99,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Offset = Stream.Length;
 
             int ToWrite = Length > int.MaxValue ? int.MaxValue : (int)Length;
-            if (ToWrite != 0 && FileObj.Locks.HasConflictingIo(FileObj, (ulong)Offset, (ulong)ToWrite, Key, true))
+            if (ToWrite != 0 && FileObj.Fcb.HasConflictingIo(FileObj, (ulong)Offset, (ulong)ToWrite, Key, true))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_LOCK_CONFLICT, 0);
                 return NTSTATUS.STATUS_FILE_LOCK_CONFLICT;
             }
 
-            // NT: the file system faults on the user buffer after the probe passed, and writes none of it.
-            if (ToWrite != 0 && !Instance.IsAccessible(BufferPtr, (ulong)ToWrite, false))
+            // NT: the file system faults on the user buffer after the probe passed, and writes none of it. Without KernelLock
+            // the region list is not readable, and the page records answer.
+            if (ToWrite != 0 && !(Instance.KernelLockCovered ? Instance.IsAccessible(BufferPtr, (ulong)ToWrite, false)
+                    : Instance.WinHelper.IsAccessibleUserRange(BufferPtr, (ulong)ToWrite, false)))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_USER_BUFFER, 0);
                 return NTSTATUS.STATUS_INVALID_USER_BUFFER;
@@ -115,7 +123,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                     int ChunkSize = Math.Min(NtReadFile.IoChunkBytes, ToWrite - Done);
                     Span<byte> Incoming = Instance.WinHelper.ReadMemorySpan(BufferPtr + (ulong)Done, (uint)ChunkSize);
                     if (Incoming.Length == 0)
-                        break;
+                    {
+                        Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_USER_BUFFER, 0);
+                        return NTSTATUS.STATUS_INVALID_USER_BUFFER;
+                    }
 
                     Stream.WriteAt(Offset + Done, Incoming);
                     Done += Incoming.Length;

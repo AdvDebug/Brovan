@@ -1966,6 +1966,13 @@ namespace Brovan.Core.Emulation
             return _paging.IsRangeMapped(address, size);
         }
 
+        public bool IsRangeAccessible(ulong address, ulong size, bool write)
+        {
+            if (Volatile.Read(ref _disposing) != 0 || Volatile.Read(ref _disposed) != 0) return false;
+            using RankedLock.Scope mappingHold = _paging.LockMappings();
+            return _paging.IsRangeAccessible(address, size, write, _trappedPages);
+        }
+
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _disposing, 1) == 1) return;

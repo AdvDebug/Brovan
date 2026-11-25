@@ -52,7 +52,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             Instance.WinHelper.KernelFiles?.ReleaseLockedPath(FileObj.Path);
-            if (!FileObj.Locks.TryAdd(FileObj, (ulong)Offset, Length, Key, ExclusiveLock))
+            if (!FileObj.Fcb.TryLock(FileObj, (ulong)Offset, Length, Key, ExclusiveLock))
             {
                 WinPendingIo? SyncIo = FileObj.Synchronous ? Instance.WinHelper.SynchronousIo(FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr) : null;
                 if (!FailImmediately && Instance.WinHelper.TryRetrySyscallAfterSlice(LockRetrySliceMilliseconds, SyncIo))

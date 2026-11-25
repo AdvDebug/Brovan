@@ -2516,7 +2516,7 @@ namespace Brovan
                     Console.WriteLine($"Real:            {File.Real}");
                     Console.WriteLine($"Directory:       {File.Directory}");
                     Console.WriteLine($"DeletePending:   {File.DeletePending}");
-                    Console.WriteLine($"Locks:           {File.Locks.Count}");
+                    Console.WriteLine($"Locks:           {File.Fcb.LockCount}");
                     break;
                 case WinEvent Event:
                     Console.WriteLine($"Name:            {Event.Name}");

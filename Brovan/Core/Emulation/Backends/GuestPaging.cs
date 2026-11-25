@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -205,6 +206,29 @@ namespace Brovan.Core.Emulation
             for (ulong pageBase = address & ~PageMask; pageBase < end; pageBase += PageSize)
             {
                 if (!TryLookupPage(pageBase, out _))
+                    return false;
+            }
+            return true;
+        }
+
+        // Present with the access and not trapped. The caller holds the mapping lock, which guards its trapped set.
+        public bool IsRangeAccessible(ulong address, ulong size, bool write, Dictionary<ulong, bool> trapped)
+        {
+            if (size == 0)
+                return true;
+            if (!InternalPages.IsGuestRange(address, size, _internalBase))
+                return false;
+
+            GuestAccess access = write ? GuestAccess.Write : GuestAccess.Read;
+            ulong end = address + size;
+            for (ulong pageBase = address & ~PageMask; pageBase < end; pageBase += PageSize)
+            {
+                if (!TryLookupPage(pageBase, out GuestPage page) || trapped.ContainsKey(pageBase))
+                    return false;
+
+                GuestPagePermission perm = page.Permissions;
+                if (!GuestPageEntries.Allows((perm & GuestPagePermission.Read) != 0, (perm & GuestPagePermission.Write) != 0,
+                        (perm & GuestPagePermission.Execute) != 0, access))
                     return false;
             }
             return true;
