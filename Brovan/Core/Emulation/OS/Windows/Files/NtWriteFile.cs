@@ -36,13 +36,21 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
             else
             {
-                try
+                // Retiring the path's cells takes their files' locks, so it runs before this file's lock.
+                Instance.WinHelper.KernelFiles?.ReleasePath(FileObj.Path, null);
+                using (FileObj.ObjectLock.EnterScope())
                 {
-                    Status = Write(Instance, FileHandle, FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset, Key);
-                }
-                finally
-                {
-                    FileObj.ReleasePosition();
+                    if (Offset == NtReadFile.FileUseFilePointerPosition)
+                        Offset = FileObj.ClaimPosition();
+
+                    try
+                    {
+                        Status = Write(Instance, FileHandle, FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset, Key);
+                    }
+                    finally
+                    {
+                        FileObj.ReleasePosition();
+                    }
                 }
             }
 
@@ -85,7 +93,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Offset = Stream.Length;
 
             int ToWrite = Length > int.MaxValue ? int.MaxValue : (int)Length;
-            if (ToWrite != 0 && FileObj.HasConflictingIoLock((ulong)Offset, (ulong)ToWrite, Key, true))
+            if (ToWrite != 0 && FileObj.Locks.HasConflictingIo(FileObj, (ulong)Offset, (ulong)ToWrite, Key, true))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_FILE_LOCK_CONFLICT, 0);
                 return NTSTATUS.STATUS_FILE_LOCK_CONFLICT;

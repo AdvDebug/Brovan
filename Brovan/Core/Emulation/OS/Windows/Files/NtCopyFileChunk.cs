@@ -48,8 +48,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
             }
 
-            if (!TryReadOffset(Instance, SourceOffsetPtr, Source.Position, out long SourceOffset)
-                || !TryReadOffset(Instance, DestinationOffsetPtr, Destination.Position, out long DestinationOffset))
+            long SourcePosition;
+            long DestinationPosition;
+            using (Source.ObjectLock.EnterScope())
+                SourcePosition = Source.Position;
+            using (Destination.ObjectLock.EnterScope())
+                DestinationPosition = Destination.Position;
+
+            if (!TryReadOffset(Instance, SourceOffsetPtr, SourcePosition, out long SourceOffset)
+                || !TryReadOffset(Instance, DestinationOffsetPtr, DestinationPosition, out long DestinationOffset))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
                 return NTSTATUS.STATUS_INVALID_PARAMETER;

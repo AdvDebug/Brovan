@@ -51,7 +51,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_LOCK_RANGE;
             }
 
-            if (FileObj.GetConflictingLock((ulong)Offset, Length, Key, ExclusiveLock) != null)
+            Instance.WinHelper.KernelFiles?.ReleaseLockedPath(FileObj.Path);
+            if (!FileObj.Locks.TryAdd(FileObj, (ulong)Offset, Length, Key, ExclusiveLock))
             {
                 WinPendingIo? SyncIo = FileObj.Synchronous ? Instance.WinHelper.SynchronousIo(FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr) : null;
                 if (!FailImmediately && Instance.WinHelper.TryRetrySyscallAfterSlice(LockRetrySliceMilliseconds, SyncIo))
@@ -63,8 +64,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_LOCK_NOT_GRANTED;
             }
 
-            Instance.WinHelper.KernelFiles?.ReleaseLockedPath(FileObj.Path);
-            FileObj.AddLock((ulong)Offset, Length, Key, ExclusiveLock);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, 0);
             Instance.WinHelper.SignalIoEvent(EventHandle, NTSTATUS.STATUS_SUCCESS);
             PostFastLockPacket(Instance, FileObj, ApcContext, NTSTATUS.STATUS_SUCCESS);

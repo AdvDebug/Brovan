@@ -36,7 +36,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_LOCK_RANGE;
             }
 
-            if (!FileObj.RemoveLock((ulong)Offset, Length, Key))
+            if (!FileObj.Locks.Remove(FileObj, (ulong)Offset, Length, Key))
             {
                 Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_RANGE_NOT_LOCKED, 0);
                 return NTSTATUS.STATUS_RANGE_NOT_LOCKED;

@@ -392,8 +392,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private KernelFileCell Install(WinFile File, int Index)
         {
             KernelCellData* Data = Cells + Index;
-            *Data = new KernelCellData { Offset = File.Position, Used = 1 };
-
             KernelFileCell Cell = new KernelFileCell
             {
                 Owner = this,
@@ -402,7 +400,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                 File = File,
             };
 
-            File.KernelCell = Cell;
+            using (File.ObjectLock.EnterScope())
+            {
+                *Data = new KernelCellData { Offset = File.Position, Used = 1 };
+                File.KernelCell = Cell;
+            }
+
             CellObjects[Index] = Cell;
             return Cell;
         }
@@ -418,6 +421,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private bool TryTakeIndex(out int Index)
         {
+            RankedLock.AssertMayTake(RankedLock.FileObjectRank, "A new guest kernel file cell");
             if (FreeCells.Count == 0 && Retired.Count == 0)
                 RetireUnused(false);
 
@@ -427,9 +431,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             return FreeCells.TryPop(out Index);
         }
 
-        // A cell that a call used since the hand last passed it gets a second chance.
+        // A cell that a call used since the hand last passed it gets a second chance. A file in the middle of a call keeps
+        // its cell.
         private void RetireUnused(bool ViewsOnly)
         {
+            RankedLock.AssertMayTake(RankedLock.FileObjectRank, "Guest kernel file cell eviction");
             for (int Step = 0; Step < CellObjects.Length * 2; Step++)
             {
                 KernelFileCell Cell = CellObjects[ClockHand];
@@ -443,7 +449,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
                 }
 
-                Retire(Cell);
+                RankedLock FileLock = Cell.File.ObjectLock;
+                if (!FileLock.TryEnter())
+                    continue;
+
+                try
+                {
+                    Retire(Cell);
+                }
+                finally
+                {
+                    FileLock.Exit();
+                }
+
                 return;
             }
         }
@@ -487,6 +505,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // A lock changes no byte, so the views can wait for a later flush.
         internal void ReleaseLockedPath(string GuestPath)
         {
+            RankedLock.AssertMayTake(RankedLock.FileObjectRank, "A locked path's view release");
             if (!HasViews)
                 return;
 
@@ -550,18 +569,22 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void Retire(KernelFileCell Cell)
         {
-            long Offset = Cell.Claim();
-            int CellOffset = Cell.Index * CellSize;
-            for (int i = 0; i < SlotCount; i++)
+            using (Cell.File.ObjectLock.EnterScope())
             {
-                ulong Value = Slots[i];
-                if (Value != 0 && SlotCellOffset(Value) == CellOffset)
-                    Volatile.Write(ref Slots[i], 0);
+                long Offset = Cell.Claim();
+                int CellOffset = Cell.Index * CellSize;
+                for (int i = 0; i < SlotCount; i++)
+                {
+                    ulong Value = Slots[i];
+                    if (Value != 0 && SlotCellOffset(Value) == CellOffset)
+                        Volatile.Write(ref Slots[i], 0);
+                }
+
+                Cell.File.KernelCell = null;
+                Cell.File.KernelNotes = default;
+                Cell.File.Position = Offset;
             }
 
-            Cell.File.KernelCell = null;
-            Cell.File.KernelNotes = default;
-            Cell.File.Position = Offset;
             if (Cell.HasView)
             {
                 LiveViews--;

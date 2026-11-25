@@ -275,7 +275,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static NTSTATUS HandleFilePositionInformation(BinaryEmulator Instance, ulong FileHandle, WinFile File, ulong IoStatusBlock, ulong FileInformation)
         {
-            ulong Position = File == null || File.Position < 0 ? 0UL : unchecked((ulong)File.Position);
+            long Current = 0;
+            if (File != null)
+            {
+                using (File.ObjectLock.EnterScope())
+                    Current = File.Position;
+            }
+
+            ulong Position = Current < 0 ? 0UL : unchecked((ulong)Current);
             Instance._emulator.WriteMemory(FileInformation + 0x00, Position, 8);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, FilePositionInformationSize);
             if (File != null)
@@ -450,6 +457,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IsDirectory && (Attributes & FileAttributes.Directory) == 0)
                 Attributes |= FileAttributes.Directory;
 
+            long Position;
+            using (File.ObjectLock.EnterScope())
+                Position = File.Position;
+
             Span<byte> Fixed = stackalloc byte[(int)FileAllInformationNameOffset];
             Fixed.Clear();
             System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Fixed.Slice(0x00), CreationTime);
@@ -464,7 +475,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Fixed[0x3D] = IsDirectory ? (byte)0x01 : (byte)0x00;
             System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(Fixed.Slice(0x40), WinFile.MakeFileId(File.Path));
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x4C), (uint)Granted);
-            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Fixed.Slice(0x50), File.Position);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(Fixed.Slice(0x50), Position);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x58), File.Mode);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x5C), File.AlignmentRequirement);
             System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(Fixed.Slice(0x60), (uint)NameByteLength);

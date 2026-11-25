@@ -87,7 +87,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Device = false,
                 Real = true,
                 Directory = IsDirectory,
-                Position = 0,
                 Handler = null,
                 FileStream = Stream,
                 DeleteOnClose = DeleteOnClose,

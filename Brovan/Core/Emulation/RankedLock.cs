@@ -10,6 +10,7 @@ namespace Brovan.Core.Emulation
         // Guest domain locks take ranks 2 to 10, between Big and Core's address space (11) and scheduler lock (12).
         internal const int BigRank = 1;
         internal const int DeviceRank = 2;
+        internal const int FileObjectRank = 9;
         internal const int SchedulerRank = 12;
         internal const int BackendMappingRank = 13;
 
@@ -99,6 +100,17 @@ namespace Brovan.Core.Emulation
 
             _callNames = new string[CallNumbers];
             _siteNames = new string[SiteNumbers];
+        }
+
+        // One lock per object of a kind, such as a file object. It shares the kind's name, rank and stats, and a
+        // thread may not hold two of one kind.
+        internal RankedLock(RankedLock Kind)
+        {
+            Name = Kind.Name;
+            Rank = Kind.Rank;
+            _gate = Kind._gate;
+            _stats = Kind._stats;
+            _slots = Kind._slots;
         }
 
         internal bool IsHeld => Monitor.IsEntered(_monitor);
@@ -255,9 +267,30 @@ namespace Brovan.Core.Emulation
             return LeaveHeld(Locks, null, ref Left, ref Count) ? new LeftLocks(Left, Count) : default;
         }
 
+        // Restore takes the left locks again, so a lock outside them that stays held would come before them.
+        private static void CheckLeavesAllHeld(ReadOnlySpan<RankedLock> Locks)
+        {
+            if (t_record is not HeldRecord Record)
+                return;
+
+            for (int i = 0; i < Record.Count; i++)
+            {
+                RankedLock Held = Record.Locks[i]!;
+                bool Leaving = false;
+                foreach (RankedLock Lock in Locks)
+                    Leaving |= ReferenceEquals(Lock, Held);
+
+                if (!Leaving)
+                    FailOrder($"{Held.Name} is held while the locks around it are left.");
+            }
+        }
+
         // A lock held more than once stays held. Without a wait the whole leave is undone.
         private static bool LeaveHeld(ReadOnlySpan<RankedLock> Locks, RankedLock? Waiting, ref LockSlots Left, ref int Count)
         {
+            if (OrderChecked)
+                CheckLeavesAllHeld(Locks);
+
             for (int i = Locks.Length - 1; i >= 0; i--)
             {
                 RankedLock Lock = Locks[i];
@@ -309,6 +342,20 @@ namespace Brovan.Core.Emulation
         {
             if (OrderChecked && !Skipped && !IsHeld)
                 FailOrder($"{Where} runs without {Name}.");
+        }
+
+        // A path that takes a lock of this rank only on a rare branch is checked on every run.
+        internal static void AssertMayTake(int Rank, string Where)
+        {
+            if (!OrderChecked || t_record is not HeldRecord Record)
+                return;
+
+            for (int i = 0; i < Record.Count; i++)
+            {
+                RankedLock Held = Record.Locks[i]!;
+                if (Held.Rank >= Rank)
+                    FailOrder($"{Where} can take a rank {Rank} lock while {Held.Name} (rank {Held.Rank}) is held.");
+            }
         }
 
         internal static void AssertNoneHeld(string Where)

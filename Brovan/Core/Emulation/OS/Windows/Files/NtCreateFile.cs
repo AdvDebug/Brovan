@@ -223,7 +223,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Device = false,
                 Real = FinalExists,
                 Directory = IsDirectory,
-                Position = 0,
                 Handler = null,
                 FileStream = Stream,
                 DeleteOnClose = DeleteOnClose,
@@ -290,7 +289,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Device = false,
                 Real = FinalExists,
                 Directory = IsDirectory,
-                Position = 0,
                 Handler = null,
                 FileStream = Stream,
                 DeleteOnClose = DeleteOnClose,
@@ -599,7 +597,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Device = true,
                 Real = false,
                 Directory = false,
-                Position = 0,
                 Mode = ModeFromCreateOptions(CreateOptions),
                 Handler = Handler,
                 Pipe = Pipe

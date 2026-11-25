@@ -469,7 +469,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Position < 0 || (FileObj.NoIntermediateBuffering && ((ulong)Position & (WindowsStorageDeviceSupport.BytesPerSector - 1)) != 0))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            FileObj.Position = Position;
+            using (FileObj.ObjectLock.EnterScope())
+                FileObj.Position = Position;
+
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_SUCCESS, 0);
             Instance.WinHelper.KernelFileInformation?.NotePosition(FileHandle, FileObj);
             return NTSTATUS.STATUS_SUCCESS;
@@ -574,7 +576,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     if (string.Equals(FileObj.Path, SourcePath, StringComparison.OrdinalIgnoreCase))
                     {
-                        FileObj.Path = TargetPath;
+                        FileObj.Rename(TargetPath);
                         Instance.WinHelper.RetargetOpenFile(FileObj, OldPath);
                         continue;
                     }
@@ -584,7 +586,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     {
                         string Suffix = FileObj.Path.Substring(Prefix.Length);
                         string NewPrefix = TargetPath.EndsWith("\\", StringComparison.Ordinal) ? TargetPath : TargetPath + "\\";
-                        FileObj.Path = NewPrefix + Suffix;
+                        FileObj.Rename(NewPrefix + Suffix);
                         Instance.WinHelper.RetargetOpenFile(FileObj, OldPath);
                     }
 
@@ -593,7 +595,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (string.Equals(FileObj.Path, SourcePath, StringComparison.OrdinalIgnoreCase))
                 {
-                    FileObj.Path = TargetPath;
+                    FileObj.Rename(TargetPath);
                     Instance.WinHelper.RetargetOpenFile(FileObj, OldPath);
                 }
             }

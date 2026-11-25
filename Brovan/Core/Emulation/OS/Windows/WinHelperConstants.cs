@@ -1747,15 +1747,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
     public class WinFile : IHandleObject
     {
-        public class WinLockFile
-        {
-            public ulong Offset;
-            public ulong Length;
-            public ulong Key;
-            public bool Exclusive;
-            public WinFile Owner;
-        }
-
         public string Path;
         public WindowsFileStream FileStream;
         public bool Device;
@@ -1774,11 +1765,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal KernelFileCell KernelCell;
         internal KernelFileNotes KernelNotes;
 
+        private static readonly RankedLock ObjectLockKind = new RankedLock("FileObject", RankedLock.FileObjectRank);
+
+        // NT's file object lock. A request holds it from the offset claim to the position update, and every change of the
+        // stream, the position or the guest kernel cell holds it.
+        internal readonly RankedLock ObjectLock = new RankedLock(ObjectLockKind);
+
+        internal static void ReportObjectLocks() => ObjectLockKind.Report();
+
         public long Position
         {
             get => KernelCell != null ? KernelCell.Offset : SharedPosition != null ? SharedPosition.Value : LocalPosition;
             set
             {
+                ObjectLock.AssertHeld("A file position store");
                 if (KernelCell != null)
                     KernelCell.Offset = value;
                 else if (SharedPosition != null)
@@ -1795,16 +1795,28 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal bool TrySharePosition()
         {
-            KernelCell?.Owner.ReleaseFile(this);
-            SharedPosition ??= SharedFilePosition.Create(Position);
-            return SharedPosition != null;
+            using (ObjectLock.EnterScope())
+            {
+                KernelCell?.Owner.ReleaseFile(this);
+                SharedPosition ??= SharedFilePosition.Create(Position);
+                return SharedPosition != null;
+            }
+        }
+
+        internal void Rename(string NewPath)
+        {
+            using (ObjectLock.EnterScope())
+                Path = NewPath;
         }
 
         internal void BindCompletionPort(ulong Port, ulong Key)
         {
-            KernelCell?.Owner.ReleaseFile(this);
-            CompletionHandle = Port;
-            CompletionKey = Key;
+            using (ObjectLock.EnterScope())
+            {
+                KernelCell?.Owner.ReleaseFile(this);
+                CompletionHandle = Port;
+                CompletionKey = Key;
+            }
         }
 
         public bool DeletePending;
@@ -1813,8 +1825,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public uint ShareAccess;
         public string OpenId = Guid.NewGuid().ToString("N");
 
-        // Byte range locks live on the file, so every open of a path shares one list.
-        public List<WinLockFile> Locks = new List<WinLockFile>();
+        public FileRangeLocks Locks = new FileRangeLocks();
 
         /// <summary>
         /// Completion port bound with FileCompletionInformation. A request with an APC context and no APC routine
@@ -1883,38 +1894,71 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WindowsFileStream GetFileStream(bool CreateWriteDirectories = false)
         {
-            if (string.IsNullOrEmpty(Path))
-                return null;
-
-            if (FileStream == null || !string.Equals(FileStream.GuestPath, Path, StringComparison.OrdinalIgnoreCase))
+            using (ObjectLock.EnterScope())
             {
-                FileStream?.Dispose();
-                FileStream = WindowsFileStream.FromGuestPath(Path, CreateWriteDirectories);
-            }
+                if (string.IsNullOrEmpty(Path))
+                    return null;
 
-            return FileStream;
+                if (FileStream == null || !string.Equals(FileStream.GuestPath, Path, StringComparison.OrdinalIgnoreCase))
+                {
+                    FileStream?.Dispose();
+                    FileStream = WindowsFileStream.FromGuestPath(Path, CreateWriteDirectories);
+                }
+
+                return FileStream;
+            }
         }
 
         public void ReleaseFileStream()
         {
-            FileStream?.Dispose();
-            FileStream = null;
+            using (ObjectLock.EnterScope())
+            {
+                FileStream?.Dispose();
+                FileStream = null;
+            }
         }
 
         internal void ReleaseSharedPosition()
         {
-            if (SharedPosition == null)
-                return;
+            using (ObjectLock.EnterScope())
+            {
+                if (SharedPosition == null)
+                    return;
 
-            LocalPosition = SharedPosition.Value;
-            SharedPosition.Dispose();
-            SharedPosition = null;
+                LocalPosition = SharedPosition.Value;
+                SharedPosition.Dispose();
+                SharedPosition = null;
+            }
         }
 
         public string ObjectId => $"FILE_{OpenId}";
         public HandleType ObjectType => HandleType.FileHandle;
+    }
 
-        private static bool LockRangesOverlap(ulong LeftOffset, ulong LeftLength, ulong RightOffset, ulong RightLength)
+    // NT keeps byte range locks per file, so every open of a path shares one record. Its monitor takes nothing inside.
+    public sealed class FileRangeLocks
+    {
+        private sealed class Range
+        {
+            public ulong Offset;
+            public ulong Length;
+            public ulong Key;
+            public bool Exclusive;
+            public WinFile Owner;
+        }
+
+        private readonly List<Range> Ranges = new List<Range>();
+
+        public int Count
+        {
+            get
+            {
+                lock (Ranges)
+                    return Ranges.Count;
+            }
+        }
+
+        private static bool Overlap(ulong LeftOffset, ulong LeftLength, ulong RightOffset, ulong RightLength)
         {
             if (LeftLength == 0 || RightLength == 0)
                 return false;
@@ -1924,83 +1968,80 @@ namespace Brovan.Core.Emulation.OS.Windows
             return LeftOffset <= RightEnd && RightOffset <= LeftEnd;
         }
 
-        public WinLockFile GetConflictingLock(ulong Offset, ulong Length, ulong Key, bool ExclusiveLock)
+        public bool TryAdd(WinFile Owner, ulong Offset, ulong Length, ulong Key, bool ExclusiveLock)
         {
-            foreach (WinLockFile Existing in Locks)
+            lock (Ranges)
             {
-                if (!LockRangesOverlap(Existing.Offset, Existing.Length, Offset, Length))
-                    continue;
-
-                bool SameOwner = Existing.Owner == this && Existing.Key == Key;
-
-                if (Existing.Exclusive)
+                foreach (Range Existing in Ranges)
                 {
-                    if (!SameOwner)
-                        return Existing;
+                    if (!Overlap(Existing.Offset, Existing.Length, Offset, Length))
+                        continue;
 
-                    if (ExclusiveLock)
-                        return Existing;
-
-                    continue;
+                    bool SameOwner = Existing.Owner == Owner && Existing.Key == Key;
+                    if (Existing.Exclusive ? !SameOwner || ExclusiveLock : ExclusiveLock)
+                        return false;
                 }
 
-                if (ExclusiveLock)
-                    return Existing;
+                Ranges.Add(new Range
+                {
+                    Offset = Offset,
+                    Length = Length,
+                    Key = Key,
+                    Exclusive = ExclusiveLock,
+                    Owner = Owner
+                });
             }
 
-            return null;
+            return true;
         }
 
-        public void AddLock(ulong Offset, ulong Length, ulong Key, bool ExclusiveLock)
+        public bool Remove(WinFile Owner, ulong Offset, ulong Length, ulong Key)
         {
-            Locks.Add(new WinLockFile
+            lock (Ranges)
             {
-                Offset = Offset,
-                Length = Length,
-                Key = Key,
-                Exclusive = ExclusiveLock,
-                Owner = this
-            });
-        }
+                for (int i = 0; i < Ranges.Count; i++)
+                {
+                    Range Existing = Ranges[i];
+                    if (Existing.Owner != Owner || Existing.Offset != Offset || Existing.Length != Length || Existing.Key != Key)
+                        continue;
 
-        public bool RemoveLock(ulong Offset, ulong Length, ulong Key)
-        {
-            for (int i = 0; i < Locks.Count; i++)
-            {
-                WinLockFile Existing = Locks[i];
-                if (Existing.Owner != this || Existing.Offset != Offset || Existing.Length != Length || Existing.Key != Key)
-                    continue;
-
-                Locks.RemoveAt(i);
-                return true;
+                    Ranges.RemoveAt(i);
+                    return true;
+                }
             }
 
             return false;
         }
 
         // NT drops a file object's locks when the process closes its last handle to it (IopCloseFile).
-        internal void ReleaseLocks()
+        public void ReleaseOwnedBy(WinFile Owner)
         {
-            int Kept = 0;
-            for (int i = 0; i < Locks.Count; i++)
+            lock (Ranges)
             {
-                if (Locks[i].Owner != this)
-                    Locks[Kept++] = Locks[i];
-            }
+                int Kept = 0;
+                for (int i = 0; i < Ranges.Count; i++)
+                {
+                    if (Ranges[i].Owner != Owner)
+                        Ranges[Kept++] = Ranges[i];
+                }
 
-            Locks.RemoveRange(Kept, Locks.Count - Kept);
+                Ranges.RemoveRange(Kept, Ranges.Count - Kept);
+            }
         }
 
         // NT lets a shared lock block writes through its own file object too (FsRtlFastCheckLockForWrite).
-        public bool HasConflictingIoLock(ulong Offset, ulong Length, ulong Key, bool WriteOperation)
+        public bool HasConflictingIo(WinFile Owner, ulong Offset, ulong Length, ulong Key, bool WriteOperation)
         {
-            foreach (WinLockFile Existing in Locks)
+            lock (Ranges)
             {
-                if (!LockRangesOverlap(Existing.Offset, Existing.Length, Offset, Length))
-                    continue;
+                foreach (Range Existing in Ranges)
+                {
+                    if (!Overlap(Existing.Offset, Existing.Length, Offset, Length))
+                        continue;
 
-                if (Existing.Exclusive ? Existing.Owner != this || Existing.Key != Key : WriteOperation)
-                    return true;
+                    if (Existing.Exclusive ? Existing.Owner != Owner || Existing.Key != Key : WriteOperation)
+                        return true;
+                }
             }
 
             return false;

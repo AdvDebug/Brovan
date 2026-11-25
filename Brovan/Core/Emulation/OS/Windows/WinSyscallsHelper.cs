@@ -341,10 +341,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        // The emulator's final report does not walk the device lock or the park stats, which belong to the process-wide
-        // device.
-        internal static void ReportBrovVulk()
+        // The emulator's final report does not walk what belongs to the whole host process: BrovVulk's device lock and park
+        // stats, and the file object locks.
+        internal static void ReportProcessLocks()
         {
+            WinFile.ReportObjectLocks();
             if (!DeviceRegistry.IsValueCreated)
                 return;
 
@@ -2230,7 +2231,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public ulong GetArg64(int Index, bool UInt = false)
         {
-            ref SyscallArgCache Args = ref Call.Args;
+            CallState State = Call;
+            ref SyscallArgCache Args = ref State.Args;
             if (Args.Valid)
             {
                 switch (Index)
@@ -2240,8 +2242,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                     case 2: return Args.R8;
                     case 3: return Args.R9;
                 }
-                ulong StackArgAddress = Args.RSP + 0x28UL + (ulong)((Index - 4) * 8);
-                return UInt ? Emulator._emulator.ReadMemoryUInt(StackArgAddress) : Emulator._emulator.ReadMemoryULong(StackArgAddress);
+                ulong Slot = ReadArgSlot(State, Index - 4, Args.RSP + 0x28UL + (ulong)((Index - 4) * 8), true);
+                return UInt ? (uint)Slot : Slot;
             }
 
             if (Index == 0) return Emulator._emulator.ReadRegister(Registers.UC_X86_REG_R10);
@@ -2259,7 +2261,26 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Emulator._binary.Architecture == BinaryArchitecture.x64)
                 return GetArg64(Index);
 
-            return Emulator._emulator.ReadMemoryUInt(Call.Args.ArgBase + (ulong)(Index * 4));
+            CallState State = Call;
+            ulong Address = State.Args.ArgBase + (ulong)(Index * 4);
+            return State.Args.Valid ? ReadArgSlot(State, Index, Address, false) : Emulator._emulator.ReadMemoryUInt(Address);
+        }
+
+        // NT copies the stack arguments once at entry, so one argument has one value for the whole call.
+        private ulong ReadArgSlot(CallState State, int Slot, ulong Address, bool Wide)
+        {
+            if ((uint)Slot >= CallState.ArgSlots)
+                return Wide ? Emulator._emulator.ReadMemoryULong(Address) : Emulator._emulator.ReadMemoryUInt(Address);
+
+            ulong Bit = 1UL << Slot;
+            ref SyscallArgCache Args = ref State.Args;
+            if ((Args.SlotsRead & Bit) != 0)
+                return State.ArgSlotValues[Slot];
+
+            ulong Value = Wide ? Emulator._emulator.ReadMemoryULong(Address) : Emulator._emulator.ReadMemoryUInt(Address);
+            State.ArgSlotValues[Slot] = Value;
+            Args.SlotsRead |= Bit;
+            return Value;
         }
 
         public uint GetArg32(int Index) => (uint)GetArg(Index);
@@ -2773,12 +2794,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             public ulong R9;
             public ulong RSP;
             public ulong ArgBase;
+            public ulong SlotsRead;
         }
 
         private sealed class CallState
         {
+            public const int ArgSlots = 64;
+
             public SyscallArgCache Args;
             public readonly ulong[] X64ArgValues = new ulong[5];
+            public readonly ulong[] ArgSlotValues = new ulong[ArgSlots];
             public readonly WindowsSharedBuffer Shared = new WindowsSharedBuffer();
             public ulong ResolvedHandle;
             public IHandleObject? Resolved;
@@ -2813,6 +2838,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             CallState State = Call;
             DropResolved(State);
             ref SyscallArgCache Args = ref State.Args;
+            Args.SlotsRead = 0;
             if (Emulator._binary.Architecture != BinaryArchitecture.x64)
             {
                 Args.Valid = false;
@@ -2820,6 +2846,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     uint ESP = Emulator._emulator.ReadRegister32(Registers.UC_X86_REG_ESP);
                     Args.ArgBase = X86GateArgs ? ESP + (uint)GuestKernelCallBuilder.GateArgumentsOffset : ESP + 4u;
+                    Args.Valid = true;
                     RefreshWow64FileRedirect();
                 }
                 return;
@@ -9419,6 +9446,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(GuestPath))
                 return;
 
+            RankedLock.AssertMayTake(RankedLock.FileObjectRank, "A path-wide stream release");
             string Prefix = null;
             if (IncludeChildren)
                 Prefix = GuestPath.EndsWith("\\", StringComparison.Ordinal) ? GuestPath : GuestPath + "\\";
@@ -9529,6 +9557,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (File.DeletePending == Pending)
                 return;
+            RankedLock.AssertMayTake(RankedLock.FileObjectRank, "A delete pending change");
             KernelFiles?.ReleasePath(File.Path, null);
             File.DeletePending = Pending;
         }
@@ -9557,7 +9586,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Opens.Count == 0)
                 OpenFilesByPath.Remove(OldPath);
 
-            RegisterOpenFile(File);
+            // The byte range locks belong to the file, so they move with it.
+            if (!OpenFilesByPath.TryGetValue(File.Path, out List<WinFile> Moved))
+            {
+                Moved = new List<WinFile>(1);
+                OpenFilesByPath[File.Path] = Moved;
+            }
+
+            Moved.Add(File);
         }
 
         public WinFile? GetFileByHandle(ulong Handle, AccessMask Purpose)
@@ -11733,17 +11769,24 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ReleaseSectionIfUnreferenced(ClosingSection);
         }
 
+        // NT: IopCloseFile runs the cleanup under the file object lock. A delete on close reaches every open of the path,
+        // each under its own lock, so it runs after.
         private void ReleaseFileObject(WinFile Closing)
         {
-            KernelFiles?.ReleaseFile(Closing);
-            Closing.ReleaseLocks();
-            UnregisterOpenFile(Closing);
-            if (Closing.DeletePending || Closing.DeleteOnClose)
-                ApplyDeleteOnClose(Closing);
-            else
-                Closing.ReleaseFileStream();
+            bool Delete = Closing.DeletePending || Closing.DeleteOnClose;
+            using (Closing.ObjectLock.EnterScope())
+            {
+                KernelFiles?.ReleaseFile(Closing);
+                Closing.Locks.ReleaseOwnedBy(Closing);
+                if (!Delete)
+                    Closing.ReleaseFileStream();
 
-            Closing.ReleaseSharedPosition();
+                Closing.ReleaseSharedPosition();
+            }
+
+            UnregisterOpenFile(Closing);
+            if (Delete)
+                ApplyDeleteOnClose(Closing);
         }
 
         private void ForgetLastHandleObject(IHandleObject? Object)
