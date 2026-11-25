@@ -284,20 +284,39 @@ namespace Brovan.Core.Emulation
             public BackingWindow Window;
         }
 
-        // A slot is reused only after its host page is decommitted, so a new commit reads zero.
+        // A slot is reused once its host page is decommitted or cleared, so a new commit reads zero.
         private sealed class BackingWindow
         {
             private const int Words = BackingWindowPages / 64;
 
-            public readonly ulong GuestBase;
+            // Zeroing in place makes untouched slots resident, so one commit zeroes at most this many.
+            private const int MaxZeroedSlots = 64;
+
             public readonly IntPtr Host;
             private readonly ulong[] _live = new ulong[Words];
             private readonly ulong[] _committed = new ulong[Words];
 
-            public BackingWindow(ulong guestBase, IntPtr host)
+            public BackingWindow(IntPtr host) => Host = host;
+
+            // Freed slots whose decommit still waits for the other workers can take a commit once they read zero.
+            public bool TryZeroFreed(int first, int count)
             {
-                GuestBase = guestBase;
-                Host = host;
+                if (count > MaxZeroedSlots)
+                    return false;
+
+                for (int page = first; page < first + count; page++)
+                {
+                    if (IsLive(SlotOf(page), WhpConstants.PageSize))
+                        return false;
+                }
+
+                for (int page = first; page < first + count; page++)
+                {
+                    IntPtr slot = SlotOf(page);
+                    if (IsFreed(slot) && !HostDiscard.ZeroUnderReaders(slot, WhpConstants.PageSize))
+                        return false;
+                }
+                return true;
             }
 
             public IntPtr SlotOf(int page) => new IntPtr(Host.ToInt64() + (long)page * (long)WhpConstants.PageSize);
@@ -520,7 +539,7 @@ namespace Brovan.Core.Emulation
 
             _gate = new GuestEntryGate(this);
             _paging = new GuestPaging(this, _gate, _mappedPages, WhpConstants.InternalPageTableBase);
-            _frees = new BackingFrees<BackingAllocation>(_backings, new FreeSite(this));
+            _frees = new BackingFrees<BackingAllocation>(_backings, new FreeSite(this), _paging);
             _guest64 = mode == Mode.MODE_64;
             _userCodeSegment = MakeSegment(_guest64 ? WhpConstants.UserCodeSelector : WhpConstants.UserCodeSelector32, true, true);
             _userDataSegment = MakeSegment(_guest64 ? WhpConstants.UserDataSelector : WhpConstants.UserDataSelector32, false, true);
@@ -591,6 +610,7 @@ namespace Brovan.Core.Emulation
             IntPtr backing = IntPtr.Zero;
             BackingAllocation allocation = null;
             bool replaced = false;
+            _frees.EndParking(address, size, IntPtr.Zero);
 
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
@@ -613,7 +633,7 @@ namespace Brovan.Core.Emulation
 
                 if (_mappedPages.TryGetValue(guest, out GuestPage previous))
                 {
-                    ReleaseBacking(previous);
+                    _frees.ReleasePage(guest, previous, false);
                     replaced = true;
                 }
 
@@ -721,17 +741,19 @@ namespace Brovan.Core.Emulation
                 }
 
                 long backingAddr = host.ToInt64();
+                bool revived = _frees.EndParking(address, size, host);
                 WithholdCoveredBlocks(address, size);
 
                 for (ulong off = 0; off < size; off += WhpConstants.PageSize)
                 {
                     ulong guest = address + off;
+                    IntPtr pageHost = new IntPtr(backingAddr + (long)off);
                     GuestPage page = new GuestPage
                     {
-                        HostPage = new IntPtr(backingAddr + (long)off),
+                        HostPage = pageHost,
                         OwnedBacking = backing,
                         Permissions = perm,
-                        WriteRetained = RetainsWriteWithoutAccess(perm, false),
+                        WriteRetained = RetainsWriteWithoutAccess(perm, false) || (revived && InstalledWritableAt(guest, pageHost)),
                     };
                     SetGuestPage(guest, page);
                     _paging.SetLeaf(guest, perm);
@@ -755,13 +777,14 @@ namespace Brovan.Core.Emulation
                     return false;
                 }
 
+                bool revived = current == null && _frees.EndParking(guest, WhpConstants.PageSize, host);
                 GuestPage page = new GuestPage
                 {
                     HostPage = host,
                     OwnedBacking = backing,
                     IsAlias = isAlias,
                     Permissions = perm,
-                    WriteRetained = RetainsWriteWithoutAccess(perm, isAlias),
+                    WriteRetained = RetainsWriteWithoutAccess(perm, isAlias) || (revived && InstalledWritableAt(guest, host)),
                     WriteWatched = current?.WriteWatched ?? false,
                     Written = current?.Written ?? false,
                     Untouched = current?.Untouched ?? false,
@@ -796,6 +819,7 @@ namespace Brovan.Core.Emulation
             }
 
             List<(ulong Guest, IntPtr Host)>? foreign = null;
+            bool accessRemoved = false;
             for (ulong off = 0; off < size; off += WhpConstants.PageSize)
             {
                 ulong guest = address + off;
@@ -803,12 +827,20 @@ namespace Brovan.Core.Emulation
                 {
                     if (page.OwnedBacking == IntPtr.Zero && page.HostPage != IntPtr.Zero)
                         (foreign ??= new()).Add((guest, page.HostPage));
-                    ReleaseBacking(page);
+
+                    bool park = CanPark(guest, page);
+                    if (park)
+                        accessRemoved |= _paging.SetLeaf(guest, GuestPagePermission.None);
                     RemoveGuestPage(guest);
+                    _frees.ReleasePage(guest, page, park);
                 }
                 else if (_foreignStillMapped.TryGetValue(guest, out IntPtr stuck))
                     (foreign ??= new()).Add((guest, stuck));
             }
+
+            // A parked page keeps its GPA map, so its PTE is what removes access.
+            if (accessRemoved)
+                _gate.ShootDownGuestTlbs();
 
             RefreshMmioHostPages(address, size);
             if (removedRegions != 0)
@@ -2015,6 +2047,7 @@ namespace Brovan.Core.Emulation
                     FreeAllocation(kv.Key, kv.Value);
                 _backings.Clear();
                 _windowBlocks.Clear();
+                _frees.Clear();
                 _paging.Clear();
                 _gate.Dispose();
 
@@ -2186,7 +2219,8 @@ namespace Brovan.Core.Emulation
                 allocation = new BackingAllocation
                 {
                     Size = BackingWindowSize,
-                    Window = new BackingWindow(windowBase, backing),
+                    GuestBase = windowBase,
+                    Window = new BackingWindow(backing),
                 };
                 _backings.Add(backing, allocation);
                 _windowBlocks[windowBase] = allocation;
@@ -2200,7 +2234,7 @@ namespace Brovan.Core.Emulation
             {
                 // A slot frees for reuse once its deferred discard runs.
                 _frees.CompletePassedIfAny();
-                if (!window.CanCommit(first, count))
+                if (!window.CanCommit(first, count) && !(allocation.IsDiscardable && window.TryZeroFreed(first, count)))
                 {
                     WindowStats.Fallback(WindowFallback.SlotCommitted);
                     return false;
@@ -2217,36 +2251,40 @@ namespace Brovan.Core.Emulation
             }
 
             window.Commit(first, count);
-            allocation.LivePages += count;
+            _frees.AddLive(allocation, count);
             host = slot;
             WindowStats.Placed();
             return true;
         }
 
-        private void ReleaseBacking(GuestPage page)
+        // A freed private window page keeps its GPA map, since the next commit at its address gets the same slot.
+        private bool CanPark(ulong guest, GuestPage page)
+            => !GuestPaging.ParkingDisabled
+               && !NoAccessMapsDisabled
+               && !page.IsAlias
+               && page.OwnedBacking != IntPtr.Zero
+               && (_trappedPages.Count == 0 || !_trappedPages.ContainsKey(guest))
+               && _backings.TryGet(page.OwnedBacking, out BackingAllocation allocation)
+               && allocation.Window != null
+               && allocation.IsDiscardable
+               && IsInstalledAt(guest, page.HostPage, out _);
+
+        private bool IsInstalledAt(ulong gpa, IntPtr host, out bool writable)
         {
-            if (page.OwnedBacking == IntPtr.Zero) return;
-            if (!_backings.TryGet(page.OwnedBacking, out BackingAllocation allocation)) return;
+            writable = false;
+            if (_activeMapStarts.Count == 0) return false;
 
-            if (page.IsAlias)
-            {
-                allocation.AliasPages--;
-            }
-            else
-            {
-                allocation.LivePages--;
-                allocation.Window?.Free(page.HostPage);
-            }
+            ulong start = _activeMapStarts[FirstActiveMapIndexAtOrBefore(gpa)];
+            if (start > gpa || !_activeMaps.TryGetValue(start, out InstalledMap map) || gpa - start >= map.Size
+                || map.Host.ToInt64() + (long)(gpa - start) != host.ToInt64())
+                return false;
 
-            if (!allocation.IsReferenced)
-                _frees.Released(page.OwnedBacking);
-            else if (!allocation.IsDiscardable)
-                return;
-            else if (!page.IsAlias)
-                _frees.Discards.Add(page.OwnedBacking, page.HostPage, WhpConstants.PageSize);
-            else
-                allocation.Window?.AddFreedSlots(_frees.Discards);
+            writable = (map.Flags & WhvMapGpaRangeFlags.Write) != 0;
+            return true;
         }
+
+        // A revived page keeps the flags of the map it is revived under.
+        private bool InstalledWritableAt(ulong gpa, IntPtr host) => IsInstalledAt(gpa, host, out bool writable) && writable;
 
         // Only after the rebuild unmaps the pages. Until then other processors can reach the backing.
         private void FreeReleasedBackings()
@@ -2275,7 +2313,7 @@ namespace Brovan.Core.Emulation
             {
                 _owner._paging.AssertMappingsHeld(nameof(ForgetBlock));
                 if (allocation.Window != null)
-                    _owner._windowBlocks.Remove(allocation.Window.GuestBase);
+                    _owner._windowBlocks.Remove(allocation.GuestBase);
             }
 
             public void FreeBlock(IntPtr backing, BackingAllocation allocation)
@@ -2283,6 +2321,18 @@ namespace Brovan.Core.Emulation
                 _owner._paging.AssertMappingsHeld(nameof(FreeBlock));
                 _owner.FreeAllocation(backing, allocation);
             }
+
+            public void PageLeft(BackingAllocation allocation, IntPtr hostPage) => allocation.Window?.Free(hostPage);
+
+            public void AliasLeft(BackingAllocation allocation) => allocation.Window?.AddFreedSlots(_owner._frees.Discards);
+
+            public void MarkPageDirty(ulong guest)
+            {
+                _owner._mappingsDirty = true;
+                _owner.MarkSpanDirty(guest, WhpConstants.PageSize);
+            }
+
+            public void RebuildMappings() => _owner.RebuildMappings();
 
             // A window slot can be committed again after its run was queued, so only the slots still freed go.
             public void DiscardRun(HostDiscardRuns.Run run, BackingAllocation allocation)
@@ -2967,6 +3017,8 @@ namespace Brovan.Core.Emulation
 
         private void SetGuestPage(ulong guestAddress, GuestPage page)
         {
+            if (_paging.ParkedCount != 0)
+                _frees.EndParking(guestAddress, WhpConstants.PageSize, page.HostPage);
             _paging.SetPage(guestAddress, page);
             if (_foreignStillMapped.Count != 0)
                 _foreignStillMapped.Remove(guestAddress);
@@ -3135,7 +3187,9 @@ namespace Brovan.Core.Emulation
                     continue;
                 }
 
-                if (!UnmapGpaRange(kv.Key, kv.Value.Size))
+                if (UnmapGpaRange(kv.Key, kv.Value.Size))
+                    _frees.DropParked(kv.Key, kv.Key + kv.Value.Size, false);
+                else
                     _stillMappedBacking.Add(kv.Value);
                 _staleMapKeys.Add(kv.Key);
             }
@@ -3227,11 +3281,12 @@ namespace Brovan.Core.Emulation
             for (ulong off = 0; off < map.Size; off += WhpConstants.PageSize)
             {
                 ulong address = start + off;
-                if (!_mappedPages.TryGetValue(address, out GuestPage page)
-                    || page == null
-                    || page.HostPage == IntPtr.Zero
-                    || LeavesGpaMap(page))
+                if (!_mappedPages.TryGetValue(address, out GuestPage page) || page == null)
+                {
+                    if (_paging.IsParkedAt(address, new IntPtr(map.Host.ToInt64() + (long)off))) continue;
                     return false;
+                }
+                if (page.HostPage == IntPtr.Zero || LeavesGpaMap(page)) return false;
                 if (page.HostPage.ToInt64() != map.Host.ToInt64() + (long)off) return false;
 
                 WhvMapGpaRangeFlags flags;
@@ -3468,7 +3523,10 @@ namespace Brovan.Core.Emulation
         private void UnmapStaleBatch(ulong start, ulong end, int firstKey)
         {
             if (UnmapGpaRange(start, end - start))
+            {
+                _frees.DropParked(start, end, false);
                 return;
+            }
 
             for (int i = firstKey; i < _staleMapKeys.Count; i++)
                 _stillMappedBacking.Add(_activeMaps[_staleMapKeys[i]]);
@@ -3571,7 +3629,8 @@ namespace Brovan.Core.Emulation
             PopulateMapped(gpa, size, host, flags, overLiveRange, holdsNoAccess);
         }
 
-        // A page with no access is never populated, so a guard page in a fresh commit stays out of the working set.
+        // A page with no access or no live record is never populated, so a guard page in a fresh commit stays out of the
+        // working set and a parked page stays decommitted.
         private void PopulateMapped(ulong gpa, ulong size, IntPtr host, WhvMapGpaRangeFlags flags, bool residentOnly, bool holdsNoAccess)
         {
             if (!holdsNoAccess)
@@ -3586,7 +3645,7 @@ namespace Brovan.Core.Emulation
             ulong runStart = gpa;
             for (ulong page = gpa; page < gpa + size; page += WhpConstants.PageSize)
             {
-                if (!_paging.TryLookupPage(page, out GuestPage mapped) || mapped.Permissions != GuestPagePermission.None)
+                if (_paging.TryLookupPage(page, out GuestPage mapped) && mapped.Permissions != GuestPagePermission.None)
                     continue;
 
                 if (page > runStart)

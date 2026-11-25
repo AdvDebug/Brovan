@@ -82,6 +82,8 @@ namespace Brovan.Core.Emulation
             _root = new Node(_topShift == 0);
         }
 
+        public ulong AddressLimit => _pageLimit << PageShift;
+
         public void CheckReaders(IBackendHost host) => _checkHost = host;
 
         // Get takes no lock. The writers run under the mapping lock and publish each slot last.
@@ -189,28 +191,36 @@ namespace Brovan.Core.Emulation
         }
 
         public bool TryGetNext(ulong pageAddress, out ulong foundAddress, out GuestPage page)
+            => TryGetNext(pageAddress, _pageLimit << PageShift, out foundAddress, out page);
+
+        public bool TryGetNext(ulong pageAddress, ulong endAddress, out ulong foundAddress, out GuestPage page)
         {
             ulong number = pageAddress >> PageShift;
+            ulong limit = Math.Min(_pageLimit, (endAddress + PageSize - 1) >> PageShift);
             ulong foundNumber = 0;
-            GuestPage? found = number < _pageLimit ? FindNext(_root, _topShift, number, out foundNumber) : null;
+            GuestPage? found = number < limit ? FindNext(_root, _topShift, number, limit, out foundNumber) : null;
             foundAddress = foundNumber << PageShift;
             page = found!;
             return found != null;
         }
 
-        private static GuestPage? FindNext(Node node, int shift, ulong number, out ulong found)
+        private static GuestPage? FindNext(Node node, int shift, ulong number, ulong limit, out ulong found)
         {
             ulong nodeBase = number & ~((1UL << (shift + LevelBits)) - 1);
             int first = (int)(number >> shift) & SlotMask;
             for (int index = first; index < Fanout; index++)
             {
+                ulong slotBase = nodeBase + ((ulong)index << shift);
+                if (slotBase >= limit)
+                    break;
+
                 if (shift == 0)
                 {
                     GuestPage? page = node.Pages![index];
                     if (page == null)
                         continue;
 
-                    found = nodeBase + (ulong)index;
+                    found = slotBase;
                     return page;
                 }
 
@@ -218,8 +228,7 @@ namespace Brovan.Core.Emulation
                 if (child == null)
                     continue;
 
-                ulong childBase = nodeBase + ((ulong)index << shift);
-                GuestPage? next = FindNext(child, shift - LevelBits, Math.Max(number, childBase), out found);
+                GuestPage? next = FindNext(child, shift - LevelBits, Math.Max(number, slotBase), limit, out found);
                 if (next != null)
                     return next;
             }

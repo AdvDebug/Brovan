@@ -240,7 +240,6 @@ namespace Brovan.Core.Emulation
         private sealed class BackingAllocation : BackingBlock
         {
             public bool HugePages;
-            public ulong GuestBase;
         }
 
         private struct InstalledSlot
@@ -308,7 +307,7 @@ namespace Brovan.Core.Emulation
 
             _gate = new GuestEntryGate(this);
             _paging = new GuestPaging(this, _gate, _mappedPages, KvmConstants.InternalPageTableBase);
-            _frees = new BackingFrees<BackingAllocation>(_backings, new FreeSite(this));
+            _frees = new BackingFrees<BackingAllocation>(_backings, new FreeSite(this), _paging);
             _guest64 = mode == Mode.MODE_64;
             _userCodeSelector = _guest64 ? KvmConstants.UserCodeSelector : KvmConstants.UserCodeSelector32;
 
@@ -376,6 +375,7 @@ namespace Brovan.Core.Emulation
             IntPtr backing = IntPtr.Zero;
             BackingAllocation allocation = null;
             bool accessRemoved = false;
+            _frees.EndParking(address, size, IntPtr.Zero);
 
             for (ulong off = 0; off < size; off += KvmConstants.PageSize)
             {
@@ -397,7 +397,7 @@ namespace Brovan.Core.Emulation
                     allocation.AliasPages++;
 
                 if (_mappedPages.TryGetValue(guest, out GuestPage previous))
-                    ReleaseBacking(previous);
+                    _frees.ReleasePage(guest, previous, false);
 
                 SetGuestPage(guest, new GuestPage
                 {
@@ -494,29 +494,37 @@ namespace Brovan.Core.Emulation
 
             if (canBatch && size > 0)
             {
-                if (!TryAllocateGuestBacking(address, size, out IntPtr backing, out bool hugePages))
+                if (!_frees.TryReviveRange(address, size, out IntPtr backing, out IntPtr host))
                 {
-                    _error = KvmErrors.NoMemory;
-                    return false;
+                    if (!TryAllocateGuestBacking(address, size, out backing, out bool hugePages))
+                    {
+                        _error = KvmErrors.NoMemory;
+                        return false;
+                    }
+
+                    _backings.Add(backing, new BackingAllocation
+                    {
+                        Size = size,
+                        LivePages = (int)(size / KvmConstants.PageSize),
+                        HugePages = hugePages,
+                        GuestBase = address,
+                    });
+                    host = backing;
                 }
 
-                long backingAddr = backing.ToInt64();
-                _backings.Add(backing, new BackingAllocation
-                {
-                    Size = size,
-                    LivePages = (int)(size / KvmConstants.PageSize),
-                    HugePages = hugePages,
-                    GuestBase = address,
-                });
+                long hostAddr = host.ToInt64();
+                bool revived = _frees.EndParking(address, size, host);
 
                 for (ulong off = 0; off < size; off += KvmConstants.PageSize)
                 {
                     ulong guest = address + off;
+                    IntPtr pageHost = new IntPtr(hostAddr + (long)off);
                     GuestPage page = new GuestPage
                     {
-                        HostPage = new IntPtr(backingAddr + (long)off),
+                        HostPage = pageHost,
                         OwnedBacking = backing,
                         Permissions = perm,
+                        WriteRetained = revived && InstalledWritableAt(guest, pageHost),
                     };
                     SetGuestPage(guest, page);
                     _paging.SetLeaf(guest, perm);
@@ -524,7 +532,7 @@ namespace Brovan.Core.Emulation
 
                 RebuildMappings();
                 if (perm != GuestPagePermission.None)
-                    PopulateRange(address, size, backing);
+                    PopulateRange(address, size, host);
                 _error = KvmErrors.Ok;
                 return true;
             }
@@ -610,8 +618,9 @@ namespace Brovan.Core.Emulation
                 ulong guest = address + off;
                 if (_mappedPages.TryGetValue(guest, out GuestPage page))
                 {
-                    ReleaseBacking(page);
+                    bool park = CanPark(guest, page);
                     RemoveGuestPage(guest);
+                    _frees.ReleasePage(guest, page, park);
                 }
             }
 
@@ -1882,6 +1891,7 @@ namespace Brovan.Core.Emulation
                 foreach (KeyValuePair<IntPtr, BackingAllocation> kv in _backings)
                     FreeAllocation(kv.Key, kv.Value);
                 _backings.Clear();
+                _frees.Clear();
                 _paging.Clear();
                 _gate.Dispose();
 
@@ -2116,20 +2126,49 @@ namespace Brovan.Core.Emulation
             _backingBytes -= size;
         }
 
-        private void ReleaseBacking(GuestPage page)
+        // A private page of a batch block keeps its memslot when freed, because a commit of the same range finds the
+        // block again.
+        private bool CanPark(ulong guest, GuestPage page)
+            => !GuestPaging.ParkingDisabled
+               && !page.IsAlias
+               && page.OwnedBacking != IntPtr.Zero
+               && (_trappedPages.Count == 0 || !_trappedPages.ContainsKey(guest))
+               && _backings.TryGet(page.OwnedBacking, out BackingAllocation allocation)
+               && allocation.GuestBase != 0
+               && allocation.IsDiscardable
+               && IsInstalledAt(guest, page.HostPage, out _);
+
+        private bool IsInstalledAt(ulong gpa, IntPtr host, out bool writable)
         {
-            if (page.OwnedBacking == IntPtr.Zero) return;
-            if (!_backings.TryGet(page.OwnedBacking, out BackingAllocation allocation)) return;
+            writable = false;
+            if (_activeSlotStarts.Count == 0) return false;
 
-            if (page.IsAlias)
-                allocation.AliasPages--;
-            else
-                allocation.LivePages--;
+            ulong start = _activeSlotStarts[FirstActiveSlotIndexAtOrBefore(gpa)];
+            if (start > gpa || !_activeSlots.TryGetValue(start, out InstalledSlot slot) || gpa - start >= slot.Size
+                || slot.Host.ToInt64() + (long)(gpa - start) != host.ToInt64())
+                return false;
 
-            if (!allocation.IsReferenced)
-                _frees.Released(page.OwnedBacking);
-            else if (!page.IsAlias && allocation.IsDiscardable)
-                _frees.Discards.Add(page.OwnedBacking, page.HostPage, KvmConstants.PageSize);
+            writable = (slot.Flags & KvmConstants.MemSlotReadOnly) == 0;
+            return true;
+        }
+
+        // A revived page keeps the flags of the slot it is revived under.
+        private bool InstalledWritableAt(ulong gpa, IntPtr host) => IsInstalledAt(gpa, host, out bool writable) && writable;
+
+        // A slot deleted by a rebuild and not installed again takes its parked pages with it.
+        private void DropUnmappedParked()
+        {
+            for (int i = 0; i < _deletedSlotRanges.Count; i++)
+            {
+                DirtyRange range = _deletedSlotRanges[i];
+                ulong cursor = range.Start;
+                while (_paging.TryGetNextParked(cursor, range.End, out ulong guest, out GuestPage parked))
+                {
+                    cursor = guest + KvmConstants.PageSize;
+                    if (!IsInstalledAt(guest, parked.HostPage, out _))
+                        _frees.DropParked(guest, cursor, false);
+                }
+            }
         }
 
         // Only after the rebuild deletes the slots. Until then other processors can reach the backing.
@@ -2167,10 +2206,54 @@ namespace Brovan.Core.Emulation
             {
                 if (allocation.HugePages)
                     _owner.DiscardFreeSpans(run, allocation);
+                else if (allocation.GuestBase != 0)
+                    _owner.DiscardFreePages(run, allocation);
                 else
                     HostDiscard.Release(run.Start, run.Size);
             }
+
+            public void PageLeft(BackingAllocation allocation, IntPtr hostPage)
+            {
+            }
+
+            // A block keeps the pages that left while it was aliased until it goes.
+            public void AliasLeft(BackingAllocation allocation)
+            {
+            }
+
+            public void MarkPageDirty(ulong guest)
+            {
+                _owner._mappingsDirty = true;
+                _owner.MarkSpanDirty(guest, KvmConstants.PageSize);
+            }
+
+            public void RebuildMappings() => _owner.RebuildMappings();
         }
+
+        // A page revived since its run was queued is live again and keeps what the new commit wrote.
+        private void DiscardFreePages(HostDiscardRuns.Run run, BackingAllocation allocation)
+        {
+            long end = run.Start.ToInt64() + (long)run.Size;
+            long page = run.Start.ToInt64();
+            while (page < end)
+            {
+                if (IsLiveHostPage(run.Key, allocation, page))
+                {
+                    page += (long)KvmConstants.PageSize;
+                    continue;
+                }
+
+                long first = page;
+                while (page < end && !IsLiveHostPage(run.Key, allocation, page))
+                    page += (long)KvmConstants.PageSize;
+                HostDiscard.Release(new IntPtr(first), (ulong)(page - first));
+            }
+        }
+
+        private bool IsLiveHostPage(IntPtr backing, BackingAllocation allocation, long host)
+            => _mappedPages.TryGetValue(allocation.GuestBase + (ulong)(host - backing.ToInt64()), out GuestPage page)
+               && page.HostPage.ToInt64() == host
+               && !page.IsAlias;
 
         // Linux keeps a partly discarded huge page until reclaim.
         private void DiscardFreeSpans(HostDiscardRuns.Run run, BackingAllocation allocation)
@@ -2919,6 +3002,8 @@ namespace Brovan.Core.Emulation
 
         private void SetGuestPage(ulong guestAddress, GuestPage page)
         {
+            if (_paging.ParkedCount != 0)
+                _frees.EndParking(guestAddress, KvmConstants.PageSize, page.HostPage);
             _paging.SetPage(guestAddress, page);
             _mappingsDirty = true;
             MarkSpanDirty(guestAddress, KvmConstants.PageSize);
@@ -2941,17 +3026,22 @@ namespace Brovan.Core.Emulation
                 if (HasSlotHeadroom)
                 {
                     RebuildDirtyRanges();
+                    DropUnmappedParked();
                 }
                 else
                 {
                     for (int i = 0; i < _dirtyRanges.Count; i++)
+                    {
                         RebuildMappingsIncremental(_dirtyRanges[i].Start, _dirtyRanges[i].End);
+                        DropUnmappedParked();
+                    }
                 }
                 _dirtyRanges.Clear();
                 return;
             }
 
             RebuildMappingsFull();
+            DropUnmappedParked();
             _fullRebuildRequired = false;
             _dirtyRanges.Clear();
         }
@@ -3043,11 +3133,12 @@ namespace Brovan.Core.Emulation
             for (ulong address = from; address < to; address += KvmConstants.PageSize)
             {
                 ulong off = address - start;
-                if (!_mappedPages.TryGetValue(address, out GuestPage page)
-                    || page == null
-                    || page.HostPage == IntPtr.Zero
-                    || page.Permissions == GuestPagePermission.None)
+                if (!_mappedPages.TryGetValue(address, out GuestPage page) || page == null)
+                {
+                    if (_paging.IsParkedAt(address, new IntPtr(slot.Host.ToInt64() + (long)off))) continue;
                     return false;
+                }
+                if (page.HostPage == IntPtr.Zero || page.Permissions == GuestPagePermission.None) return false;
                 if (page.HostPage.ToInt64() != slot.Host.ToInt64() + (long)off) return false;
 
                 uint flags;

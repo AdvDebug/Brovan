@@ -22,6 +22,24 @@ namespace Brovan.Core.Emulation
                 Utils.LogError($"[HostDiscard] Discard of 0x{Size:X} host bytes at 0x{Start.ToInt64():X} failed with {Marshal.GetLastWin32Error()}.");
             return Released;
         }
+
+        // Makes committed memory read zero while another thread may still copy through it. A decommit would fault that
+        // thread on Windows, so Windows clears in place, which makes untouched pages resident; MADV_DONTNEED faults nothing.
+        internal static unsafe bool ZeroUnderReaders(IntPtr Start, ulong Size)
+        {
+            if (!GeneralHelper.IsWindows)
+                return Release(Start, Size);
+
+            byte* Cursor = (byte*)Start;
+            for (ulong Left = Size; Left != 0;)
+            {
+                int Chunk = (int)Math.Min(Left, 1UL << 30);
+                new Span<byte>(Cursor, Chunk).Clear();
+                Cursor += Chunk;
+                Left -= (ulong)Chunk;
+            }
+            return true;
+        }
     }
 
     internal sealed class HostDiscardRuns

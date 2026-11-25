@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation
 {
@@ -27,6 +29,7 @@ namespace Brovan.Core.Emulation
         private readonly IGuestPagingBackend _backend;
         private readonly GuestEntryGate _gate;
         private readonly GuestPageMap _pages;
+        private readonly GuestPageMap _parked;
         private readonly ulong _internalBase;
         private RankedLock? _mappingLock;
         private RankedLock? _checkedLock;
@@ -39,6 +42,7 @@ namespace Brovan.Core.Emulation
             _backend = backend;
             _gate = gate;
             _pages = pages;
+            _parked = new GuestPageMap(pages.AddressLimit);
             _internalBase = internalBase;
         }
 
@@ -237,6 +241,8 @@ namespace Brovan.Core.Emulation
         public void SetPage(ulong address, GuestPage page)
         {
             AssertMappingsHeld(nameof(SetPage));
+            if (_checkedLock != null && ParkedCount != 0 && _parked.ContainsKey(address))
+                RankedLock.FailOrder($"A page set at 0x{address:X} is still parked.");
             if (_watchedPages != 0 && _pages.TryGetValue(address, out GuestPage replaced))
                 ForgetWatchedPage(replaced);
             _pages.Set(address, page);
@@ -264,6 +270,84 @@ namespace Brovan.Core.Emulation
             _pages.Clear();
             _watchedPages = 0;
             _untouchedPages = 0;
+            _parked.Clear();
+            ParkedCount = 0;
+        }
+
+        // A parked page is a freed private page whose partition mapping stays installed for the next commit at its
+        // address. Its PTE is not present, its host page is discarded, and its record holds one reference on its block.
+        public static readonly bool ParkingDisabled = Environment.GetEnvironmentVariable("BROVAN_NO_PARKED_PAGES") == "1";
+
+        public int ParkedCount { get; private set; }
+
+        public void Park(ulong address, GuestPage page)
+        {
+            AssertMappingsHeld(nameof(Park));
+            if (_checkedLock != null && _pages.ContainsKey(address))
+                RankedLock.FailOrder($"A page parked at 0x{address:X} is still live.");
+            _parked.Set(address, page);
+            ParkedCount++;
+            ParkedPageStats.Count(ParkedPageStats.Parked);
+        }
+
+        public bool IsParkedAt(ulong address, IntPtr hostPage)
+            => ParkedCount != 0 && _parked.TryGetValue(address, out GuestPage page) && page.HostPage == hostPage;
+
+        public bool TryGetNextParked(ulong from, ulong end, out ulong address, out GuestPage page)
+        {
+            AssertMappingsHeld(nameof(TryGetNextParked));
+            if (ParkedCount != 0)
+                return _parked.TryGetNext(from, end, out address, out page);
+
+            address = 0;
+            page = null!;
+            return false;
+        }
+
+        // Takes the first parked page in [from, end). The caller gives back its block reference.
+        public bool TryTakeParked(ulong from, ulong end, ulong mapStart, IntPtr hostBase, out ulong address, out GuestPage page, out bool revived)
+        {
+            AssertMappingsHeld(nameof(TryTakeParked));
+            revived = false;
+            if (ParkedCount == 0 || !_parked.TryGetNext(from, end, out address, out page))
+            {
+                address = 0;
+                page = null!;
+                return false;
+            }
+
+            _parked.Remove(address, out _);
+            ParkedCount--;
+            revived = hostBase != IntPtr.Zero && page.HostPage.ToInt64() == hostBase.ToInt64() + (long)(address - mapStart);
+            ParkedPageStats.Count(revived ? ParkedPageStats.Revived : ParkedPageStats.Dropped);
+            return true;
+        }
+
+        // Every caller holds the mapping lock of its emulator.
+        private static class ParkedPageStats
+        {
+            internal const int Parked = 0;
+            internal const int Revived = 1;
+            internal const int Dropped = 2;
+
+            private static readonly string[] Names = { "parked", "revived", "dropped" };
+            private static readonly PeriodicStats Log = new PeriodicStats("BROVAN_PARKED_PAGE_STATS", "Parked pages:", Describe);
+            private static readonly long[] Counts = new long[Names.Length];
+
+            internal static void Count(int index)
+            {
+                if (!Log.Enabled)
+                    return;
+
+                Counts[index]++;
+                Log.Tick();
+            }
+
+            private static void Describe(StringBuilder sb)
+            {
+                for (int i = 0; i < Counts.Length; i++)
+                    sb.Append(' ').Append(Names[i]).Append('=').Append(Counts[i]);
+            }
         }
 
         private void ForgetWatchedPage(GuestPage page)

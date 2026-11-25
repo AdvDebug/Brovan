@@ -138,6 +138,9 @@ namespace Brovan.Core.Settings
         // Live WHP backing windows of one process. Each reserves 16 MiB of host addresses.
         public static int BackingWindows { get; private set; }
 
+        // Backing blocks that only parked pages keep alive.
+        public static int ParkedBlocks { get; private set; }
+
         // Host addresses of the Unicorn guest backing file. A block that does not fit gets its own host memory.
         public static ulong GuestBackingFileBytes { get; private set; }
 
@@ -215,6 +218,7 @@ namespace Brovan.Core.Settings
             ActivationContextAssemblies = (int)Pick(Off: 64, Minimal: 64, Medium: 48, High: 32, Aggressive: 16);
             ActivationContextBytes = (int)Kilobytes(Pick(Off: 1024, Minimal: 1024, Medium: 512, High: 256, Aggressive: 128));
             BackingWindows = (int)Pick(Off: 524288, Minimal: 262144, Medium: 131072, High: 65536, Aggressive: 32768);
+            ParkedBlocks = (int)Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8);
             GuestBackingFileBytes = Megabytes(Pick(Off: 65536, Minimal: 65536, Medium: 32768, High: 32768, Aggressive: 16384));
             WindowMappings = (uint)Pick(Off: 32768, Minimal: 32768, Medium: 24576, High: 16384, Aggressive: 16384);
             WindowSites = (uint)Pick(Off: 16384, Minimal: 16384, Medium: 8192, High: 4096, Aggressive: 4096);

@@ -11,15 +11,19 @@ namespace Brovan.Core.Emulation
     internal class BackingBlock
     {
         public ulong Size;
+        // The guest address of the block's first byte, for a block that backs one guest range at a fixed offset; else 0.
+        public ulong GuestBase;
         public int LivePages;
         public int AliasPages;
+        public int ParkedPages;
+        public LinkedListNode<BackingBlock> ParkedNode;
         public int Pins;
         public bool Held;
         public IDisposable Owner;
 
         public bool IsHeldOrPinned => Held || Pins > 0;
 
-        public bool IsReferenced => LivePages > 0 || AliasPages > 0 || IsHeldOrPinned;
+        public bool IsReferenced => LivePages > 0 || AliasPages > 0 || ParkedPages > 0 || IsHeldOrPinned;
 
         public bool IsDiscardable => !HostDiscard.Disabled && AliasPages == 0 && !IsHeldOrPinned && Owner == null;
     }
@@ -106,6 +110,16 @@ namespace Brovan.Core.Emulation
         void FreeBlock(IntPtr Base, T Block);
 
         void DiscardRun(HostDiscardRuns.Run Run, T Block);
+
+        // A live page of the block left: the binding's own per-page state, such as a window slot.
+        void PageLeft(T Block, IntPtr HostPage);
+
+        // An alias page left a block that can discard again: the pages that left meanwhile go now.
+        void AliasLeft(T Block);
+
+        void MarkPageDirty(ulong Guest);
+
+        void RebuildMappings();
     }
 
     internal sealed class BackingFrees<T> where T : BackingBlock
@@ -125,9 +139,13 @@ namespace Brovan.Core.Emulation
             public long SealedAt;
         }
 
+        private const ulong PageSize = 0x1000;
+
         private readonly BackingTable<T> _table;
         private readonly IBackingFreeSite<T> _site;
+        private readonly GuestPaging _paging;
         private readonly List<IntPtr> _released = new();
+        private readonly LinkedList<BackingBlock> _parkedBlocks = new();
         private readonly Queue<Batch> _sealed = new();
         private Batch _open;
         private IBackendHost _host;
@@ -136,21 +154,172 @@ namespace Brovan.Core.Emulation
 
         public readonly HostDiscardRuns Discards = new();
 
-        public BackingFrees(BackingTable<T> Table, IBackingFreeSite<T> Site)
+        public BackingFrees(BackingTable<T> Table, IBackingFreeSite<T> Site, GuestPaging Paging)
         {
             _table = Table;
             _site = Site;
+            _paging = Paging;
         }
 
         public void UseHost(IBackendHost Host) => _host = Host;
 
         public bool HasDeferred => Volatile.Read(ref _sealedCount) != 0 || _open != null;
 
-        // A worker can still copy through a page it found before the unmap, so deferred host memory goes once every other
-        // worker has passed a quiescent point.
+        // A worker can still copy through a page it found before the unmap, so deferred host memory goes once every
+        // other worker has passed a quiescent point. A page committed again before that is zeroed in place instead.
         private bool Defers => _host != null && _host.DefersHostFrees;
 
         public void Released(IntPtr Base) => _released.Add(Base);
+
+        public void AddLive(T Block, int Pages)
+        {
+            if (Block.LivePages == 0)
+                Unpark(Block);
+            Block.LivePages += Pages;
+        }
+
+        // The page has left the page map. A parked page keeps its partition mapping, and its record holds one block
+        // reference until it is revived or dropped.
+        public void ReleasePage(ulong Guest, GuestPage Page, bool Park)
+        {
+            if (Page.OwnedBacking == IntPtr.Zero || !_table.TryGet(Page.OwnedBacking, out T Block))
+                return;
+
+            if (Page.IsAlias)
+            {
+                Block.AliasPages--;
+            }
+            else
+            {
+                Block.LivePages--;
+                _site.PageLeft(Block, Page.HostPage);
+                if (Park)
+                {
+                    Block.ParkedPages++;
+                    _paging.Park(Guest, Page);
+                }
+                if (Block.LivePages == 0 && Block.ParkedPages != 0)
+                    KeepParked(Block);
+            }
+
+            if (!Block.IsReferenced)
+                Released(Page.OwnedBacking);
+            else if (!Block.IsDiscardable)
+                return;
+            else if (!Page.IsAlias)
+                Discards.Add(Page.OwnedBacking, Page.HostPage, PageSize);
+            else
+                _site.AliasLeft(Block);
+        }
+
+        // Revives the parked pages in the range that the new map gives their own host page, and drops the others. A
+        // dropped page's map goes before any PTE names its address again.
+        public bool EndParking(ulong Address, ulong Size, IntPtr HostBase)
+        {
+            bool Revived = false;
+            bool Dropped = false;
+            ulong End = Address + Size;
+            ulong Cursor = Address;
+            while (_paging.TryTakeParked(Cursor, End, Address, HostBase, out ulong Guest, out GuestPage Parked, out bool Same))
+            {
+                ReleaseParked(Parked);
+                Revived |= Same;
+                if (!Same)
+                {
+                    Dropped = true;
+                    _site.MarkPageDirty(Guest);
+                }
+                Cursor = Guest + PageSize;
+            }
+
+            if (Dropped)
+                _site.RebuildMappings();
+            return Revived;
+        }
+
+        // The caller removes the maps of the range: by the rebuild that MarkDirty asks for, or by an unmap it already made.
+        public void DropParked(ulong Start, ulong End, bool MarkDirty)
+        {
+            ulong Cursor = Start;
+            while (_paging.TryTakeParked(Cursor, End, Start, IntPtr.Zero, out ulong Guest, out GuestPage Parked, out _))
+            {
+                ReleaseParked(Parked);
+                if (MarkDirty)
+                    _site.MarkPageDirty(Guest);
+                Cursor = Guest + PageSize;
+            }
+        }
+
+        // A commit of a range whose every page is parked in one guest-placed block takes those pages again, zeroed now.
+        public bool TryReviveRange(ulong Address, ulong Size, out IntPtr Base, out IntPtr Host)
+        {
+            Base = IntPtr.Zero;
+            Host = IntPtr.Zero;
+            if (!_paging.TryGetNextParked(Address, Address + PageSize, out _, out GuestPage First)
+                || !_table.TryGet(First.OwnedBacking, out T Block)
+                || Block.GuestBase == 0
+                || !Block.IsDiscardable
+                || Address < Block.GuestBase
+                || Size > Block.Size - (Address - Block.GuestBase))
+                return false;
+
+            IntPtr Start = new IntPtr(First.OwnedBacking.ToInt64() + (long)(Address - Block.GuestBase));
+            for (ulong Offset = 0; Offset < Size; Offset += PageSize)
+            {
+                if (!_paging.IsParkedAt(Address + Offset, new IntPtr(Start.ToInt64() + (long)Offset)))
+                    return false;
+            }
+
+            if (!HostDiscard.ZeroUnderReaders(Start, Size))
+                return false;
+
+            AddLive(Block, (int)(Size / PageSize));
+            Base = First.OwnedBacking;
+            Host = Start;
+            return true;
+        }
+
+        private void ReleaseParked(GuestPage Parked)
+        {
+            if (!_table.TryGet(Parked.OwnedBacking, out T Block))
+                return;
+
+            if (--Block.ParkedPages == 0)
+                Unpark(Block);
+            if (!Block.IsReferenced)
+                Released(Parked.OwnedBacking);
+        }
+
+        // A block whose live pages all left while it has parked pages stays for the next commit, up to
+        // MemoryBudget.ParkedBlocks blocks, oldest first out.
+        private void KeepParked(T Block)
+        {
+            if (Block.ParkedNode == null)
+                Block.ParkedNode = _parkedBlocks.AddLast(Block);
+
+            while (_parkedBlocks.Count > MemoryBudget.ParkedBlocks)
+            {
+                T Evicted = (T)_parkedBlocks.First!.Value;
+                Unpark(Evicted);
+                DropParked(Evicted.GuestBase, Evicted.GuestBase + Evicted.Size, true);
+            }
+        }
+
+        private void Unpark(T Block)
+        {
+            if (Block.ParkedNode == null)
+                return;
+
+            _parkedBlocks.Remove(Block.ParkedNode);
+            Block.ParkedNode = null;
+        }
+
+        public void Clear()
+        {
+            foreach (BackingBlock Block in _parkedBlocks)
+                Block.ParkedNode = null;
+            _parkedBlocks.Clear();
+        }
 
         // A block that was never mapped has no reader to wait for.
         public void FreeUnpublished(IntPtr Base, T Block)
