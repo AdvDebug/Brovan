@@ -201,23 +201,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        // NT: a file takes one binding and a synchronous file none, both refused before the port is looked up. Only a
+        // binding writes the IO_STATUS_BLOCK.
         private static NTSTATUS HandleFileCompletionInformation(BinaryEmulator Instance, WinFile FileObj, ulong IoStatusBlock, ulong FileInformation, uint Length)
         {
             uint PointerSize = (uint)Instance.WinHelper.PointerSize;
             if (Length < PointerSize * 2)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INFO_LENGTH_MISMATCH, 0);
                 return NTSTATUS.STATUS_INFO_LENGTH_MISMATCH;
-            }
+
+            if (FileObj.CompletionHandle != 0 || FileObj.Synchronous)
+                return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             ulong Port = Instance.WinHelper.ReadPointer(FileInformation);
             ulong Key = Instance.WinHelper.ReadPointer(FileInformation + PointerSize);
 
-            if (Instance.WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(Port) == null)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlock, NTSTATUS.STATUS_INVALID_HANDLE, 0);
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-            }
+            NTSTATUS Status = Instance.WinHelper.ReferenceObjectByHandle(Port, AccessMask.None, out WinIoCompletion _);
+            if (Status != NTSTATUS.STATUS_SUCCESS)
+                return Status;
 
             FileObj.BindCompletionPort(Port, Key);
 
