@@ -11,6 +11,7 @@ namespace Brovan.Core.Emulation
         internal const int BigRank = 1;
         internal const int DeviceRank = 2;
         internal const int FileObjectRank = 9;
+        internal const int AddressSpaceRank = 11;
         internal const int SchedulerRank = 12;
         internal const int BackendMappingRank = 13;
 

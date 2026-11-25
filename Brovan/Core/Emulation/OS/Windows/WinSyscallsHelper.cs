@@ -2414,6 +2414,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal NTSTATUS LockPages(ulong Start, ulong End)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             ulong First = Start >> 12;
             ulong Last = End >> 12;
             if (Last - First > MaxLockedPages)
@@ -2437,6 +2438,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal NTSTATUS UnlockPages(ulong Start, ulong End)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             ulong First = Start >> 12;
             ulong Last = End >> 12;
             if (Last - First > (ulong)LockedPages.Count)
@@ -2456,6 +2458,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal void ForgetLockedPages(ulong Start, ulong End)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             if (LockedPages.Count == 0)
                 return;
 
@@ -2475,6 +2478,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void ForgetLockedRegion(ulong Address)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             if (LockedPages.Count != 0 && Emulator.TryFindMemoryRegion(Address, out MemoryRegion Region))
                 ForgetLockedPages(Region.BaseAddress, Region.BaseAddress + Region.Size);
         }
@@ -3751,13 +3755,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             internal static readonly ulong[] SingleZeroParameter = new ulong[1];
         }
 
-        private readonly record struct SectionRange(ulong Base, ulong End, bool GuestUnmaps);
+        // Section is the mapped section of a view, null for a system view or a section's backing range.
+        private readonly record struct SectionRange(ulong Base, ulong End, bool GuestUnmaps, WinSection? Section);
 
-        // Sorted by base and disjoint.
+        // Sorted by base and disjoint. The address space lock covers it, the section views and their counts.
         private readonly List<SectionRange> SectionRanges = new();
 
         private int FindSectionRangeIndex(ulong Address)
         {
+            Emulator.AddressSpace.AssertLocked(nameof(FindSectionRangeIndex));
             int Low = 0;
             int High = SectionRanges.Count - 1;
             int Found = -1;
@@ -3779,25 +3785,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Found;
         }
 
-        internal void TrackSectionRange(ulong Base, ulong Size, bool GuestUnmaps = false)
+        internal void TrackSectionRange(ulong Base, ulong Size, bool GuestUnmaps = false, WinSection? Section = null)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             int Index = FindSectionRangeIndex(Base);
             if (Index >= 0 && SectionRanges[Index].Base == Base)
                 return;
 
-            SectionRanges.Insert(Index + 1, new SectionRange(Base, Base + Size, GuestUnmaps));
+            SectionRanges.Insert(Index + 1, new SectionRange(Base, Base + Size, GuestUnmaps, Section));
         }
 
         internal void UntrackSectionRange(ulong Base)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             int Index = FindSectionRangeIndex(Base);
             if (Index >= 0 && SectionRanges[Index].Base == Base)
                 SectionRanges.RemoveAt(Index);
         }
 
         internal bool TryMapStorage(IntPtr Storage, ulong Size, out ulong Base)
-            => Emulator.TryFindFreeBaseAddress(Size, AllocationGranularity, Emulator.BaseAddress, Emulator.MaxAddress, out Base)
+        {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
+            return Emulator.TryFindFreeBaseAddress(Size, AllocationGranularity, Emulator.BaseAddress, Emulator.MaxAddress, out Base)
                 && Emulator.MapSharedMemoryRegion(Base, Size, MemoryProtection.ReadWrite, Storage, PAGE_READWRITE, Base);
+        }
 
         // A guest that freed the view may have put its own memory at the address.
         internal void UnmapStorage(ulong Base, IntPtr Storage)
@@ -3821,6 +3832,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // The guest may have unmapped the view and put another one at its address.
         internal void UnmapSystemView(ulong Base, IntPtr Storage)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             int Index = FindSectionRangeIndex(Base);
             if (Base != 0 && Index >= 0 && SectionRanges[Index].Base == Base && Emulator.GetHostPointer(Base, PageSize) == Storage)
                 RemoveSystemView(Index);
@@ -3836,12 +3848,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool IsSectionViewAddress(ulong Address)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             int Index = FindSectionRangeIndex(Address);
             return Index >= 0 && Address < SectionRanges[Index].End;
         }
 
         internal bool TryFindSectionView(ulong Address, out WinSectionView View)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             for (int Index = 0; Index < WinSections.Count; Index++)
             {
                 if (WinSections[Index]?.TryFindView(Address, out View) == true)
@@ -3854,32 +3868,29 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void MirrorCommitToSectionAliases(ulong Address, ulong Size)
         {
-            for (int Index = 0; Index < WinSections.Count; Index++)
-            {
-                WinSection Section = WinSections[Index];
-                if (Section?.Views == null || Section.Views.Count < 2)
-                    continue;
-
-                if (!Section.TryFindOwningView(Address, Size, out ulong SectionOffset))
-                    continue;
-
-                for (int ViewIndex = 0; ViewIndex < Section.Views.Count; ViewIndex++)
-                {
-                    WinSectionView Alias = Section.Views[ViewIndex];
-                    if (!Alias.IsAlias || SectionOffset < Alias.Offset || SectionOffset - Alias.Offset + Size > Alias.Size)
-                        continue;
-
-                    ulong AliasAddress = Alias.Base + (SectionOffset - Alias.Offset);
-                    uint AliasProtect = (uint)ConvertInternalToWinProtect(Alias.Protection);
-                    Emulator.MapSharedMemoryRange(AliasAddress, Address, Size, Alias.Protection, AliasProtect, Alias.Base);
-                }
-
+            int RangeIndex = FindSectionRangeIndex(Address);
+            if (RangeIndex < 0 || Address >= SectionRanges[RangeIndex].End)
                 return;
+
+            WinSection? Section = SectionRanges[RangeIndex].Section;
+            if (Section?.Views == null || Section.Views.Count < 2 || !Section.TryFindOwningView(Address, Size, out ulong SectionOffset))
+                return;
+
+            for (int ViewIndex = 0; ViewIndex < Section.Views.Count; ViewIndex++)
+            {
+                WinSectionView Alias = Section.Views[ViewIndex];
+                if (!Alias.IsAlias || SectionOffset < Alias.Offset || SectionOffset - Alias.Offset + Size > Alias.Size)
+                    continue;
+
+                ulong AliasAddress = Alias.Base + (SectionOffset - Alias.Offset);
+                uint AliasProtect = (uint)ConvertInternalToWinProtect(Alias.Protection);
+                Emulator.MapSharedMemoryRange(AliasAddress, Address, Size, Alias.Protection, AliasProtect, Alias.Base);
             }
         }
 
         public bool UnmapViewOfSection(ulong BaseAddress)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             if (BaseAddress == 0)
                 return false;
 
@@ -3902,8 +3913,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                     if (Emulator._emulator.UnmapMemory(Region.BaseAddress, Size))
                     {
-                        Emulator.RemoveMemoryRegionAt(i);
-                        Emulator.AddFreedRegion(Region.BaseAddress, Size);
+                        using (Emulator.AddressSpace.Change())
+                        {
+                            Emulator.RemoveMemoryRegionAt(i);
+                            Emulator.AddFreedRegion(Region.BaseAddress, Size);
+                        }
                         UnmappedAny = true;
                     }
                 }
@@ -3986,6 +4000,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal void ReleaseSectionIfUnreferenced(WinSection Section)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             if (Section.MappedViewCount != 0)
                 return;
 
@@ -11564,6 +11579,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Moves Storage, so host code must not keep a pointer into it.
         internal unsafe bool TryShareSectionStorage(WinSection Section)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             if (Section.SharedMemoryPath != null)
                 return true;
 

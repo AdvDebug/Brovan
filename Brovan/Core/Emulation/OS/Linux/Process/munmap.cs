@@ -17,6 +17,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             ulong AlignedLength = Instance.AlignToPageSize(length);
             ulong End = addr + AlignedLength;
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             for (int i = Instance._memory.Count - 1; i >= 0; i--)
             {
                 MemoryRegion Region = Instance._memory[i];
@@ -39,25 +40,28 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                     return;
                 }
 
-                Instance.RemoveMemoryRegionAt(i);
-                Instance.AddFreedRegion(UnmapStart, UnmapSize);
-                if (RegionStart < UnmapStart)
+                using (Instance.AddressSpace.Change())
                 {
-                    MemoryRegion Left = Region;
-                    Left.Size = UnmapStart - RegionStart;
-                    Left.RequestedSize = Left.Size;
-                    Left.PoisonedMemory = default;
-                    Instance.AddMemoryRegion(Left);
-                }
+                    Instance.RemoveMemoryRegionAt(i);
+                    Instance.AddFreedRegion(UnmapStart, UnmapSize);
+                    if (RegionStart < UnmapStart)
+                    {
+                        MemoryRegion Left = Region;
+                        Left.Size = UnmapStart - RegionStart;
+                        Left.RequestedSize = Left.Size;
+                        Left.PoisonedMemory = default;
+                        Instance.AddMemoryRegion(Left);
+                    }
 
-                if (UnmapEnd < RegionEnd)
-                {
-                    MemoryRegion Right = Region;
-                    Right.BaseAddress = UnmapEnd;
-                    Right.Size = RegionEnd - UnmapEnd;
-                    Right.RequestedSize = Right.Size;
-                    Right.PoisonedMemory = default;
-                    Instance.AddMemoryRegion(Right);
+                    if (UnmapEnd < RegionEnd)
+                    {
+                        MemoryRegion Right = Region;
+                        Right.BaseAddress = UnmapEnd;
+                        Right.Size = RegionEnd - UnmapEnd;
+                        Right.RequestedSize = Right.Size;
+                        Right.PoisonedMemory = default;
+                        Instance.AddMemoryRegion(Right);
+                    }
                 }
             }
 

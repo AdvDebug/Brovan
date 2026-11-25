@@ -35,6 +35,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
         public void Handle(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             ulong addr = Context.Arg0;
             ulong length = Context.Arg1;
             uint prot = (uint)Context.Arg2;

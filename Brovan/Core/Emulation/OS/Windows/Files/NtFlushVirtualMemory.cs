@@ -86,7 +86,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (BaseAddress == 0 || !Instance.IsRegionMapped(BaseAddress, 1))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            WinSection Section = FindSectionByAddress(Instance, BaseAddress, out ulong SectionOffset, out ulong ViewRemaining);
+            WinSection Section;
+            ulong SectionOffset;
+            ulong ViewRemaining;
+            using (Instance.AddressSpace.Hold())
+                Section = FindSectionByAddress(Instance, BaseAddress, out SectionOffset, out ViewRemaining);
             if (Section == null)
                 return NTSTATUS.STATUS_SUCCESS;
 

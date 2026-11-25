@@ -2359,6 +2359,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool FromPlaceholder;
     }
 
+    // Views, the view counts, BackingAddress, Storage and SharedMemoryPath change under the address space lock.
     public class WinSection : IHandleObject
     {
         public string Name;

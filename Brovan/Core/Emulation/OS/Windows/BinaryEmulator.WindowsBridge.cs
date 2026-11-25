@@ -1513,7 +1513,7 @@ namespace Brovan.Core.Emulation
         /// <paramref name="Last"/> and returns the index of the last entry that survived. Slots between
         /// the returned index and <paramref name="Last"/> are stale and belong to the caller to drop.
         /// </summary>
-        private static int MergeWinRegionWindow(List<MemoryRegion> Regions, int First, int Last)
+        private static int MergeWinRegionWindow(Span<MemoryRegion> Regions, int First, int Last)
         {
             int Write = First;
             for (int Read = First + 1; Read <= Last; Read++)
@@ -1676,6 +1676,7 @@ namespace Brovan.Core.Emulation
 
         private bool UnguardPage(ulong Address, MemoryRegion GuardedRegion)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             ulong PageBase = Address & ~(PageSize - 1);
             if (!_emulator.SetMemoryProtection(PageBase, PageSize, GuardedRegion.Protections))
                 return false;
@@ -1718,9 +1719,12 @@ namespace Brovan.Core.Emulation
                     Replacement.Add(ClipRegion(Region, MiddleEnd, RegionEnd));
             }
 
-            _memory.RemoveRange(First, Last - First);
-            _memory.InsertRange(First, Replacement);
-            MergeAllWinRegions();
+            using (AddressSpace.Change())
+            {
+                _memory.RemoveRange(First, Last - First);
+                _memory.InsertRange(First, Replacement);
+                MergeAllWinRegions();
+            }
             return true;
         }
 
@@ -1730,6 +1734,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         private void SpliceWinProtectionRange(ulong AlignedBase, ulong AlignedEnd, MemoryProtection Protection, uint WinProtect, SpecialProtections Special)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             if (AlignedEnd <= AlignedBase || _memory.Count == 0)
                 return;
 
@@ -1786,6 +1791,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         private void MergeAdjacentWinRegions(int First, int Last)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             if (First < 0)
                 First = 0;
             if (Last >= _memory.Count)
@@ -1793,7 +1799,7 @@ namespace Brovan.Core.Emulation
             if (Last <= First)
                 return;
 
-            int Kept = MergeWinRegionWindow(_memory, First, Last);
+            int Kept = MergeWinRegionWindow(_memory.AsSpan(), First, Last);
             if (Kept < Last)
                 _memory.RemoveRange(Kept + 1, Last - Kept);
         }
@@ -1803,6 +1809,7 @@ namespace Brovan.Core.Emulation
 
         private void FindWinRegionWindow(ulong Start, ulong End, out int First, out int Last)
         {
+            AddressSpace.AssertLocked(nameof(FindWinRegionWindow));
             First = FindFirstRegionStartingBefore(Start) + 1;
             while (First > 0 && GetRangeEnd(_memory[First - 1].BaseAddress, _memory[First - 1].Size) > Start)
                 First--;
@@ -1815,6 +1822,7 @@ namespace Brovan.Core.Emulation
         internal bool ProtectMemoryRange(ulong Address, ulong Size, MemoryProtection Protection, uint WinProtect = 0,
             SpecialProtections Special = SpecialProtections.None)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             if (Size == 0)
                 return true;
 
@@ -2152,41 +2160,44 @@ namespace Brovan.Core.Emulation
 
             bool IsFree(ulong Base) => Base != 0 && Base < UserEnd && ImageSize <= UserEnd - Base && !IsRegionMapped(Base, ImageSize);
 
-            if (RequestedBase != 0)
-            {
-                if (!IsFree(RequestedBase))
-                    return null;
-
-                BaseAddress = RequestedBase;
-            }
-            else if (IsFree(ImageBase))
-                BaseAddress = ImageBase;
-            else if (IsFree(PreferredBase))
-                BaseAddress = PreferredBase;
-            else
-                BaseAddress = GetSuitableBaseAddress(ImageSize, WinSysHelper.AllocationGranularity);
-
-            if (BaseAddress == 0)
-                return null;
-
             WinModule Module = new WinModule();
-            if (MapBySections)
+            using (AddressSpace.Hold())
             {
-                BaseAddress = MapPeImageBySections(Library, BaseAddress, Module);
+                if (RequestedBase != 0)
+                {
+                    if (!IsFree(RequestedBase))
+                        return null;
+
+                    BaseAddress = RequestedBase;
+                }
+                else if (IsFree(ImageBase))
+                    BaseAddress = ImageBase;
+                else if (IsFree(PreferredBase))
+                    BaseAddress = PreferredBase;
+                else
+                    BaseAddress = GetSuitableBaseAddress(ImageSize, WinSysHelper.AllocationGranularity);
+
                 if (BaseAddress == 0)
                     return null;
-            }
-            else
-            {
-                List<PeImageExtent> Extents = GetPeImageExtents(Library, ImageSize);
-                if (!MapPeImageFromLayoutCache(Library, BaseAddress, ImageSize, Module, Extents))
+
+                if (MapBySections)
                 {
-                    BaseAddress = MapWinMemoryRegion(BaseAddress, ImageSize, MemoryProtection.ReadWrite, SpecialProtections.None, AllocationType.Image, BaseAddress);
+                    BaseAddress = MapPeImageBySections(Library, BaseAddress, Module);
                     if (BaseAddress == 0)
                         return null;
+                }
+                else
+                {
+                    List<PeImageExtent> Extents = GetPeImageExtents(Library, ImageSize);
+                    if (!MapPeImageFromLayoutCache(Library, BaseAddress, ImageSize, Module, Extents))
+                    {
+                        BaseAddress = MapWinMemoryRegion(BaseAddress, ImageSize, MemoryProtection.ReadWrite, SpecialProtections.None, AllocationType.Image, BaseAddress);
+                        if (BaseAddress == 0)
+                            return null;
 
-                    if (!WritePeImageHeadersAndSections(Library, BaseAddress, ImageSize, Module, Extents))
-                        return null;
+                        if (!WritePeImageHeadersAndSections(Library, BaseAddress, ImageSize, Module, Extents))
+                            return null;
+                    }
                 }
             }
 
@@ -2227,6 +2238,7 @@ namespace Brovan.Core.Emulation
 
         public bool ReserveMemory(ulong BaseAddress, ulong Size, uint Protect, bool WriteWatch = false)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             Size = AlignUp(Size, PageSize);
 
             if (IsRegionInUse(BaseAddress, Size))
@@ -2282,6 +2294,7 @@ namespace Brovan.Core.Emulation
 
         public bool ReservePlaceholder(ulong BaseAddress, ulong Size)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             Size = AlignUp(Size, PageSize);
 
             if (WinHelper == null || IsRegionInUse(BaseAddress, Size))
@@ -2294,6 +2307,7 @@ namespace Brovan.Core.Emulation
 
         public bool ReplacePlaceholder(ulong BaseAddress, ulong Size, uint Protect, bool WriteWatch)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             if (WinHelper == null || !TryFindMemoryRegionByBase(BaseAddress, out int Index, out MemoryRegion Region) ||
                 !Region.IsPlaceholder || Region.Size != Size)
                 return false;
@@ -2315,6 +2329,7 @@ namespace Brovan.Core.Emulation
 
         private void MarkAllocation(ulong AllocationBase, bool NoChange)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             if (!TryFindMemoryRegionByBase(AllocationBase, out int Index, out MemoryRegion Region) || Region.AllocationBase != AllocationBase)
                 return;
 
@@ -2331,6 +2346,7 @@ namespace Brovan.Core.Emulation
 
         public bool SplitPlaceholder(ulong Start, ulong End, bool Release)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             if (!TryFindMemoryRegionIndex(Start, out int Index))
                 return false;
 
@@ -2357,6 +2373,7 @@ namespace Brovan.Core.Emulation
 
         public bool CoalescePlaceholders(ulong Start, ulong End)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             if (!TryFindMemoryRegionByBase(Start, out int First, out MemoryRegion Region) || !Region.IsPlaceholder)
                 return false;
 
@@ -2385,6 +2402,7 @@ namespace Brovan.Core.Emulation
 
         public bool ConvertToPlaceholder(ulong Start, ulong End)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             if (!TryFindMemoryRegion(Start, out MemoryRegion Anchor) || !Anchor.FromPlaceholder)
                 return false;
 
@@ -2392,47 +2410,51 @@ namespace Brovan.Core.Emulation
             if (!DecommitMemory(Start, End - Start))
                 return false;
 
-            FindWinRegionWindow(Start, End, out int First, out int Last);
-            if (Last == First)
-                return false;
-
-            MemoryRegion Head = _memory[First];
-            MemoryRegion Tail = _memory[Last - 1];
-            ulong TailEnd = GetRangeEnd(Tail.BaseAddress, Tail.Size);
-
-            _memory.RemoveRange(First, Last - First);
-
-            int Insert = First;
-            if (Head.BaseAddress < Start)
+            using (AddressSpace.Change())
             {
-                Head.Size = Start - Head.BaseAddress;
-                Head.RequestedSize = Head.Size;
-                _memory.Insert(Insert++, Head);
+                FindWinRegionWindow(Start, End, out int First, out int Last);
+                if (Last == First)
+                    return false;
+
+                MemoryRegion Head = _memory[First];
+                MemoryRegion Tail = _memory[Last - 1];
+                ulong TailEnd = GetRangeEnd(Tail.BaseAddress, Tail.Size);
+
+                _memory.RemoveRange(First, Last - First);
+
+                int Insert = First;
+                if (Head.BaseAddress < Start)
+                {
+                    Head.Size = Start - Head.BaseAddress;
+                    Head.RequestedSize = Head.Size;
+                    _memory.Insert(Insert++, Head);
+                }
+
+                _memory.Insert(Insert++, MakePlaceholderRegion(Start, End - Start));
+
+                if (TailEnd > End)
+                {
+                    Tail.BaseAddress = End;
+                    Tail.Size = TailEnd - End;
+                    Tail.RequestedSize = Tail.Size;
+                    _memory.Insert(Insert, Tail);
+                }
+
+                // NT: what is left above End is an allocation of its own.
+                for (int i = Insert; i < _memory.Count && _memory[i].AllocationBase == AllocationBase; i++)
+                {
+                    MemoryRegion Above = _memory[i];
+                    Above.AllocationBase = End;
+                    _memory[i] = Above;
+                }
+
+                return true;
             }
-
-            _memory.Insert(Insert++, MakePlaceholderRegion(Start, End - Start));
-
-            if (TailEnd > End)
-            {
-                Tail.BaseAddress = End;
-                Tail.Size = TailEnd - End;
-                Tail.RequestedSize = Tail.Size;
-                _memory.Insert(Insert, Tail);
-            }
-
-            // NT: what is left above End is an allocation of its own.
-            for (int i = Insert; i < _memory.Count && _memory[i].AllocationBase == AllocationBase; i++)
-            {
-                MemoryRegion Above = _memory[i];
-                Above.AllocationBase = End;
-                _memory[i] = Above;
-            }
-
-            return true;
         }
 
         public bool MapSecuredPage(ulong BaseAddress, bool HostMapped)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             const uint PAGE_READONLY = 0x02;
 
             if (!HostMapped && !_emulator.MapMemory(BaseAddress, PageSize, MemoryProtection.Read))
@@ -2461,6 +2483,7 @@ namespace Brovan.Core.Emulation
 
         internal NTSTATUS CheckSecuredRange(ulong BaseAddress, ulong Size, NTSTATUS Refusal, bool RefuseNoChange = false)
         {
+            AddressSpace.AssertLocked(nameof(CheckSecuredRange));
             ulong End = GetRangeEnd(BaseAddress, Size);
             FindWinRegionWindow(BaseAddress, End, out int First, out int Last);
 
@@ -2486,6 +2509,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public bool MapSharedMemoryRegion(ulong BaseAddress, ulong Size, MemoryProtection Protection, IntPtr HostPointer, uint AllocationProtect, ulong AllocationBase)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             ulong AlignedSize = AlignUp(Size, PageSize);
             if (AlignedSize == 0 || WinHelper == null)
                 return false;
@@ -2493,25 +2517,28 @@ namespace Brovan.Core.Emulation
             if (!_emulator.MapMemoryShared(BaseAddress, AlignedSize, Protection, HostPointer))
                 return false;
 
-            ConsumeFreedMemoryRange(BaseAddress, AlignedSize);
-            CarveMemoryRange(BaseAddress, AlignedSize);
-
-            uint WinProtect = (uint)WinHelper.ConvertInternalToWinProtect(Protection);
-            AddMemoryRegion(new MemoryRegion
+            using (AddressSpace.Change())
             {
-                BaseAddress = BaseAddress,
-                Size = AlignedSize,
-                RequestedSize = AlignedSize,
-                AllocationBase = AllocationBase != 0 ? AllocationBase : BaseAddress,
-                AllocationProtect = AllocationProtect != 0 ? AllocationProtect : WinProtect,
-                Protect = WinProtect,
-                IsReserved = true,
-                IsCommitted = true,
-                InitialProtections = Protection,
-                Protections = Protection,
-                SpecialProtections = SpecialProtections.None,
-                Flags = AllocationType.Commited
-            });
+                ConsumeFreedMemoryRange(BaseAddress, AlignedSize);
+                CarveMemoryRange(BaseAddress, AlignedSize);
+
+                uint WinProtect = (uint)WinHelper.ConvertInternalToWinProtect(Protection);
+                AddMemoryRegion(new MemoryRegion
+                {
+                    BaseAddress = BaseAddress,
+                    Size = AlignedSize,
+                    RequestedSize = AlignedSize,
+                    AllocationBase = AllocationBase != 0 ? AllocationBase : BaseAddress,
+                    AllocationProtect = AllocationProtect != 0 ? AllocationProtect : WinProtect,
+                    Protect = WinProtect,
+                    IsReserved = true,
+                    IsCommitted = true,
+                    InitialProtections = Protection,
+                    Protections = Protection,
+                    SpecialProtections = SpecialProtections.None,
+                    Flags = AllocationType.Commited
+                });
+            }
 
             return true;
         }
@@ -2521,6 +2548,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public bool RebackRegionWithHostMemory(ulong BaseAddress, ulong Size, IntPtr HostPointer)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             if (HostPointer == IntPtr.Zero || Size == 0 || (BaseAddress & (PageSize - 1)) != 0
                 || (Size & (PageSize - 1)) != 0 || ((ulong)HostPointer & (PageSize - 1)) != 0)
                 return false;
@@ -2542,6 +2570,7 @@ namespace Brovan.Core.Emulation
 
         internal bool RebackRangeWithHostMemory(ulong BaseAddress, ulong Size, IntPtr HostPointer)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             ulong End = GetRangeEnd(BaseAddress, Size);
             ulong Address = BaseAddress;
 
@@ -2566,6 +2595,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public bool RestoreRegionBacking(ulong BaseAddress, ulong Size)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             if (Size == 0 || (BaseAddress & (PageSize - 1)) != 0 || (Size & (PageSize - 1)) != 0)
                 return false;
 
@@ -2581,6 +2611,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         public bool MapSharedMemoryRange(ulong Alias, ulong Address, ulong Size, MemoryProtection Protection, uint AllocationProtect, ulong AllocationBase = 0)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             ulong AlignedSize = AlignUp(Size, PageSize);
             if (AlignedSize == 0 || WinHelper == null)
                 return false;
@@ -2627,6 +2658,7 @@ namespace Brovan.Core.Emulation
 
         private void ReserveSharedMemoryRegion(ulong BaseAddress, ulong Size, uint AllocationProtect, ulong AllocationBase)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             if (TryFindMemoryRegionByBase(BaseAddress, out _, out MemoryRegion Existing) && Existing.Size == Size)
                 return;
 
@@ -2652,6 +2684,7 @@ namespace Brovan.Core.Emulation
 
         private void CarveMemoryRange(ulong BaseAddress, ulong Size)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             ulong End = GetRangeEnd(BaseAddress, Size);
             List<MemoryRegion> Overlapping = new List<MemoryRegion>();
             AddOverlappingMemoryRegions(BaseAddress, Size, Overlapping);
@@ -2686,6 +2719,7 @@ namespace Brovan.Core.Emulation
 
         public bool UnmapMemoryRuns(ulong BaseAddress, ulong Size)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             bool UnmappedAny = false;
 
             for (ulong Offset = 0; Offset < Size;)
@@ -2709,6 +2743,7 @@ namespace Brovan.Core.Emulation
 
         public bool CommitMemory(ulong BaseAddress, ulong Size, uint Protect)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             ulong AlignedBase = BaseAddress & ~(PageSize - 1);
             ulong AlignedEnd = AlignUp(GetRangeEnd(BaseAddress, Size), PageSize);
             Size = AlignedEnd - AlignedBase;
@@ -2750,72 +2785,75 @@ namespace Brovan.Core.Emulation
 
             MemoryProtection AllocationProt = WinHelper.ConvertWinProtectToInternal(Region.AllocationProtect);
 
-            RemoveMemoryRegion(Region);
-
-            ulong Before = BaseAddress - Region.BaseAddress;
-            ulong After = (Region.BaseAddress + Region.Size) - (BaseAddress + Size);
-
-            if (Before > 0)
+            using (AddressSpace.Change())
             {
+                RemoveMemoryRegion(Region);
+
+                ulong Before = BaseAddress - Region.BaseAddress;
+                ulong After = (Region.BaseAddress + Region.Size) - (BaseAddress + Size);
+
+                if (Before > 0)
+                {
+                    AddMemoryRegion(new MemoryRegion
+                    {
+                        BaseAddress = Region.BaseAddress,
+                        Size = Before,
+                        RequestedSize = Before,
+                        AllocationBase = Region.AllocationBase,
+                        AllocationProtect = Region.AllocationProtect,
+                        Protect = Region.AllocationProtect,
+                        IsReserved = true,
+                        IsCommitted = false,
+                        IsReset = Region.IsReset,
+                        IsWriteWatch = Region.IsWriteWatch,
+                        FromPlaceholder = Region.FromPlaceholder,
+                        InitialProtections = AllocationProt,
+                        Protections = MemoryProtection.None,
+                        SpecialProtections = SpecialProtections.None,
+                        Flags = AllocationType.Reserved
+                    });
+                }
+
                 AddMemoryRegion(new MemoryRegion
                 {
-                    BaseAddress = Region.BaseAddress,
-                    Size = Before,
-                    RequestedSize = Before,
+                    BaseAddress = BaseAddress,
+                    Size = Size,
+                    RequestedSize = Size,
                     AllocationBase = Region.AllocationBase,
                     AllocationProtect = Region.AllocationProtect,
-                    Protect = Region.AllocationProtect,
+                    Protect = Protect,
                     IsReserved = true,
-                    IsCommitted = false,
+                    IsCommitted = true,
                     IsReset = Region.IsReset,
                     IsWriteWatch = Region.IsWriteWatch,
                     FromPlaceholder = Region.FromPlaceholder,
                     InitialProtections = AllocationProt,
-                    Protections = MemoryProtection.None,
-                    SpecialProtections = SpecialProtections.None,
-                    Flags = AllocationType.Reserved
+                    Protections = NewProt,
+                    SpecialProtections = Special,
+                    Flags = AllocationType.Commited
                 });
-            }
 
-            AddMemoryRegion(new MemoryRegion
-            {
-                BaseAddress = BaseAddress,
-                Size = Size,
-                RequestedSize = Size,
-                AllocationBase = Region.AllocationBase,
-                AllocationProtect = Region.AllocationProtect,
-                Protect = Protect,
-                IsReserved = true,
-                IsCommitted = true,
-                IsReset = Region.IsReset,
-                IsWriteWatch = Region.IsWriteWatch,
-                FromPlaceholder = Region.FromPlaceholder,
-                InitialProtections = AllocationProt,
-                Protections = NewProt,
-                SpecialProtections = Special,
-                Flags = AllocationType.Commited
-            });
-
-            if (After > 0)
-            {
-                AddMemoryRegion(new MemoryRegion
+                if (After > 0)
                 {
-                    BaseAddress = BaseAddress + Size,
-                    Size = After,
-                    RequestedSize = After,
-                    AllocationBase = Region.AllocationBase,
-                    AllocationProtect = Region.AllocationProtect,
-                    Protect = Region.AllocationProtect,
-                    IsReserved = true,
-                    IsCommitted = false,
-                    IsReset = Region.IsReset,
-                    IsWriteWatch = Region.IsWriteWatch,
-                    FromPlaceholder = Region.FromPlaceholder,
-                    InitialProtections = AllocationProt,
-                    Protections = MemoryProtection.None,
-                    SpecialProtections = SpecialProtections.None,
-                    Flags = AllocationType.Reserved
-                });
+                    AddMemoryRegion(new MemoryRegion
+                    {
+                        BaseAddress = BaseAddress + Size,
+                        Size = After,
+                        RequestedSize = After,
+                        AllocationBase = Region.AllocationBase,
+                        AllocationProtect = Region.AllocationProtect,
+                        Protect = Region.AllocationProtect,
+                        IsReserved = true,
+                        IsCommitted = false,
+                        IsReset = Region.IsReset,
+                        IsWriteWatch = Region.IsWriteWatch,
+                        FromPlaceholder = Region.FromPlaceholder,
+                        InitialProtections = AllocationProt,
+                        Protections = MemoryProtection.None,
+                        SpecialProtections = SpecialProtections.None,
+                        Flags = AllocationType.Reserved
+                    });
+                }
             }
 
             WinHelper.MirrorCommitToSectionAliases(BaseAddress, Size);
@@ -2829,6 +2867,7 @@ namespace Brovan.Core.Emulation
         /// </summary>
         private bool TryCommitSpanningRange(ulong BaseAddress, ulong Size, uint Protect, out bool SingleRegion)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             SingleRegion = false;
 
             ulong End = BaseAddress + Size;
@@ -2895,6 +2934,7 @@ namespace Brovan.Core.Emulation
 
         private void MarkRangeCommitted(ulong BaseAddress, ulong Size)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             ulong End = BaseAddress + Size;
 
             for (int i = FindFirstRegionStartingBefore(BaseAddress) + 1; i < _memory.Count && _memory[i].BaseAddress <= End; i++)
@@ -2928,6 +2968,7 @@ namespace Brovan.Core.Emulation
 
         internal bool IsWriteWatchRange(ulong Start, ulong Last)
         {
+            AddressSpace.AssertLocked(nameof(IsWriteWatchRange));
             if (!TryFindMemoryRegionIndex(Start, out int Index) || !_memory[Index].IsWriteWatch)
                 return false;
 
@@ -2982,6 +3023,7 @@ namespace Brovan.Core.Emulation
 
         public bool DecommitMemory(ulong BaseAddress, ulong Size)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             if (Size == 0)
                 return false;
 
@@ -3063,14 +3105,18 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            _memory.RemoveRange(First, Last - First);
-            _memory.InsertRange(First, Replacement);
-            MergeAllWinRegions();
+            using (AddressSpace.Change())
+            {
+                _memory.RemoveRange(First, Last - First);
+                _memory.InsertRange(First, Replacement);
+                MergeAllWinRegions();
+            }
             return true;
         }
 
         public bool ReleaseMemory(ulong AllocationBase)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             if (!TryFindMemoryRegionByBase(AllocationBase, out int First, out MemoryRegion Head) ||
                 !Head.IsReserved || Head.AllocationBase != AllocationBase)
                 return false;
@@ -3090,22 +3136,26 @@ namespace Brovan.Core.Emulation
                     return false;
             }
 
-            int Kept = First;
-            for (int i = First; i < Last; i++)
+            using (AddressSpace.Change())
             {
-                if (!_memory[i].IsReserved)
-                    _memory[Kept++] = _memory[i];
+                int Kept = First;
+                for (int i = First; i < Last; i++)
+                {
+                    if (!_memory[i].IsReserved)
+                        _memory[Kept++] = _memory[i];
+                }
+
+                _memory.RemoveRange(Kept, Last - Kept);
+
+                AddFreedRegion(Start, End - Start);
             }
-
-            _memory.RemoveRange(Kept, Last - Kept);
-
-            AddFreedRegion(Start, End - Start);
             return true;
         }
 
         // NT: the part above End becomes an allocation of its own.
         public bool ReleaseMemoryRange(ulong Start, ulong End)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             FindWinRegionWindow(Start, End, out int First, out int Last);
             if (Last == First)
                 return false;
@@ -3128,48 +3178,52 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            MemoryRegion Head = _memory[First];
-            MemoryRegion Tail = _memory[Last - 1];
-            ulong AllocationBase = Head.AllocationBase;
-            ulong TailEnd = GetRangeEnd(Tail.BaseAddress, Tail.Size);
-
-            int Next = First;
-            if (Head.BaseAddress < Start)
+            using (AddressSpace.Change())
             {
-                Head.Size = Start - Head.BaseAddress;
-                Head.RequestedSize = Head.Size;
-                Head.PoisonedMemory = default;
-                _memory[Next++] = Head;
-            }
+                MemoryRegion Head = _memory[First];
+                MemoryRegion Tail = _memory[Last - 1];
+                ulong AllocationBase = Head.AllocationBase;
+                ulong TailEnd = GetRangeEnd(Tail.BaseAddress, Tail.Size);
 
-            if (TailEnd > End)
-            {
-                Tail.BaseAddress = End;
-                Tail.Size = TailEnd - End;
-                Tail.RequestedSize = Tail.Size;
-                Tail.AllocationBase = End;
+                int Next = First;
+                if (Head.BaseAddress < Start)
+                {
+                    Head.Size = Start - Head.BaseAddress;
+                    Head.RequestedSize = Head.Size;
+                    Head.PoisonedMemory = default;
+                    _memory[Next++] = Head;
+                }
+
+                if (TailEnd > End)
+                {
+                    Tail.BaseAddress = End;
+                    Tail.Size = TailEnd - End;
+                    Tail.RequestedSize = Tail.Size;
+                    Tail.AllocationBase = End;
+                    if (Next < Last)
+                        _memory[Next++] = Tail;
+                    else
+                        _memory.Insert(Next++, Tail);
+                }
+
                 if (Next < Last)
-                    _memory[Next++] = Tail;
-                else
-                    _memory.Insert(Next++, Tail);
+                    _memory.RemoveRange(Next, Last - Next);
+
+                for (int i = Next; i < _memory.Count && _memory[i].AllocationBase == AllocationBase; i++)
+                {
+                    MemoryRegion Above = _memory[i];
+                    Above.AllocationBase = End;
+                    _memory[i] = Above;
+                }
+
+                AddFreedRegion(Start, End - Start);
             }
-
-            if (Next < Last)
-                _memory.RemoveRange(Next, Last - Next);
-
-            for (int i = Next; i < _memory.Count && _memory[i].AllocationBase == AllocationBase; i++)
-            {
-                MemoryRegion Above = _memory[i];
-                Above.AllocationBase = End;
-                _memory[i] = Above;
-            }
-
-            AddFreedRegion(Start, End - Start);
             return true;
         }
 
         public ulong MapWinMemoryRegion(ulong Address, ulong Size, MemoryProtection Protection, SpecialProtections Special, AllocationType Flags, ulong AllocationBase = 0, uint AllocationProtect = 0, uint Protect = 0, IntPtr HostBacking = default)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             ulong AlignedSize = AlignToPageSize(Size);
             if (Address != 0)
             {
@@ -3225,6 +3279,7 @@ namespace Brovan.Core.Emulation
 
         public ulong MapWinUniqueAddress(ulong Size, MemoryProtection Protection, SpecialProtections Special, AllocationType Flags)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             ulong AlignedSize = AlignToPageSize(Size);
             ulong SearchFrom = BaseAddress;
             while (TryFindFreeBaseAddress(AlignedSize, PageSize, SearchFrom, MaxAddress, out ulong CurrentAddress))

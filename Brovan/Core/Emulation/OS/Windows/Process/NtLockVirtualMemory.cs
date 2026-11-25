@@ -55,6 +55,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
             ulong AlignedSize = AlignedEnd - AlignedBase;
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             if (!Instance.IsRegionMapped(AlignedBase, AlignedSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 

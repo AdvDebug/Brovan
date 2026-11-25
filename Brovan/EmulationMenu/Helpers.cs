@@ -66,9 +66,10 @@ namespace Brovan
         public static bool TryFindMemoryRegion(ulong Address, out MemoryRegion Region)
         {
             Region = default;
-            if (Emulator?._memory == null)
+            if (Emulator == null)
                 return false;
 
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             foreach (MemoryRegion Candidate in Emulator._memory)
             {
                 if (Candidate.Size == 0)
@@ -90,6 +91,7 @@ namespace Brovan
 
         public static ulong GetPageSize(ulong BaseAddress)
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             foreach (MemoryRegion Region in Emulator._memory)
             {
                 if (Region.BaseAddress == BaseAddress)
@@ -1860,9 +1862,11 @@ namespace Brovan
 
         public static IEnumerable<MemoryRegion> GetMappedRegions()
         {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             return Emulator._memory
                 .Where(Region => Region.Size > 0)
-                .OrderBy(Region => Region.BaseAddress);
+                .OrderBy(Region => Region.BaseAddress)
+                .ToList();
         }
 
         public static void ListMemoryRegions(bool IncludeModules = false)

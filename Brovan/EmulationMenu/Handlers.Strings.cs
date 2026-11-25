@@ -17,9 +17,10 @@ namespace Brovan
     {
         private static uint GetMappedReadSize(ulong Address, ulong RequestedSize)
         {
-            if (Address == 0 || RequestedSize == 0 || Emulator?._memory == null)
+            if (Address == 0 || RequestedSize == 0 || Emulator == null)
                 return 0;
 
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             foreach (MemoryRegion Region in Emulator._memory)
             {
                 if (Region.Size == 0)

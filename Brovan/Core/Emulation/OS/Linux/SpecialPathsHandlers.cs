@@ -1616,6 +1616,7 @@ namespace Brovan.Core.Emulation.OS.Linux
             ulong StackPointer = Instance.IsX64Guest ? Instance.ReadRegister(Registers.UC_X86_REG_RSP) : Instance.ReadRegister32(Registers.UC_X86_REG_ESP);
             bool NamedImageRegion = false;
 
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             foreach (MemoryRegion Region in Instance.EnumerateMemoryRegionsByBase())
             {
                 ulong Start = Region.BaseAddress;
@@ -1656,6 +1657,7 @@ namespace Brovan.Core.Emulation.OS.Linux
 
         private static void GetMemoryUsage(BinaryEmulator Instance, out long TotalBytes, out long ResidentBytes, out long TextBytes, out long DataBytes)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             TotalBytes = 0;
             ResidentBytes = 0;
             TextBytes = 0;

@@ -45,6 +45,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private static bool TryApplyResetState(BinaryEmulator Instance, ulong BaseAddress, ulong RegionSize, bool Reset, out NTSTATUS Status)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             Status = NTSTATUS.STATUS_SUCCESS;
 
             if (BaseAddress == 0 || RegionSize == 0)
@@ -316,6 +317,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS Allocate(BinaryEmulator Instance, ref ulong BaseAddress, ref ulong RegionSize, uint AllocationType, uint Protect, AddressRequirements Requirements)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             bool Reserve = (AllocationType & MemReserve) != 0;
             bool Commit = (AllocationType & MemCommit) != 0;
             bool WriteWatch = (AllocationType & MemWriteWatch) != 0;

@@ -61,6 +61,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS Protect(BinaryEmulator Instance, ref ulong BaseAddress, ref ulong RegionSize, uint NewProtection, out uint OldProtection)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             OldProtection = 0;
 
             if (BaseAddress == 0 || RegionSize == 0 || BaseAddress > ulong.MaxValue - RegionSize)

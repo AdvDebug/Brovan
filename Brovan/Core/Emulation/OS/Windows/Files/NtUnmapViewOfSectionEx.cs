@@ -39,6 +39,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             // NT: only a view that replaced a placeholder turns back into one, and only from its base.
             if ((Flags & MemPreservePlaceholder) != 0)
             {
+                using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
                 if (Instance.WinHelper.TryFindSectionView(BaseAddress, out WinSectionView View) && View.FromPlaceholder && View.Base == BaseAddress)
                     return UnmapToPlaceholder(Instance, View);
 

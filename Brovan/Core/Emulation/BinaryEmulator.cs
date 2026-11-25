@@ -296,9 +296,10 @@ namespace Brovan.Core.Emulation
             Utils.FlushLog();
         }
 
-        internal List<MemoryRegion> _memory = new();
+        internal readonly AddressSpace AddressSpace = new();
+        internal RegionList<MemoryRegion> _memory => AddressSpace.Regions;
         // Sorted and coalesced. Change it only through AddFreedRegion and ConsumeFreedMemoryRange.
-        internal List<FreedRange> _freedmemory = new();
+        internal RegionList<FreedRange> _freedmemory => AddressSpace.Freed;
         private readonly Queue<int>[] MlfqReadyQueues = new Queue<int>[32];
         private readonly HashSet<int> MlfqQueuedThreads = new();
         private readonly uint[] MlfqQuanta = new uint[32];
@@ -1421,6 +1422,7 @@ namespace Brovan.Core.Emulation
 
         private void ConsumeFreedMemoryRange(ulong Address, ulong Size)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             if (Size == 0 || _freedmemory.Count == 0)
                 return;
 
@@ -1478,6 +1480,7 @@ namespace Brovan.Core.Emulation
 
         internal void AddMemoryRegion(MemoryRegion Region)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             int idx = _memory.BinarySearch(Region, _memoryRegionBaseComparer);
             if (idx < 0) idx = ~idx;
             _memory.Insert(idx, Region);
@@ -1485,6 +1488,7 @@ namespace Brovan.Core.Emulation
 
         internal bool RemoveMemoryRegion(MemoryRegion Region)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             int Index = _memory.BinarySearch(Region, _memoryRegionBaseComparer);
             if (Index < 0)
                 return false;
@@ -1507,16 +1511,19 @@ namespace Brovan.Core.Emulation
 
         internal void RemoveMemoryRegionAt(int Index)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             _memory.RemoveAt(Index);
         }
 
         internal int RemoveMemoryRegions(Predicate<MemoryRegion> Match)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             return _memory.RemoveAll(Match);
         }
 
         internal void SetMemoryRegion(int Index, MemoryRegion Region)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             if (Index < 0 || Index >= _memory.Count)
                 return;
 
@@ -1527,31 +1534,47 @@ namespace Brovan.Core.Emulation
                 _memory.Sort(_memoryRegionBaseComparer);
         }
 
+        // A probe reads the region list without the lock, and reads again when a change ran under it.
         internal bool TryFindMemoryRegion(ulong Address, out MemoryRegion Region)
         {
-            if (TryFindMemoryRegionIndex(Address, out int Index))
+            while (true)
             {
-                Region = _memory[Index];
-                return true;
+                long Sequence = AddressSpace.BeginRead();
+                ReadOnlySpan<MemoryRegion> Regions = _memory.Snapshot;
+                int Index = FindRegionIndex(Regions, Address);
+                Region = Index >= 0 ? Regions[Index] : default;
+                if (AddressSpace.EndRead(Sequence))
+                    return Index >= 0;
             }
-
-            Region = default;
-            return false;
         }
 
         internal ulong AccessibleLength(ulong Address, ulong Length, bool Write)
+        {
+            if (Length == 0)
+                return 0;
+
+            while (true)
+            {
+                long Sequence = AddressSpace.BeginRead();
+                ulong Done = AccessibleLength(_memory.Snapshot, Address, Length, Write);
+                if (AddressSpace.EndRead(Sequence))
+                    return Done;
+            }
+        }
+
+        private static ulong AccessibleLength(ReadOnlySpan<MemoryRegion> Regions, ulong Address, ulong Length, bool Write)
         {
             MemoryProtection Needed = Write ? MemoryProtection.Write : MemoryProtection.Read | MemoryProtection.Execute;
             ulong Done = 0;
 
             // A region can end partway into its last page, so the lookup starts at the page base.
-            if (Length == 0 || !TryFindMemoryRegionIndex(Address & ~(PageSize - 1), out int Index))
+            int Index = FindRegionIndex(Regions, Address & ~(PageSize - 1));
+            if (Index < 0)
                 return 0;
 
-            Span<MemoryRegion> Regions = CollectionsMarshal.AsSpan(_memory);
             while (true)
             {
-                ref MemoryRegion Region = ref Regions[Index];
+                ref readonly MemoryRegion Region = ref Regions[Index];
                 if ((Region.Protections & Needed) == 0 || (Region.SpecialProtections & SpecialProtections.Guard) != 0)
                     break;
 
@@ -1582,10 +1605,13 @@ namespace Brovan.Core.Emulation
 
         internal bool TryFindMemoryRegionIndex(ulong Address, out int Index)
         {
-            Index = -1;
+            AddressSpace.AssertLocked(nameof(TryFindMemoryRegionIndex));
+            Index = FindRegionIndex(_memory.AsSpan(), Address);
+            return Index >= 0;
+        }
 
-            Span<MemoryRegion> Regions = CollectionsMarshal.AsSpan(_memory);
-
+        private static int FindRegionIndex(ReadOnlySpan<MemoryRegion> Regions, ulong Address)
+        {
             int Left = 0;
             int Right = Regions.Length - 1;
             int Candidate = -1;
@@ -1606,21 +1632,15 @@ namespace Brovan.Core.Emulation
             }
 
             if (Candidate < 0)
-                return false;
+                return -1;
 
-            ref MemoryRegion Found = ref Regions[Candidate];
-            ulong End = GetRangeEnd(Found.BaseAddress, Found.Size);
-            if (Address >= Found.BaseAddress && Address < End)
-            {
-                Index = Candidate;
-                return true;
-            }
-
-            return false;
+            ref readonly MemoryRegion Found = ref Regions[Candidate];
+            return Address >= Found.BaseAddress && Address < GetRangeEnd(Found.BaseAddress, Found.Size) ? Candidate : -1;
         }
 
         internal bool TryFindMemoryRegionByBase(ulong BaseAddress, out int Index, out MemoryRegion Region)
         {
+            AddressSpace.AssertLocked(nameof(TryFindMemoryRegionByBase));
             int Left = 0;
             int Right = _memory.Count - 1;
 
@@ -1649,19 +1669,26 @@ namespace Brovan.Core.Emulation
 
         internal bool TryFindOverlappingMemoryRegion(ulong Address, ulong Size, out MemoryRegion Region)
         {
+            while (true)
+            {
+                long Sequence = AddressSpace.BeginRead();
+                bool Found = TryFindOverlappingRegion(_memory.Snapshot, Address, Size, out Region);
+                if (AddressSpace.EndRead(Sequence))
+                    return Found;
+            }
+        }
+
+        private static bool TryFindOverlappingRegion(ReadOnlySpan<MemoryRegion> Regions, ulong Address, ulong Size, out MemoryRegion Region)
+        {
             Region = default;
 
-            if (Size == 0 || _memory.Count == 0)
+            if (Size == 0)
                 return false;
 
             ulong End = GetRangeEnd(Address, Size);
-            int Start = FindFirstRegionStartingBefore(End);
-            if (Start < 0)
-                return false;
-
-            for (int i = Start; i >= 0; i--)
+            for (int i = FirstRegionStartingBefore(Regions, End); i >= 0; i--)
             {
-                MemoryRegion Candidate = _memory[i];
+                ref readonly MemoryRegion Candidate = ref Regions[i];
                 ulong CandidateEnd = GetRangeEnd(Candidate.BaseAddress, Candidate.Size);
 
                 if (CandidateEnd <= Address)
@@ -1679,6 +1706,7 @@ namespace Brovan.Core.Emulation
 
         internal void AddOverlappingMemoryRegions(ulong Address, ulong Size, List<MemoryRegion> Destination)
         {
+            AddressSpace.AssertLocked(nameof(AddOverlappingMemoryRegions));
             if (Destination == null || Size == 0)
                 return;
 
@@ -1711,12 +1739,25 @@ namespace Brovan.Core.Emulation
             if (Size == 0)
                 return true;
 
-            ulong End = GetRangeEnd(Address, Size);
-            ulong Current = Address;
+            while (true)
+            {
+                long Sequence = AddressSpace.BeginRead();
+                bool Mapped = IsRangeCovered(_memory.Snapshot, Address, GetRangeEnd(Address, Size), Committed: false);
+                if (AddressSpace.EndRead(Sequence))
+                    return Mapped;
+            }
+        }
 
+        private static bool IsRangeCovered(ReadOnlySpan<MemoryRegion> Regions, ulong Current, ulong End, bool Committed)
+        {
             while (Current < End)
             {
-                if (!TryFindMemoryRegion(Current, out MemoryRegion Region))
+                int Index = FindRegionIndex(Regions, Current);
+                if (Index < 0)
+                    return false;
+
+                ref readonly MemoryRegion Region = ref Regions[Index];
+                if (Committed && Region.IsReserved && !Region.IsCommitted)
                     return false;
 
                 ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
@@ -1729,18 +1770,48 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
+        private static bool IsRangeCovered(ReadOnlySpan<MemoryRegion> Regions, ulong Current, ulong End)
+        {
+            while (Current < End)
+            {
+                int Index = FindRegionIndex(Regions, Current);
+                if (Index < 0)
+                    return false;
+
+                ulong RegionEnd = GetRangeEnd(Regions[Index].BaseAddress, Regions[Index].Size);
+                if (RegionEnd <= Current)
+                    return false;
+
+                Current = RegionEnd;
+            }
+
+            return true;
+        }
+
         internal bool TryFindNextMemoryRegionBase(ulong Address, out ulong BaseAddress)
         {
+            while (true)
+            {
+                long Sequence = AddressSpace.BeginRead();
+                ReadOnlySpan<MemoryRegion> Regions = _memory.Snapshot;
+                int Index = FirstRegionStartingAfter(Regions, Address);
+                BaseAddress = Index >= 0 ? Regions[Index].BaseAddress : 0;
+                if (AddressSpace.EndRead(Sequence))
+                    return Index >= 0;
+            }
+        }
+
+        private static int FirstRegionStartingAfter(ReadOnlySpan<MemoryRegion> Regions, ulong Address)
+        {
             int Left = 0;
-            int Right = _memory.Count - 1;
+            int Right = Regions.Length - 1;
             int Candidate = -1;
 
             while (Left <= Right)
             {
                 int Middle = Left + ((Right - Left) >> 1);
-                MemoryRegion Region = _memory[Middle];
 
-                if (Region.BaseAddress > Address)
+                if (Regions[Middle].BaseAddress > Address)
                 {
                     Candidate = Middle;
                     Right = Middle - 1;
@@ -1751,18 +1822,12 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            if (Candidate >= 0)
-            {
-                BaseAddress = _memory[Candidate].BaseAddress;
-                return true;
-            }
-
-            BaseAddress = 0;
-            return false;
+            return Candidate;
         }
 
         internal IEnumerable<MemoryRegion> EnumerateMemoryRegionsByBase()
         {
+            AddressSpace.AssertLocked(nameof(EnumerateMemoryRegionsByBase));
             for (int i = 0; i < _memory.Count; i++)
                 yield return _memory[i];
         }
@@ -1770,34 +1835,44 @@ namespace Brovan.Core.Emulation
         // NT splits these: a reserved-only region counts towards the virtual size and not the committed size.
         internal void SumGuestMemoryUsage(out ulong VirtualSize, out ulong CommittedSize)
         {
-            ulong Reserved = 0;
-            ulong Committed = 0;
-
-            for (int i = 0; i < _memory.Count; i++)
+            while (true)
             {
-                MemoryRegion Region = _memory[i];
-                Reserved += Region.Size;
+                long Sequence = AddressSpace.BeginRead();
+                ulong Reserved = 0;
+                ulong Committed = 0;
 
-                if (Region.IsCommitted)
-                    Committed += Region.Size;
+                foreach (ref readonly MemoryRegion Region in _memory.Snapshot)
+                {
+                    Reserved += Region.Size;
+
+                    if (Region.IsCommitted)
+                        Committed += Region.Size;
+                }
+
+                VirtualSize = Reserved;
+                CommittedSize = Committed;
+                if (AddressSpace.EndRead(Sequence))
+                    return;
             }
-
-            VirtualSize = Reserved;
-            CommittedSize = Committed;
         }
 
         internal int FindFirstRegionStartingBefore(ulong Address)
         {
+            AddressSpace.AssertLocked(nameof(FindFirstRegionStartingBefore));
+            return FirstRegionStartingBefore(_memory.AsSpan(), Address);
+        }
+
+        private static int FirstRegionStartingBefore(ReadOnlySpan<MemoryRegion> Regions, ulong Address)
+        {
             int Left = 0;
-            int Right = _memory.Count - 1;
+            int Right = Regions.Length - 1;
             int Candidate = -1;
 
             while (Left <= Right)
             {
                 int Middle = Left + ((Right - Left) >> 1);
-                MemoryRegion Region = _memory[Middle];
 
-                if (Region.BaseAddress < Address)
+                if (Regions[Middle].BaseAddress < Address)
                 {
                     Candidate = Middle;
                     Left = Middle + 1;
@@ -1826,6 +1901,7 @@ namespace Brovan.Core.Emulation
 
         internal bool TryFindFreeBaseAddress(ulong Size, ulong Alignment, ulong MinAddress, ulong MaxAddress, out ulong Result)
         {
+            AddressSpace.AssertLocked(nameof(TryFindFreeBaseAddress));
             Result = 0;
             if (Size == 0 || Alignment == 0 || Size > MaxAddress)
                 return false;
@@ -1835,7 +1911,7 @@ namespace Brovan.Core.Emulation
             if (Candidate < MinAddress || Candidate > Limit)
                 return false;
 
-            ReadOnlySpan<MemoryRegion> Regions = CollectionsMarshal.AsSpan(_memory);
+            ReadOnlySpan<MemoryRegion> Regions = _memory.AsSpan();
             int First = Math.Max(FindFirstRegionStartingBefore(Candidate), 0);
 
             // A window of up to two alignment units never gallops, so it gets a loop without the gallop branch.
@@ -1921,28 +1997,20 @@ namespace Brovan.Core.Emulation
             if (Size == 0)
                 return true;
 
-            ulong End = GetRangeEnd(Address, Size);
-            ulong Current = Address;
-
-            while (Current < End)
+            while (true)
             {
-                if (!TryFindMemoryRegion(Current, out MemoryRegion Region) || (Region.IsReserved && !Region.IsCommitted))
-                    return false;
-
-                ulong RegionEnd = GetRangeEnd(Region.BaseAddress, Region.Size);
-                if (RegionEnd <= Current)
-                    return false;
-
-                Current = RegionEnd;
+                long Sequence = AddressSpace.BeginRead();
+                bool Committed = IsRangeCovered(_memory.Snapshot, Address, GetRangeEnd(Address, Size), Committed: true);
+                if (AddressSpace.EndRead(Sequence))
+                    return Committed;
             }
-
-            return true;
         }
 
         /// <param name="Address">Address to map memory at, or 0 for auto-allocation.</param>
         /// <returns>The page-aligned base of the mapping, or 0 on failure.</returns>
         public ulong MapMemoryRegion(ulong Address, ulong Size, MemoryProtection Protection)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             ulong AlignedSize = AlignToPageSize(Size);
             if (Address != 0)
             {
@@ -1982,6 +2050,7 @@ namespace Brovan.Core.Emulation
 
         public ulong MapUniqueAddress(ulong Size, MemoryProtection Protection)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             ulong AlignedSize = AlignToPageSize(Size);
             ulong SearchFrom = BaseAddress;
             while (TryFindFreeBaseAddress(AlignedSize, PageSize, SearchFrom, MaxAddress, out ulong CurrentAddress))
@@ -2044,39 +2113,46 @@ namespace Brovan.Core.Emulation
         /// <param name="WholeMemory">True matches an address inside a freed range, false only the start of one.</param>
         public bool IsRegionFreed(ulong BaseAddress, bool WholeMemory)
         {
-            if (_freedmemory.Count == 0)
-                return false;
+            while (true)
+            {
+                long Sequence = AddressSpace.BeginRead();
+                bool Freed = IsRegionFreed(_freedmemory.Snapshot, BaseAddress, WholeMemory);
+                if (AddressSpace.EndRead(Sequence))
+                    return Freed;
+            }
+        }
 
+        private static bool IsRegionFreed(ReadOnlySpan<FreedRange> Ranges, ulong BaseAddress, bool WholeMemory)
+        {
+            int lo = 0, hi = Ranges.Length - 1;
             if (WholeMemory)
             {
-                int lo = 0, hi = _freedmemory.Count - 1, cand = -1;
+                int cand = -1;
                 while (lo <= hi)
                 {
                     int mid = lo + ((hi - lo) >> 1);
-                    if (_freedmemory[mid].BaseAddress <= BaseAddress) { cand = mid; lo = mid + 1; }
+                    if (Ranges[mid].BaseAddress <= BaseAddress) { cand = mid; lo = mid + 1; }
                     else hi = mid - 1;
                 }
                 if (cand < 0) return false;
-                FreedRange r = _freedmemory[cand];
+                FreedRange r = Ranges[cand];
                 return BaseAddress >= r.BaseAddress && BaseAddress < r.BaseAddress + r.Size;
             }
-            else
+
+            while (lo <= hi)
             {
-                int lo = 0, hi = _freedmemory.Count - 1;
-                while (lo <= hi)
-                {
-                    int mid = lo + ((hi - lo) >> 1);
-                    ulong mb = _freedmemory[mid].BaseAddress;
-                    if (mb == BaseAddress) return true;
-                    if (mb < BaseAddress) lo = mid + 1;
-                    else hi = mid - 1;
-                }
-                return false;
+                int mid = lo + ((hi - lo) >> 1);
+                ulong mb = Ranges[mid].BaseAddress;
+                if (mb == BaseAddress) return true;
+                if (mb < BaseAddress) lo = mid + 1;
+                else hi = mid - 1;
             }
+            return false;
         }
 
         public bool UnmapMemoryRegion(ulong Address, bool UnmapImage = false)
         {
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             if (Address == 0)
                 return false;
 
@@ -2111,6 +2187,7 @@ namespace Brovan.Core.Emulation
 
         public void AddFreedRegion(ulong BaseAddress, ulong Size)
         {
+            using AddressSpace.Window Changing = AddressSpace.Change();
             if (BaseAddress == 0 || Size == 0)
                 return;
 
@@ -4464,6 +4541,7 @@ namespace Brovan.Core.Emulation
             ReportGuestKernelStats();
             foreach (RankedLock Lock in _rankedLocks)
                 Lock.Report();
+            AddressSpace.Lock.Report();
         }
 
         public ulong AlignToPageSize(ulong Size)
@@ -4674,6 +4752,7 @@ namespace Brovan.Core.Emulation
                 catch { continue; }
             }
 
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             foreach (MemoryRegion Region in _memory)
             {
                 byte[] Data = _emulator.ReadMemory(Region.BaseAddress, Region.Size);
@@ -4689,6 +4768,7 @@ namespace Brovan.Core.Emulation
             if (Snapshot == null || _emulator.Disposed || Disposed)
                 return;
 
+            using RankedLock.Scope AddressHold = AddressSpace.Hold();
             List<MemoryRegion> RegionsToDelete = new List<MemoryRegion>();
 
             foreach (MemoryRegion Region in _memory)
@@ -4835,12 +4915,10 @@ namespace Brovan.Core.Emulation
                 _workersStopped.Dispose();
                 _deferredFreesPassed.Dispose();
 
-                _memory.Clear();
-                _freedmemory.Clear();
+                AddressSpace.Clear();
+                AddressSpace.Lock.Dispose();
                 _emulator = null;
                 _binary = null;
-                _memory = null;
-                _freedmemory = null;
                 Disposed = true;
                 GC.SuppressFinalize(this);
             }

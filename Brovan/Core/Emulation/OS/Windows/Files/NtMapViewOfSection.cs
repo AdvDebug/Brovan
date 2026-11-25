@@ -155,6 +155,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static bool EnsureWindowsSharedSection(BinaryEmulator Instance)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             const ulong SharedSectionSize = 0x10000;
 
             WinSection Section = FindSharedSection(Instance);
@@ -237,8 +238,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 Instance.WinHelper.WritePointer(BaseAddressPtr, Base);
                 Instance.WinHelper.WritePointer(ViewSizePtr, Size);
-                Section.MappedViewCount++;
-                Section.BackingViewCount++;
+                using (Instance.AddressSpace.Hold())
+                {
+                    Section.MappedViewCount++;
+                    Section.BackingViewCount++;
+                }
 
                 if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                     Instance.TriggerEventMessage($"[+] NtMapViewOfSection: SharedSection Base=0x{Base:X}, Size=0x{Size:X}", LogFlags.Syscall);
@@ -397,6 +401,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (RequestedBase != 0 && ReturnedSize > UserEnd - RequestedBase)
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             if (Window.Limited)
             {
                 ulong Lowest = Window.Lowest != 0 ? Window.Lowest : NtAllocateVirtualMemory.LowSearchStart;
@@ -456,6 +461,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static NTSTATUS MapDataView(BinaryEmulator Instance, WinSection Section, ulong SectionOffset, ulong ViewSize, ulong RequestedBase, uint Win32Protect,
             out ulong ViewBase, bool FromPlaceholder = false)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             ViewBase = RequestedBase;
             if (ViewBase == 0 && !TryFindViewBase(Instance, SectionOffset, ViewSize, Instance.BaseAddress, Instance.MaxAddress, out ViewBase))
                 return NTSTATUS.STATUS_NO_MEMORY;
@@ -491,7 +497,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Section.AddView(SectionOffset, ViewBase, ViewSize, true, ViewProtection, FromPlaceholder);
             }
 
-            Instance.WinHelper.TrackSectionRange(ViewBase, ViewSize);
+            Instance.WinHelper.TrackSectionRange(ViewBase, ViewSize, Section: Section);
             Section.MappedViewCount++;
             return NTSTATUS.STATUS_SUCCESS;
         }

@@ -11,6 +11,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
         public void Handle(BinaryEmulator Instance, LinuxSyscallsHelper Helper, LinuxSyscallContext Context)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             ulong OldAddress = Context.Arg0;
             ulong OldSize = Context.Arg1;
             ulong NewSize = Context.Arg2;

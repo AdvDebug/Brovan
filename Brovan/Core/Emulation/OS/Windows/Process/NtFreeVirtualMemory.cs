@@ -68,6 +68,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS Free(BinaryEmulator Instance, ref ulong BaseAddress, ref ulong RegionSize, uint FreeType)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             bool Release = (FreeType & MemRelease) != 0;
             bool Coalesce = (FreeType & MemCoalescePlaceholders) != 0;
             bool Preserve = (FreeType & MemPreservePlaceholder) != 0;

@@ -1757,6 +1757,7 @@ namespace Brovan.Core.Emulation.Guests
         // NT commits the requested size, or the image's, with the guard pages below it (RtlCreateUserStack).
         private ulong AllocateGuardedThreadStack(BinaryEmulator Instance, ulong StackSize, ulong StackCommitOverride, out ulong StackLimit)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             const uint PAGE_READWRITE = 0x04;
             const uint PAGE_GUARD = 0x100;
 

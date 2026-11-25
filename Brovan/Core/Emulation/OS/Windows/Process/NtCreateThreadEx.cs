@@ -131,6 +131,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong? StackOverride = CommitSize != 0 ? CommitSize : null;
             if (Guest != null)
             {
+                using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
                 if (!TryGetStackReserve(Instance, Guest.StackSize, CommitSize, ReserveSize, out ulong Reserve) ||
                     !Instance.TryFindFreeBaseAddress(Instance.AlignToPageSize(Reserve), 0x10000, Instance.BaseAddress, Instance.MaxAddress, out _))
                     return NTSTATUS.STATUS_NO_MEMORY;

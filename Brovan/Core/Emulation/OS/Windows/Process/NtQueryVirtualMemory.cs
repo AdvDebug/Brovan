@@ -262,6 +262,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (MemoryInformationClass == MEMORY_INFORMATION_CLASS.MemoryRegionInformation)
                 {
+                    using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
                     // NT fills the largest record version that fits. The WOW64 thunk takes only the current one.
                     int RegionPointerSize = Instance.WinHelper.PointerSize;
                     ulong RequiredLength = RegionPointerSize == 8 ? 0x30UL : 0x1CUL;
@@ -443,6 +444,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal static NTSTATUS BuildBasicInformation(BinaryEmulator Instance, ulong Address, out MEMORY_BASIC_INFORMATION Info)
         {
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             Info = new MEMORY_BASIC_INFORMATION();
 
             ulong QueryAddress = AlignDownPage(Address);
@@ -546,6 +548,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return string.IsNullOrEmpty(Path) ? NTSTATUS.STATUS_INVALID_ADDRESS : NTSTATUS.STATUS_SUCCESS;
             }
 
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             foreach (WinSection Section in Instance.WinHelper.WinSections)
             {
                 if (Section == null || !Section.IsViewAddress(Address))

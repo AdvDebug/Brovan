@@ -43,6 +43,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Process.PID != Instance.WinHelper.PID)
                 return Instance.WinUnimplemented;
 
+            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             if (!Instance.IsWriteWatchRange(BaseAddress, Last))
                 return NTSTATUS.STATUS_INVALID_PARAMETER_1;
 
