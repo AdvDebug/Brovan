@@ -307,6 +307,37 @@ namespace BrovanGUI.Models
             }
         }
 
+        // Elevation needs the shell, so the output cannot be read. Null means the user declined the prompt.
+        public static async Task<int?> RunElevatedAsync(string Executable, IReadOnlyList<string> Arguments)
+        {
+            ProcessStartInfo Info = new ProcessStartInfo(Executable)
+            {
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Hidden,
+                WorkingDirectory = Path.GetDirectoryName(Executable),
+            };
+
+            foreach (string Argument in Arguments)
+                Info.ArgumentList.Add(Argument);
+
+            try
+            {
+                using Process? Child = Process.Start(Info);
+                if (Child == null)
+                    return null;
+
+                await Child.WaitForExitAsync();
+                return Child.ExitCode;
+            }
+            catch (System.ComponentModel.Win32Exception Error) when (Error.NativeErrorCode == ErrorCancelled)
+            {
+                return null;
+            }
+        }
+
+        private const int ErrorCancelled = 1223;
+
         public static bool SendLine(Process Child, string Line)
         {
             try

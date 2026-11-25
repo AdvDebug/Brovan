@@ -1,0 +1,276 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:BrovanGUI.ViewModels"
+             xmlns:views="using:BrovanGUI.Views"
+             x:Class="BrovanGUI.Views.OnboardingPage"
+             x:DataType="vm:OnboardingViewModel">
+
+    <UserControl.Styles>
+        <Style Selector="Button">
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Padding" Value="14,7" />
+            <Setter Property="CornerRadius" Value="6" />
+        </Style>
+        <Style Selector="Button.secondary">
+            <Setter Property="Background" Value="{DynamicResource BgButton}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderStrong}" />
+            <Setter Property="BorderThickness" Value="1" />
+        </Style>
+        <Style Selector="Button:disabled">
+            <Setter Property="Opacity" Value="0.45" />
+        </Style>
+        <Style Selector="Button.link">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="FontWeight" Value="Normal" />
+        </Style>
+        <Style Selector="Button.link:pointerover /template/ ContentPresenter#PART_ContentPresenter, Button.link:disabled /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="Transparent" />
+        </Style>
+        <Style Selector="Button.link:pointerover TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+            <Setter Property="TextDecorations" Value="Underline" />
+        </Style>
+        <Style Selector="Button.dropzone">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Height" Value="112" />
+            <Setter Property="FontWeight" Value="Normal" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Stretch" />
+            <Setter Property="Margin" Value="0,4,0,0" />
+        </Style>
+        <Style Selector="Button.dropzone:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource AccentSoft}" />
+        </Style>
+        <Style Selector="Button.dropzone Rectangle.dash">
+            <Setter Property="Stroke" Value="{DynamicResource TextTertiary}" />
+            <Setter Property="Opacity" Value="0.5" />
+        </Style>
+        <Style Selector="Button.dropzone.over Rectangle.dash">
+            <Setter Property="Opacity" Value="1" />
+        </Style>
+        <Style Selector="Button.dropzone.over Rectangle.dash">
+            <Setter Property="Stroke" Value="{DynamicResource Accent}" />
+        </Style>
+        <Style Selector="Button.dropzone.over /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource AccentSoft}" />
+        </Style>
+        <Style Selector="Button.accent:disabled /template/ ContentPresenter#PART_ContentPresenter">
+            <Setter Property="Background" Value="{DynamicResource Accent}" />
+        </Style>
+        <Style Selector="Button.copy">
+            <Setter Property="MinWidth" Value="120" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+        </Style>
+        <Style Selector="Path.spinner">
+            <Setter Property="Width" Value="16" />
+            <Setter Property="Height" Value="16" />
+            <Setter Property="Stroke" Value="{DynamicResource Accent}" />
+            <Setter Property="StrokeThickness" Value="2.5" />
+            <Setter Property="StrokeLineCap" Value="Round" />
+            <Setter Property="Data" Value="M8 1A7 7 0 1 1 1 8" />
+            <Setter Property="RenderTransform" Value="rotate(0deg)" />
+            <Style.Animations>
+                <Animation Duration="0:0:0.9" IterationCount="Infinite">
+                    <KeyFrame Cue="0%">
+                        <Setter Property="RotateTransform.Angle" Value="0" />
+                    </KeyFrame>
+                    <KeyFrame Cue="100%">
+                        <Setter Property="RotateTransform.Angle" Value="360" />
+                    </KeyFrame>
+                </Animation>
+            </Style.Animations>
+        </Style>
+        <Style Selector="views|StepCard Button">
+            <Setter Property="Padding" Value="12,6" />
+            <Setter Property="FontSize" Value="13" />
+        </Style>
+        <Style Selector="Button.primary">
+            <Setter Property="Padding" Value="18,9" />
+        </Style>
+        <Style Selector="TextBlock.waiting">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style Selector="TextBlock.section">
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="LetterSpacing" Value="0.6" />
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+            <Setter Property="Margin" Value="2,10,0,0" />
+        </Style>
+    </UserControl.Styles>
+
+    <Grid RowDefinitions="*,Auto">
+        <ScrollViewer>
+            <ScrollViewer.OpacityMask>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                    <GradientStop Color="Black" Offset="0" />
+                    <GradientStop Color="Black" Offset="0.95" />
+                    <GradientStop Color="Transparent" Offset="1" />
+                </LinearGradientBrush>
+            </ScrollViewer.OpacityMask>
+            <StackPanel Margin="32,32,32,8" Spacing="20" Width="640" HorizontalAlignment="Center" VerticalAlignment="Top">
+
+                <StackPanel Spacing="14">
+                    <Image Source="/Assets/brovan.ico" Width="56" Height="56" HorizontalAlignment="Left" RenderOptions.BitmapInterpolationMode="HighQuality" />
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="{Binding Title}" FontSize="32" FontWeight="SemiBold" LetterSpacing="-0.5" />
+                        <TextBlock Text="{Binding Lead}"
+                                   FontSize="14" LineHeight="21" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </StackPanel>
+
+                <StackPanel Spacing="8">
+                    <Grid ColumnDefinitions="Auto,Auto,*">
+                        <Panel Width="18" Height="18" Margin="0,0,8,0" IsVisible="{Binding Setup.IsInitialized}">
+                            <Ellipse Fill="{DynamicResource Good}" />
+                            <Path Classes="icon onaccent" Width="9" Height="6.2" StrokeThickness="2.5" Data="{StaticResource IconCheck}" HorizontalAlignment="Center" />
+                        </Panel>
+                        <TextBlock Grid.Column="1" Text="{Binding ReadySummary}" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="2" Text="{Binding ReadyHint}" FontSize="13" Foreground="{DynamicResource TextSecondary}"
+                                   Margin="10,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    </Grid>
+                    <ProgressBar Value="{Binding RequiredDone}" Maximum="{Binding RequiredCount}"
+                                 Height="6" MinHeight="6" CornerRadius="3" Background="{DynamicResource BgTile}">
+                        <ProgressBar.Transitions>
+                            <Transitions>
+                                <DoubleTransition Property="Value" Duration="0:0:0.4" Easing="CubicEaseOut" />
+                            </Transitions>
+                        </ProgressBar.Transitions>
+                        <ProgressBar.Foreground>
+                            <LinearGradientBrush StartPoint="0%,0%" EndPoint="100%,0%">
+                                <GradientStop Color="#3DD5DE" Offset="0" />
+                                <GradientStop Color="#6D4AF0" Offset="1" />
+                            </LinearGradientBrush>
+                        </ProgressBar.Foreground>
+                    </ProgressBar>
+                </StackPanel>
+
+                <StackPanel Spacing="10">
+                    <views:StepCard Number="1" Header="Brovan emulator" Description="{Binding EmulatorText}"
+                                    IsDone="{Binding Setup.BrovanFound}" IsCurrent="{Binding EmulatorCurrent}"
+                                    ToolTip.Tip="{Binding Setup.BrovanPath}">
+                        <Button Classes="accent" Command="{Binding Setup.BrowseBrovanCommand}" IsVisible="{Binding !Setup.BrovanFound}">
+                            <TextBlock Text="Find Brovan.exe" Foreground="White" />
+                        </Button>
+                    </views:StepCard>
+
+                    <views:StepCard Number="2" Header="Windows registry" Description="{Binding RegistryText}"
+                                    IsDone="{Binding Setup.RegistryReady}" IsCurrent="{Binding FilesCurrent}" IsProblem="{Binding RegistryFailed}"
+                                    IsVisible="{Binding Setup.HostIsWindows}">
+                        <Panel>
+                            <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding Setup.CopyingRegistry}">
+                                <Path Classes="spinner" VerticalAlignment="Center" />
+                                <TextBlock Classes="waiting" Text="Working&#8230;" />
+                            </StackPanel>
+                            <Button Classes="accent copy" Command="{Binding Setup.CopyRegistryCommand}" IsVisible="{Binding CopyActionable}">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Path Classes="icon onaccent" Width="13" Height="13" Data="{StaticResource IconShield}" />
+                                    <TextBlock Text="Copy now" Foreground="White" VerticalAlignment="Center" IsVisible="{Binding !RegistryFailed}" />
+                                    <TextBlock Text="Try again" Foreground="White" VerticalAlignment="Center" IsVisible="{Binding RegistryFailed}" />
+                                </StackPanel>
+                            </Button>
+                            <TextBlock Classes="waiting" Text="After step 1" IsVisible="{Binding EmulatorCurrent}" />
+                        </Panel>
+                    </views:StepCard>
+
+                    <views:StepCard Number="2" Header="Windows system files" Description="{Binding SystemFilesText}"
+                                    IsDone="{Binding Setup.SystemFilesReady}" IsCurrent="{Binding FilesCurrent}" IsVisible="{Binding Setup.HostIsLinux}">
+                        <views:StepCard.Detail>
+                            <Grid ColumnDefinitions="*,Auto" IsVisible="{Binding FilesCurrent}">
+                                <CheckBox IsChecked="{Binding Setup.LicenseAccepted}" FontSize="13" VerticalAlignment="Center"
+                                          Content="I have a valid license for this copy of Windows" />
+                                <Button Grid.Column="1" Classes="accent" Command="{Binding Setup.InstallFromIsoCommand}" VerticalAlignment="Center"
+                                        ToolTip.Tip="Confirm the license first." ToolTip.ShowOnDisabled="True">
+                                    <TextBlock Text="Choose an ISO" Foreground="White" />
+                                </Button>
+                            </Grid>
+                        </views:StepCard.Detail>
+                        <TextBlock Classes="waiting" Text="After step 1" IsVisible="{Binding EmulatorCurrent}" />
+                    </views:StepCard>
+
+                    <TextBlock Classes="section" Text="RECOMMENDED" />
+
+                    <views:StepCard Icon="{StaticResource IconBolt}" Header="Hardware acceleration" Description="{Binding SpeedText}"
+                                    IsDone="{Binding Setup.HypervisorAvailable}" IsProblem="{Binding !Setup.HypervisorAvailable}">
+                        <Button Classes="secondary" Command="{Binding Setup.RefreshCommand}" IsVisible="{Binding !Setup.HypervisorAvailable}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Path Classes="icon" Width="13" Height="13" Data="{StaticResource IconRefresh}" />
+                                <TextBlock Text="Check again" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Button>
+                    </views:StepCard>
+
+                    <views:StepCard Icon="{StaticResource IconPackage}" Header="Visual C++ runtimes" Description="{Binding RuntimesText}"
+                                    IsDone="{Binding Setup.RuntimesReady}" IsVisible="{Binding Setup.HostIsLinux}">
+                        <Panel>
+                            <TextBlock Classes="waiting" Text="{Binding RuntimesWaitText}" IsVisible="{Binding RuntimesWaiting}" />
+                            <Button Classes="secondary" Command="{Binding Setup.InstallRuntimesCommand}" IsVisible="{Binding RuntimesActionable}" Content="Install" />
+                        </Panel>
+                    </views:StepCard>
+
+                    <views:StepCard Icon="{StaticResource IconGamepad}" Header="Direct3D games" Description="{Binding DxvkText}"
+                                    IsDone="{Binding Setup.DxvkVersion, Converter={x:Static ObjectConverters.IsNotNull}}">
+                        <Panel>
+                            <TextBlock Classes="waiting" Text="After step 1" IsVisible="{Binding EmulatorCurrent}" />
+                            <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding Setup.InstallingDxvk}">
+                                <Path Classes="spinner" VerticalAlignment="Center" />
+                                <TextBlock Classes="waiting" Text="Installing&#8230;" />
+                            </StackPanel>
+                            <Button Classes="secondary" Command="{Binding Setup.InstallDxvkCommand}" IsVisible="{Binding DxvkActionable}"
+                                    ToolTip.Tip="{Binding BusyTip}" ToolTip.ShowOnDisabled="True">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Path Classes="icon" Width="13" Height="13" Data="{StaticResource IconDownload}" />
+                                    <TextBlock Text="Install DXVK" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                        </Panel>
+                    </views:StepCard>
+                </StackPanel>
+
+                <Button x:Name="DropZone" Classes="dropzone" Command="{Binding AddProgramCommand}" IsVisible="{Binding Setup.IsInitialized}"
+                        DragDrop.AllowDrop="True">
+                    <Panel>
+                        <Rectangle Classes="dash" StrokeThickness="1.5" StrokeDashArray="4,3" RadiusX="10" RadiusY="10" />
+                        <StackPanel Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <Path Classes="icon muted" Width="24" Height="24" Data="{StaticResource IconDownload}" HorizontalAlignment="Center" />
+                            <TextBlock Text="Drop a program here" FontSize="14" HorizontalAlignment="Center" />
+                            <TextBlock Text="A Windows .exe or a Linux program" FontSize="12" Foreground="{DynamicResource TextTertiary}" HorizontalAlignment="Center" />
+                        </StackPanel>
+                    </Panel>
+                </Button>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Grid Grid.Row="1" ColumnDefinitions="*,Auto,Auto" Margin="32,12,32,28" Width="640" Height="40" HorizontalAlignment="Center"
+              IsEnabled="{Binding !Setup.IsBusy}">
+            <Button Grid.Column="1" Classes="link" Command="{Binding FinishCommand}" VerticalAlignment="Center"
+                    ToolTip.Tip="You can finish these steps later under Setup.">
+                <Panel>
+                    <TextBlock Text="Skip for now" Foreground="{DynamicResource TextSecondary}" IsVisible="{Binding !Setup.IsInitialized}" />
+                    <TextBlock Text="Open the library" Foreground="{DynamicResource TextSecondary}" IsVisible="{Binding Setup.IsInitialized}" />
+                </Panel>
+            </Button>
+            <Panel Grid.Column="2" Margin="20,0,0,0" IsVisible="{Binding Setup.BrovanFound}">
+                <Button Classes="accent primary" Command="{Binding AddProgramCommand}" IsVisible="{Binding Setup.IsInitialized}" IsDefault="{Binding Setup.IsInitialized}">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Path Classes="icon onaccent" Width="13" Height="13" Data="{StaticResource IconPlus}" />
+                        <TextBlock Text="Add your first program" Foreground="White" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+                <Button Classes="secondary primary" Command="{Binding AddProgramCommand}" IsVisible="{Binding FilesCurrent}">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Path Classes="icon" Width="13" Height="13" Data="{StaticResource IconPlus}" />
+                        <TextBlock Text="Add a program anyway" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Button>
+            </Panel>
+        </Grid>
+    </Grid>
+</UserControl>

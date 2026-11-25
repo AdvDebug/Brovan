@@ -13,6 +13,7 @@ namespace BrovanGUI.ViewModels
         Profile,
         Setup,
         Settings,
+        Onboarding,
     }
 
     public sealed class MainViewModel : ObservableObject
@@ -43,6 +44,11 @@ namespace BrovanGUI.ViewModels
                 Library.OutputHeight = Output.Height;
                 Save();
             });
+            Output.PropertyChanged += (_, Event) =>
+            {
+                if (Event.PropertyName == nameof(OutputViewModel.IsOpen))
+                    Raise(nameof(ShowOutputBar));
+            };
             Output.InputSubmitted += Line =>
             {
                 Process? Target = InputTarget();
@@ -71,6 +77,7 @@ namespace BrovanGUI.ViewModels
             Setup = new SetupViewModel(this);
             Settings = new SettingsViewModel(this);
             Welcome = new WelcomeViewModel(this);
+            Onboarding = new OnboardingViewModel(this);
 
             BrovanExecutable = BrovanHost.Locate(Library.BrovanPath);
             Setup.Refresh();
@@ -82,7 +89,10 @@ namespace BrovanGUI.ViewModels
             }
 
             Selected ??= Profiles.Count != 0 ? Profiles[0] : null;
-            Page = BrovanExecutable == null ? PageKind.Setup : PageKind.Profile;
+            if (!Library.WelcomeDone && !Setup.IsInitialized)
+                Page = PageKind.Onboarding;
+            else
+                Page = BrovanExecutable == null ? PageKind.Setup : PageKind.Profile;
 
             SchemaLoad = LoadSchema();
             if (LaunchProfile != null)
@@ -111,6 +121,7 @@ namespace BrovanGUI.ViewModels
         public SetupViewModel Setup { get; }
         public SettingsViewModel Settings { get; }
         public WelcomeViewModel Welcome { get; }
+        public OnboardingViewModel Onboarding { get; }
         public AsyncCommand AddProfileCommand { get; }
         public RelayCommand RemoveSelectedCommand { get; }
         public RelayCommand ShowSetupCommand { get; }
@@ -165,11 +176,19 @@ namespace BrovanGUI.ViewModels
             get => Page;
             set
             {
+                if (Page == PageKind.Onboarding && value != PageKind.Onboarding)
+                {
+                    Library.WelcomeDone = true;
+                    Save();
+                }
+
                 Page = value;
                 Raise();
                 Raise(nameof(CurrentPage));
                 Raise(nameof(IsSetupPage));
                 Raise(nameof(IsSettingsPage));
+                Raise(nameof(IsOnboarding));
+                Raise(nameof(ShowOutputBar));
                 Raise(nameof(ListSelection));
             }
         }
@@ -182,11 +201,14 @@ namespace BrovanGUI.ViewModels
 
         public bool IsSetupPage => Page == PageKind.Setup;
         public bool IsSettingsPage => Page == PageKind.Settings;
+        public bool IsOnboarding => Page == PageKind.Onboarding;
+        public bool ShowOutputBar => Page != PageKind.Onboarding || Output.IsOpen;
 
         public object CurrentPage => Page switch
         {
             PageKind.Setup => Setup,
             PageKind.Settings => Settings,
+            PageKind.Onboarding => Onboarding,
             _ => (object?)Selected ?? Welcome,
         };
 

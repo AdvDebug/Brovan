@@ -23,6 +23,7 @@ namespace BrovanGUI.Models
         public bool OutputOpen { get; set; }
         public double OutputHeight { get; set; } = 260;
         public bool LicenseAccepted { get; set; }
+        public bool WelcomeDone { get; set; }
         public Dictionary<string, string> Defaults { get; set; } = new();
         public List<Profile> Profiles { get; set; } = new();
 

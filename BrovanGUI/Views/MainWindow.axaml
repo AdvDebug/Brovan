@@ -25,6 +25,9 @@
         <DataTemplate DataType="vm:WelcomeViewModel">
             <views:WelcomePage />
         </DataTemplate>
+        <DataTemplate DataType="vm:OnboardingViewModel">
+            <views:OnboardingPage />
+        </DataTemplate>
 
         <DataTemplate DataType="vm:CategoryViewModel">
             <StackPanel>
@@ -113,9 +116,12 @@
         </DataTemplate>
     </Window.DataTemplates>
 
-    <Grid ColumnDefinitions="256,*">
+    <Grid ColumnDefinitions="Auto,*">
+        <Border Grid.ColumnSpan="2" Background="{DynamicResource WelcomeTint}" IsHitTestVisible="False" IsVisible="{Binding IsOnboarding}" />
+        <Border Grid.ColumnSpan="2" Height="480" VerticalAlignment="Top" Background="{DynamicResource WelcomeGlow}"
+                IsHitTestVisible="False" IsVisible="{Binding IsOnboarding}" />
 
-        <Border Grid.Column="0" x:Name="Sidebar" Background="{DynamicResource BgSidebar}" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="0,0,1,0">
+        <Border Grid.Column="0" x:Name="Sidebar" Width="256" IsVisible="{Binding !IsOnboarding}" Background="{DynamicResource BgSidebar}" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="0,0,1,0">
             <Grid RowDefinitions="40,Auto,*,Auto">
 
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="8" Margin="16,0" VerticalAlignment="Center" IsHitTestVisible="False">
@@ -207,7 +213,7 @@
         <Grid Grid.Column="1" RowDefinitions="*,Auto" x:Name="ContentHost">
             <ContentControl Grid.Row="0" Content="{Binding CurrentPage}" />
 
-            <Border Grid.Row="1" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="0,1,0,0" Background="{DynamicResource BgSidebar}">
+            <Border Grid.Row="1" BorderBrush="{DynamicResource BorderSubtle}" BorderThickness="0,1,0,0" Background="{DynamicResource BgSidebar}" IsVisible="{Binding ShowOutputBar}">
                 <Grid RowDefinitions="Auto,Auto">
                     <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto" Margin="12,0,10,0" Height="38">
                         <Button Classes="iconbtn" Command="{Binding Output.ToggleCommand}" ToolTip.Tip="Show or hide the output">

@@ -34,6 +34,22 @@
                     <SolidColorBrush x:Key="Warn" Color="#FBBF24" />
                     <SolidColorBrush x:Key="Bad" Color="#F87171" />
                     <SolidColorBrush x:Key="WarnBanner" Color="#33FBBF24" />
+                    <SolidColorBrush x:Key="AccentSoft" Color="#333B82F6" />
+                    <SolidColorBrush x:Key="AccentText" Color="#BFDBFE" />
+                    <SolidColorBrush x:Key="AccentBorder" Color="#993B82F6" />
+                    <SolidColorBrush x:Key="BgCardActive" Color="#212631" />
+                    <SolidColorBrush x:Key="BorderStrong" Color="#333333" />
+                    <SolidColorBrush x:Key="BgButton" Color="#262626" />
+                    <SolidColorBrush x:Key="GoodSoft" Color="#1F4ADE80" />
+                    <SolidColorBrush x:Key="WarnSoft" Color="#33FBBF24" />
+                    <SolidColorBrush x:Key="WarnBorder" Color="#59FBBF24" />
+                    <SolidColorBrush x:Key="WelcomeTint" Color="Transparent" />
+                    <SolidColorBrush x:Key="TextTertiary" Color="#7C7C7C" />
+                    <RadialGradientBrush x:Key="WelcomeGlow" Center="27%,18%" GradientOrigin="27%,18%" RadiusX="34%" RadiusY="80%">
+                        <GradientStop Color="#383DD5DE" Offset="0" />
+                        <GradientStop Color="#296D4AF0" Offset="0.5" />
+                        <GradientStop Color="#006D4AF0" Offset="1" />
+                    </RadialGradientBrush>
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
                     <SolidColorBrush x:Key="BgWindow" Color="#F3F3F3" />
@@ -51,6 +67,22 @@
                     <SolidColorBrush x:Key="Warn" Color="#D97706" />
                     <SolidColorBrush x:Key="Bad" Color="#DC2626" />
                     <SolidColorBrush x:Key="WarnBanner" Color="#33D97706" />
+                    <SolidColorBrush x:Key="AccentSoft" Color="#1F2563EB" />
+                    <SolidColorBrush x:Key="AccentText" Color="#1D4ED8" />
+                    <SolidColorBrush x:Key="AccentBorder" Color="#992563EB" />
+                    <SolidColorBrush x:Key="BgCardActive" Color="#F2F6FE" />
+                    <SolidColorBrush x:Key="BorderStrong" Color="#CDD3DB" />
+                    <SolidColorBrush x:Key="BgButton" Color="#FFFFFF" />
+                    <SolidColorBrush x:Key="GoodSoft" Color="#2416A34A" />
+                    <SolidColorBrush x:Key="WarnSoft" Color="#33D97706" />
+                    <SolidColorBrush x:Key="WarnBorder" Color="#66D97706" />
+                    <SolidColorBrush x:Key="WelcomeTint" Color="#086D4AF0" />
+                    <SolidColorBrush x:Key="TextTertiary" Color="#6B7280" />
+                    <RadialGradientBrush x:Key="WelcomeGlow" Center="30%,0%" GradientOrigin="30%,0%" RadiusX="70%" RadiusY="100%">
+                        <GradientStop Color="#306D4AF0" Offset="0" />
+                        <GradientStop Color="#143DD5DE" Offset="0.55" />
+                        <GradientStop Color="#003DD5DE" Offset="1" />
+                    </RadialGradientBrush>
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 
@@ -93,6 +125,131 @@
                 </Style>
             </ControlTheme>
 
+            <ControlTheme x:Key="{x:Type views:StepCard}" TargetType="views:StepCard">
+                <Setter Property="Background" Value="{DynamicResource BgCard}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource BorderStrong}" />
+                <Setter Property="BorderThickness" Value="1" />
+                <Setter Property="CornerRadius" Value="10" />
+                <Setter Property="Padding" Value="18,16" />
+                <Setter Property="HorizontalAlignment" Value="Stretch" />
+                <Setter Property="Template">
+                    <ControlTemplate>
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"
+                                Padding="{TemplateBinding Padding}">
+                            <Grid ColumnDefinitions="Auto,*,Auto">
+                                <Panel Name="PART_BadgePanel" Width="30" Height="30" Margin="0,-5,16,0" VerticalAlignment="Top">
+                                    <Ellipse Name="PART_Badge" Fill="{DynamicResource AccentSoft}" />
+                                    <TextBlock Name="PART_Number" Text="{TemplateBinding Number}" FontSize="13" FontWeight="SemiBold"
+                                               Foreground="{DynamicResource AccentText}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    <Path Name="PART_Icon" Data="{TemplateBinding Icon}" Width="14" Height="14" Stretch="Uniform"
+                                          Stroke="{DynamicResource TextSecondary}" StrokeThickness="1.75" StrokeLineCap="Round" StrokeJoin="Round"
+                                          HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                    <Path Name="PART_Check" Data="{DynamicResource IconCheck}" Width="13" Height="9" Stretch="Uniform"
+                                          Stroke="{DynamicResource Good}" StrokeThickness="2.5" StrokeLineCap="Round" StrokeJoin="Round"
+                                          HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="False" Opacity="0" RenderTransform="scale(0.6)">
+                                        <Path.Transitions>
+                                            <Transitions>
+                                                <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.16" Easing="CubicEaseOut" />
+                                                <DoubleTransition Property="Opacity" Duration="0:0:0.16" />
+                                            </Transitions>
+                                        </Path.Transitions>
+                                    </Path>
+                                    <TextBlock Name="PART_Alert" Text="!" FontSize="16" FontWeight="Bold" Foreground="{DynamicResource Warn}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="False" />
+                                </Panel>
+                                <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center" Margin="0,0,20,0">
+                                    <DockPanel>
+                                        <TextBlock Name="PART_Header" DockPanel.Dock="Left" Text="{TemplateBinding Header}" FontSize="15" FontWeight="SemiBold"
+                                                   Foreground="{DynamicResource TextPrimary}" VerticalAlignment="Center" />
+                                        <Border DockPanel.Dock="Left" CornerRadius="9" Padding="7,0" Margin="8,0,0,0" VerticalAlignment="Center" BorderThickness="1"
+                                                BorderBrush="{DynamicResource BorderStrong}"
+                                                IsVisible="{Binding Note, RelativeSource={RelativeSource TemplatedParent}, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                            <TextBlock Text="{TemplateBinding Note}" FontSize="11" Foreground="{DynamicResource TextSecondary}" />
+                                        </Border>
+                                        <TextBlock Name="PART_Dot" DockPanel.Dock="Left" Text="&#183;" FontSize="13" Margin="8,0" Foreground="{DynamicResource TextTertiary}"
+                                                   VerticalAlignment="Center" IsVisible="False" />
+                                        <TextBlock Name="PART_Inline" Text="{TemplateBinding Description}" FontSize="13"
+                                                   Foreground="{DynamicResource TextTertiary}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" IsVisible="False" />
+                                    </DockPanel>
+                                    <TextBlock Name="PART_Description" Text="{TemplateBinding Description}" FontSize="13" LineHeight="19" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" />
+                                    <ContentPresenter Content="{TemplateBinding Detail}" Margin="0,6,-20,0"
+                                                      IsVisible="{Binding Detail, RelativeSource={RelativeSource TemplatedParent}, Converter={x:Static ObjectConverters.IsNotNull}}" />
+                                </StackPanel>
+                                <ContentPresenter Grid.Column="2" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" VerticalAlignment="Center" />
+                            </Grid>
+                        </Border>
+                    </ControlTemplate>
+                </Setter>
+                <Style Selector="^:current">
+                    <Setter Property="BorderBrush" Value="{DynamicResource AccentBorder}" />
+                    <Setter Property="BorderThickness" Value="1.5" />
+                    <Setter Property="Background" Value="{DynamicResource BgCardActive}" />
+                </Style>
+                <Style Selector="^:current /template/ Ellipse#PART_Badge">
+                    <Setter Property="Fill" Value="{DynamicResource Accent}" />
+                </Style>
+                <Style Selector="^:current /template/ TextBlock#PART_Number">
+                    <Setter Property="Foreground" Value="White" />
+                </Style>
+                <Style Selector="^:icon /template/ Path#PART_Icon">
+                    <Setter Property="Stroke" Value="{DynamicResource AccentText}" />
+                </Style>
+                <Style Selector="^:done">
+                    <Setter Property="Padding" Value="18,10" />
+                </Style>
+                <Style Selector="^:done /template/ Panel#PART_BadgePanel">
+                    <Setter Property="Margin" Value="0,0,16,0" />
+                    <Setter Property="VerticalAlignment" Value="Center" />
+                </Style>
+                <Style Selector="^:done /template/ TextBlock#PART_Description">
+                    <Setter Property="IsVisible" Value="False" />
+                </Style>
+                <Style Selector="^:done /template/ TextBlock#PART_Inline">
+                    <Setter Property="IsVisible" Value="True" />
+                </Style>
+                <Style Selector="^:done /template/ TextBlock#PART_Dot">
+                    <Setter Property="IsVisible" Value="True" />
+                </Style>
+                <Style Selector="^:done /template/ ContentPresenter">
+                    <Setter Property="IsVisible" Value="False" />
+                </Style>
+                <Style Selector="^:problem">
+                    <Setter Property="BorderBrush" Value="{DynamicResource WarnBorder}" />
+                </Style>
+                <Style Selector="^:done /template/ Ellipse#PART_Badge">
+                    <Setter Property="Fill" Value="{DynamicResource GoodSoft}" />
+                </Style>
+                <Style Selector="^:done /template/ TextBlock#PART_Header">
+                    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+                    <Setter Property="FontWeight" Value="Medium" />
+                    <Setter Property="FontSize" Value="14" />
+                </Style>
+                <Style Selector="^:problem /template/ Ellipse#PART_Badge">
+                    <Setter Property="Fill" Value="{DynamicResource WarnSoft}" />
+                </Style>
+                <Style Selector="^:done /template/ TextBlock#PART_Number">
+                    <Setter Property="IsVisible" Value="False" />
+                </Style>
+                <Style Selector="^:problem /template/ TextBlock#PART_Number">
+                    <Setter Property="IsVisible" Value="False" />
+                </Style>
+                <Style Selector="^:done /template/ Path#PART_Icon">
+                    <Setter Property="IsVisible" Value="False" />
+                </Style>
+                <Style Selector="^:problem /template/ Path#PART_Icon">
+                    <Setter Property="IsVisible" Value="False" />
+                </Style>
+                <Style Selector="^:done /template/ Path#PART_Check">
+                    <Setter Property="IsVisible" Value="True" />
+                    <Setter Property="Opacity" Value="1" />
+                    <Setter Property="RenderTransform" Value="scale(1)" />
+                </Style>
+                <Style Selector="^:problem /template/ TextBlock#PART_Alert">
+                    <Setter Property="IsVisible" Value="True" />
+                </Style>
+            </ControlTheme>
+
             <ControlTheme x:Key="UntitledDecorations" TargetType="WindowDrawnDecorations" BasedOn="{StaticResource {x:Type WindowDrawnDecorations}}">
                 <Style Selector="^:has-titlebar /template/ Panel#PART_TitleTextPanel">
                     <Setter Property="IsVisible" Value="False" />
@@ -118,6 +275,11 @@
             <StreamGeometry x:Key="IconTerminal">M4 17l6-6-6-6M12 19h8</StreamGeometry>
             <StreamGeometry x:Key="IconExternal">M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3</StreamGeometry>
             <StreamGeometry x:Key="IconRefresh">M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15</StreamGeometry>
+            <StreamGeometry x:Key="IconCheck">M20 6L9 17l-5-5</StreamGeometry>
+            <StreamGeometry x:Key="IconShield">M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z</StreamGeometry>
+            <StreamGeometry x:Key="IconBolt">M13 2L3 14h9l-1 8 10-12h-9l1-8z</StreamGeometry>
+            <StreamGeometry x:Key="IconGamepad">M6 11h4M8 9v4M15 12h.01M18 10h.01M17.32 5H6.68a4 4 0 00-3.978 3.59l-.9 7.2A3 3 0 004.78 19c1.1 0 2.04-.62 2.5-1.6L8 16h8l.72 1.4c.46.98 1.4 1.6 2.5 1.6a3 3 0 002.98-3.21l-.9-7.2A4 4 0 0017.32 5z</StreamGeometry>
+            <StreamGeometry x:Key="IconPackage">M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16zM3.27 6.96L12 12.01l8.73-5.05M12 22.08V12</StreamGeometry>
             <StreamGeometry x:Key="IconCopy">M20 9h-9a2 2 0 00-2 2v9a2 2 0 002 2h9a2 2 0 002-2v-9a2 2 0 00-2-2zM5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1</StreamGeometry>
 
             <DataTemplate x:Key="WarningBanner" DataType="sys:String">
