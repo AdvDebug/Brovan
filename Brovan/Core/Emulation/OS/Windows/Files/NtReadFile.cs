@@ -68,41 +68,63 @@ namespace Brovan.Core.Emulation.OS.Windows
             KernelFileReads? Reads = Instance.WinHelper.KernelFileReads;
             long EndedAt = -1;
             bool TableWork = false;
-            using (FileObj.ObjectLock.EnterScope())
+            RankedLock.Scope Reopen = default;
+            try
             {
-                if (FileObj.CleanedUp)
-                    return Instance.WinHelper.CompleteOnCleanedUpFile(IoStatusBlockPtr, Event);
-
-                if (Offset == FileUseFilePointerPosition)
-                    Offset = FileObj.ClaimPosition();
-
-                try
+                using (EnterFileForStream(Instance, FileObj, ref Reopen))
                 {
-                    Status = Read(Instance, FileHandle, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset, Key, ref EndedAt);
-                }
-                finally
-                {
-                    FileObj.ReleasePosition();
+                    if (FileObj.CleanedUp)
+                        return Instance.WinHelper.CompleteOnCleanedUpFile(IoStatusBlockPtr, Event);
+
+                    if (Offset == FileUseFilePointerPosition)
+                        Offset = FileObj.ClaimPosition();
+
+                    try
+                    {
+                        Status = Read(Instance, FileHandle, FileObj, EventHandle, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset, Key, ref EndedAt);
+                    }
+                    finally
+                    {
+                        FileObj.ReleasePosition();
+                    }
+
+                    TableWork = Status == NTSTATUS.STATUS_SUCCESS && Reads != null
+                        && Reads.CountRead(FileHandle, FileObj, EventHandle, ApcRoutine, ByteOffsetPtr, KeyPtr, Length);
                 }
 
-                TableWork = Status == NTSTATUS.STATUS_SUCCESS && Reads != null
-                    && Reads.CountRead(FileHandle, FileObj, EventHandle, ApcRoutine, ByteOffsetPtr, KeyPtr, Length);
+                bool EndsView = EndedAt >= 0 && FileObj.KernelCell is { HasView: true };
+                if (Reads != null && (TableWork || EndsView))
+                {
+                    using (Instance.EnterKernelLockScope())
+                    {
+                        if (EndsView)
+                            Reads.NoteEnd(FileObj, EndedAt);
+                        if (TableWork)
+                            Reads.NoteRead(FileHandle, FileObj, Length);
+                    }
+                }
+
+                WinSysHelper.SignalIoEvent(Event, Status);
+                return Status;
             }
-
-            bool EndsView = EndedAt >= 0 && FileObj.KernelCell is { HasView: true };
-            if (Reads != null && (TableWork || EndsView))
+            finally
             {
-                using (Instance.EnterKernelLockScope())
-                {
-                    if (EndsView)
-                        Reads.NoteEnd(FileObj, EndedAt);
-                    if (TableWork)
-                        Reads.NoteRead(FileHandle, FileObj, Length);
-                }
+                Reopen.Dispose();
             }
+        }
 
-            WinSysHelper.SignalIoEvent(Event, Status);
-            return Status;
+        // NT: a handle keeps its file across a rename. A reopen waits under KernelLock for a rename's release, move and
+        // path change.
+        internal static RankedLock.Scope EnterFileForStream(BinaryEmulator Instance, WinFile File, ref RankedLock.Scope Reopen)
+        {
+            RankedLock.Scope FileScope = File.ObjectLock.EnterScope();
+            if (Instance.KernelLockCovered || !File.StreamNeedsReopen)
+                return FileScope;
+
+            FileScope.Dispose();
+            WindowsGuest.SyscallDomainStats.FellBack(WindowsGuest.SyscallDomainStats.Reason.StreamReopen);
+            Reopen = Instance.EnterKernelLockScope();
+            return File.ObjectLock.EnterScope();
         }
 
         private static NTSTATUS Read(BinaryEmulator Instance, ulong FileHandle, WinFile FileObj, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlockPtr, ulong BufferPtr, uint Length, long Offset, uint Key, ref long EndedAt)

@@ -41,22 +41,30 @@ namespace Brovan.Core.Emulation.OS.Windows
             else
             {
                 Instance.WinHelper.KernelFiles?.ReleasePathBeforeChange(FileObj.Path);
-                using (FileObj.ObjectLock.EnterScope())
+                RankedLock.Scope Reopen = default;
+                try
                 {
-                    if (FileObj.CleanedUp)
-                        return Instance.WinHelper.CompleteOnCleanedUpFile(IoStatusBlockPtr, Event);
-
-                    if (Offset == NtReadFile.FileUseFilePointerPosition)
-                        Offset = FileObj.ClaimPosition();
-
-                    try
+                    using (NtReadFile.EnterFileForStream(Instance, FileObj, ref Reopen))
                     {
-                        Status = Write(Instance, FileHandle, FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset, Key);
+                        if (FileObj.CleanedUp)
+                            return Instance.WinHelper.CompleteOnCleanedUpFile(IoStatusBlockPtr, Event);
+
+                        if (Offset == NtReadFile.FileUseFilePointerPosition)
+                            Offset = FileObj.ClaimPosition();
+
+                        try
+                        {
+                            Status = Write(Instance, FileHandle, FileObj, ApcRoutine, ApcContext, IoStatusBlockPtr, BufferPtr, Length, Offset, Key);
+                        }
+                        finally
+                        {
+                            FileObj.ReleasePosition();
+                        }
                     }
-                    finally
-                    {
-                        FileObj.ReleasePosition();
-                    }
+                }
+                finally
+                {
+                    Reopen.Dispose();
                 }
             }
 

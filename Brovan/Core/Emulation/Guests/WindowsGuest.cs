@@ -1248,12 +1248,12 @@ namespace Brovan.Core.Emulation.Guests
                 ConnectReplies,
                 ObjectNeedsKernelLock,
 
-                // Taken inside a call that runs without it: an unmap outside the section index, a section's release, the
-                // object namespace part of a name, and a close whose handle named another object by the time it ran.
+                // Taken inside a call that runs without it.
                 ViewUnmap,
                 SectionRelease,
                 Namespace,
                 HandleChanged,
+                StreamReopen,
             }
 
             // Why a request on a file object needs KernelLock: a breakdown of ObjectNeedsKernelLock.

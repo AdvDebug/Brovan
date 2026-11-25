@@ -1916,7 +1916,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (string.IsNullOrEmpty(Path))
                     return null;
 
-                if (FileStream == null || !string.Equals(FileStream.GuestPath, Path, StringComparison.OrdinalIgnoreCase))
+                if (StreamNeedsReopen)
                 {
                     FileStream?.Dispose();
                     FileStream = WindowsFileStream.FromGuestPath(Path, CreateWriteDirectories);
@@ -1925,6 +1925,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return FileStream;
             }
         }
+
+        // Read under the object lock.
+        internal bool StreamNeedsReopen => FileStream == null || !string.Equals(FileStream.GuestPath, Path, StringComparison.OrdinalIgnoreCase);
 
         public void ReleaseFileStream()
         {
