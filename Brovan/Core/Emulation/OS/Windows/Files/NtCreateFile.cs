@@ -235,7 +235,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.RegisterOpenFile(FileObj);
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
-            Instance.WinHelper.AddWinHandle(Handle);
             if (Inherit)
                 Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
 
@@ -301,7 +300,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.RegisterOpenFile(FileObj);
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
-            Instance.WinHelper.AddWinHandle(Handle);
             if (Inherit)
                 Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
 
@@ -604,7 +602,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Instance.WinHelper.WinFiles.Add(FileObj);
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
-            Instance.WinHelper.AddWinHandle(Handle);
             if (Inherit)
                 Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
 

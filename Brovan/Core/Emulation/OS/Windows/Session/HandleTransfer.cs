@@ -354,7 +354,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Helper.RegisterOpenFile(File);
             }
 
-            Helper.AddWinHandle(Added);
             Handle = Added.Handle;
             return true;
         }

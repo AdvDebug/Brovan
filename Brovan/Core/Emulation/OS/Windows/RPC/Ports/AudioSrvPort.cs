@@ -1332,7 +1332,6 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
                 return;
 
             WinHandle ServerHandle = Instance.WinHelper.HandleManager.AddHandle(Section, AccessMask.StandardRightsAll);
-            Instance.WinHelper.AddWinHandle(ServerHandle);
             Stream.ServerSectionHandle = ServerHandle.Handle;
         }
 

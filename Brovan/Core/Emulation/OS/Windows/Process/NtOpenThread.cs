@@ -25,7 +25,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_CID;
 
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Thread, (AccessMask)DesiredAccess);
-            Instance.WinHelper.AddWinHandle(Handle);
 
             if (!Instance.WinHelper.WritePointer(ThreadHandlePtr, Handle.Handle))
             {

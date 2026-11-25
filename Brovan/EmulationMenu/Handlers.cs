@@ -1944,7 +1944,6 @@ namespace Brovan
                 if (CopyAttributes)
                     WindowsHelper.HandleManager.SetHandleFlags(NewHandle.Handle, WindowsHelper.HandleManager.GetHandleFlags(SourceHandle));
 
-                WindowsHelper.WinHandles.Add(NewHandle);
                 PrintHighlight($"[+] Duplicated Windows handle 0x{SourceHandle:X} into 0x{NewHandle.Handle:X}.", true);
                 return;
             }
@@ -2135,7 +2134,6 @@ namespace Brovan
             if (TryGetWindowsHandleHelper(out WinSysHelper WindowsHelper))
             {
                 RebuildWindowsHandleIndex(WindowsHelper);
-                SyncWindowsHandleCache(WindowsHelper, Handle);
             }
 
             PrintHighlight($"[+] {MemberName} set to {Value}.", true);
@@ -2636,7 +2634,6 @@ namespace Brovan
             }
 
             Permissions[Handle] = Access;
-            SyncWindowsHandleCache(Helper, Handle);
             PrintHighlight($"[+] Windows handle 0x{Handle:X} access set to {FormatWindowsAccessMask(Access)}.", true);
         }
 
@@ -2663,7 +2660,6 @@ namespace Brovan
                     Flags[TargetHandle] = Helper.HandleManager.GetHandleFlags(SourceHandle);
             }
 
-            SyncWindowsHandleCache(Helper, TargetHandle);
             return true;
         }
 
@@ -2708,7 +2704,6 @@ namespace Brovan
                     if (SetWindowsObjectName(Object, Value))
                     {
                         RebuildWindowsHandleIndex(Helper);
-                        SyncWindowsHandleCache(Helper, Handle);
                         PrintHighlight($"[+] Windows handle 0x{Handle:X} object name set to {Value}.", true);
                         return;
                     }
@@ -2915,23 +2910,5 @@ namespace Brovan
 
             return Arguments.Substring(ValueStart).Trim();
         }
-
-        private static void SyncWindowsHandleCache(WinSysHelper Helper, ulong Handle)
-        {
-            IHandleObject Object = Helper.HandleManager.GetObjectByHandle(Handle);
-            if (Object == null)
-                return;
-
-            WinHandle Cached = Helper.WinHandles.FirstOrDefault(Item => Item.Handle == Handle);
-            if (Cached == null)
-            {
-                Cached = new WinHandle { Handle = Handle };
-                Helper.WinHandles.Add(Cached);
-            }
-
-            Cached.HandleType = Object.ObjectType;
-            Cached.Permissions = Helper.HandleManager.GetPermissionsByHandle(Handle);
-        }
-
     }
 }

@@ -4,6 +4,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtCreateEvent : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) => Instance.WinHelper.ResolveCreateDomain(Instance.WinHelper.GetArg(0));
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong EventHandlePtr = Instance.WinHelper.GetArg(0);
@@ -21,22 +25,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (EventType > 1)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            NTSTATUS Status = Instance.WinHelper.ReadCreateObjectName(ObjectAttributes, out string Name, out uint Attributes);
-            if (Status != NTSTATUS.STATUS_SUCCESS)
+            NTSTATUS Status = Instance.WinHelper.BeginCreateObjectName(ObjectAttributes, out RankedLock.Scope NameScope, out string Name, out uint Attributes);
+            using (NameScope)
+            {
+                if (Status != NTSTATUS.STATUS_SUCCESS)
+                    return Status;
+
+                if (!Instance.WinHelper.TryLookupNameForCreate(Name, Attributes, out WinEvent? Existing, out Status))
+                    return Status;
+
+                AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
+                WinHandle Handle = Existing != null
+                    ? Instance.WinHelper.OpenObjectHandle(Existing, Permissions)
+                    : Instance.WinHelper.CreateEventHandle(Name, EventType, InitialState, Permissions);
+
+                if (!Instance.WinHelper.WritePointer(EventHandlePtr, Handle.Handle))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
                 return Status;
-
-            if (!Instance.WinHelper.TryLookupNameForCreate(Name, Attributes, out WinEvent? Existing, out Status))
-                return Status;
-
-            AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
-            WinHandle Handle = Existing != null
-                ? Instance.WinHelper.OpenObjectHandle(Existing, Permissions)
-                : Instance.WinHelper.CreateEventHandle(Name, EventType, InitialState, Permissions);
-
-            if (!Instance.WinHelper.WritePointer(EventHandlePtr, Handle.Handle))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            return Status;
+            }
         }
     }
 }

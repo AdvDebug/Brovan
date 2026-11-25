@@ -206,7 +206,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             WinHandle Handle = Helper.HandleManager.AddHandle(Port, AccessMask.StandardRightsAll);
-            Helper.AddWinHandle(Handle);
 
             bool Written = Helper.WritePointer(PortHandlePtr, Handle.Handle);
 

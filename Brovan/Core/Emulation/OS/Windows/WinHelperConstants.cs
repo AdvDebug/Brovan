@@ -1526,6 +1526,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal WaitableHandleObject NextSignalled;
         internal int SignalQueued;
 
+        // Set by AddNamedObject before the first handle and never cleared, so a closer reads it without KernelLock.
+        internal bool IsNamed;
+
         internal List<WinWaitCompletionPacket> TargetedBy;
 
         public abstract string ObjectId { get; }
@@ -2258,7 +2261,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public int ThreadId;
     }
 
-    public class WinEvent : WaitableHandleObject
+    public sealed class WinEvent : WaitableHandleObject
     {
         public string Name;
         public uint EventType;
@@ -2307,7 +2310,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public override HandleType ObjectType => HandleType.EventHandle;
     }
 
-    public class WinSemaphore : WaitableHandleObject
+    public sealed class WinSemaphore : WaitableHandleObject
     {
         public string Name;
         public int MaximumCount;
@@ -2968,7 +2971,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     break;
 
                 WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(Thread, AccessMask.GiveTemp);
-                Instance.WinHelper.AddWinHandle(Handle);
                 Factory.WorkerThreads.Add(Handle.Handle);
                 Factory.StartingWorkers.Add(Handle.Handle);
             }

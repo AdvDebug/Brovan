@@ -99,7 +99,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             Instance.WinHelper.RegisterOpenFile(FileObj);
 
             WinHandle Added = Instance.WinHelper.HandleManager.AddHandle(FileObj, DesiredAccess);
-            Instance.WinHelper.AddWinHandle(Added);
             if (Inherit)
                 Instance.WinHelper.HandleManager.SetHandleFlags(Added.Handle, ObjectHandleFlags.Inherit);
 

@@ -117,7 +117,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     };
 
                     WinHandle RemoteHandle = Instance.WinHelper.HandleManager.AddHandle(Remote, (AccessMask)(uint)DesiredAccess);
-                    Instance.WinHelper.AddWinHandle(RemoteHandle);
 
                     if (!Instance.WinHelper.WritePointer(ThreadHandlePtr, RemoteHandle.Handle))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -150,7 +149,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
             WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(NewThread, Permissions);
-            Instance.WinHelper.AddWinHandle(Handle);
 
             if (!Instance.WinHelper.WritePointer(ThreadHandlePtr, Handle.Handle))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

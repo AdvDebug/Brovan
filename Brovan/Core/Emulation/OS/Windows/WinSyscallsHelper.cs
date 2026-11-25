@@ -1175,6 +1175,43 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Status != NTSTATUS.STATUS_SUCCESS || ObjectAttributesPtr == 0)
                 return Status;
 
+            return ReadCreateObjectName(Length, RootDirectory, ObjectName, Attributes, out FullName);
+        }
+
+        // A name takes the lock inside the handler.
+        internal WinSyscallDomain ResolveCreateDomain(ulong HandlePtr) =>
+            HandlePtr != 0 && IsAccessibleUserRange(HandlePtr, (ulong)PointerSize, Write: true)
+                ? WinSyscallDomain.Self
+                : WinSyscallDomain.KernelLock;
+
+        // A named create holds KernelLock from the name read through its handle insert, so a last close cannot unname
+        // the object it finds. The caller disposes NameScope.
+        internal NTSTATUS BeginCreateObjectName(ulong ObjectAttributesPtr, out RankedLock.Scope NameScope, out string? FullName, out uint Attributes)
+        {
+            NameScope = default;
+            FullName = null;
+
+            NTSTATUS Status = ReadObjectAttributes(ObjectAttributesPtr, out uint Length, out ulong RootDirectory, out ulong ObjectName, out Attributes);
+            if (Status != NTSTATUS.STATUS_SUCCESS || ObjectAttributesPtr == 0)
+                return Status;
+
+            if (ObjectName != 0)
+                NameScope = EnterNamespaceScope();
+            return ReadCreateObjectName(Length, RootDirectory, ObjectName, Attributes, out FullName);
+        }
+
+        private RankedLock.Scope EnterNamespaceScope()
+        {
+            if (!Emulator.KernelLockCovered)
+                WindowsGuest.SyscallDomainStats.FellBack(WindowsGuest.SyscallDomainStats.Reason.Namespace);
+            return Emulator.EnterKernelLockScope();
+        }
+
+        private NTSTATUS ReadCreateObjectName(uint Length, ulong RootDirectory, ulong ObjectName, uint Attributes, out string? FullName)
+        {
+            FullName = null;
+            NTSTATUS Status;
+
             if (Length != (uint)(PointerSize == 8 ? 0x30 : 0x18))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
@@ -1475,7 +1512,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryStripNamedObjectRoot(FullName, out _, out _))
                 return FullName;
 
-            using RankedLock.Scope KernelScope = Emulator.EnterKernelLockScope();
+            using RankedLock.Scope KernelScope = EnterNamespaceScope();
             return TryGetNamedObjectDirectory(FullName, out WinObjectDirectory Parent, out string LeafName, out _)
                 ? Parent.Path + "\\" + LeafName
                 : FullName;
@@ -2488,7 +2525,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ForgetLockedPages(Region.BaseAddress, Region.BaseAddress + Region.Size);
         }
 
-        public uint GenerateAnonymousObjectId() => ++AnonymousObjectCursor;
+        public uint GenerateAnonymousObjectId() => Interlocked.Increment(ref AnonymousObjectCursor);
 
         public string GenerateAnonymousObjectName(string Prefix) => $"{Prefix}{GenerateAnonymousObjectId()}";
 
@@ -2743,7 +2780,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         public const string CurrentUserName = "User";
         public const string CurrentUserProfile = @"C:\Users\" + CurrentUserName;
 
-        public List<WinHandle> WinHandles = new List<WinHandle>();
         public List<WinProcess> WinProcesses = new List<WinProcess>();
         internal WinProcess ShellProcess { get; private set; }
         internal WinProcess OwnProcess { get; private set; }
@@ -3069,8 +3105,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             public void Dispose() => Emulator?.ReturnKernelLock(LeftLocks);
         }
 
-        public List<WinSemaphore> WinSemaphores = new List<WinSemaphore>();
-
         // A deleted namespace leaves this list but lives on through its handles.
         public readonly List<WinPrivateNamespace> PrivateNamespaces = new List<WinPrivateNamespace>();
 
@@ -3089,6 +3123,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void AddNamedObject(IHandleObject Object)
         {
+            if (Object is WaitableHandleObject Waitable)
+                Waitable.IsNamed = true;
+
             if (!NamedObjects.TryGetValue(Object.ObjectId, out List<IHandleObject> Spellings))
             {
                 Spellings = new List<IHandleObject>(1);
@@ -3103,6 +3140,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private void RemoveNamedObject(IHandleObject Object)
         {
+            if (Object is WaitableHandleObject { IsNamed: false })
+                return;
+
             if (!NamedObjects.TryGetValue(Object.ObjectId, out List<IHandleObject> Spellings) || !Spellings.Remove(Object))
                 return;
 
@@ -3115,6 +3155,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool IsNamedObject(IHandleObject Object)
         {
+            if (Object is WaitableHandleObject { IsNamed: false })
+                return false;
+
             return NamedObjects.TryGetValue(Object.ObjectId, out List<IHandleObject> Spellings) && Spellings.Contains(Object);
         }
 
@@ -3209,12 +3252,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 CloseHandle(Held.Handle);
         }
 
-        public WinHandle OpenObjectHandle(IHandleObject Object, AccessMask Permissions, ObjectHandleFlags Flags = ObjectHandleFlags.None)
-        {
-            WinHandle Handle = HandleManager.AddHandle(Object, Permissions, Flags);
-            AddWinHandle(Handle);
-            return Handle;
-        }
+        public WinHandle OpenObjectHandle(IHandleObject Object, AccessMask Permissions, ObjectHandleFlags Flags = ObjectHandleFlags.None) =>
+            HandleManager.AddHandle(Object, Permissions, Flags);
 
         public List<WinRegistryNotification> RegistryNotifications = new List<WinRegistryNotification>();
         internal readonly AfdDevice.HostConnects AfdConnects = new AfdDevice.HostConnects();
@@ -3227,20 +3266,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal KernelFileInformation KernelFileInformation;
         internal KernelFileVolumeInformation? KernelFileVolumeInformation;
         public List<WinSection> WinSections = new List<WinSection>();
-        private readonly Dictionary<ulong, int> WinHandleIndex = new Dictionary<ulong, int>();
-        internal void AddWinHandle(WinHandle h)
-        {
-            WinHandles.Add(h);
-            WinHandleIndex[h.Handle] = WinHandles.Count - 1;
-        }
-
-        internal void RemoveWinHandle(ulong Handle)
-        {
-            if (!WinHandleIndex.TryGetValue(Handle, out int Idx)) return;
-            int Last = WinHandles.Count - 1;
-            if (Idx != Last) { var Moved = WinHandles[Last]; WinHandles[Idx] = Moved; WinHandleIndex[Moved.Handle] = Idx; }
-            WinHandles.RemoveAt(Last); WinHandleIndex.Remove(Handle);
-        }
 
         public List<WinPort> WinPorts = new List<WinPort>();
         private readonly List<AlpcConnection> _pendingConnectReplies = new List<AlpcConnection>();
@@ -5775,9 +5800,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Process == null)
                 return new WinHandle();
 
-            WinHandle Handle = HandleManager.AddHandle(Process, ProcessOpenRights(Permissions));
-            AddWinHandle(Handle);
-            return Handle;
+            return HandleManager.AddHandle(Process, ProcessOpenRights(Permissions));
         }
 
         public WinProcess? GetProcessByHandle(ulong Handle, AccessMask Purpose)
@@ -11283,7 +11306,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             // A key open grants every right it asks for, with the generic rights mapped to key rights.
             TryGrantObjectAccess(Permissions, ObjectAccessKind.Key, AccessMask.KeyAllAccess, out AccessMask Granted);
             WinHandle Handle = HandleManager.AddHandle(RegKey, Granted);
-            AddWinHandle(Handle);
 
             RegKey.AppHive = RegKey.Hive?.App;
             if (RegKey.AppHive != null)
@@ -11668,7 +11690,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 MaximumCount = MaximumCount
             };
 
-            WinSemaphores.Add(Semaphore);
             if (!string.IsNullOrEmpty(Name))
                 AddNamedObject(Semaphore);
 
@@ -11969,6 +11990,38 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HandleManager.GetObjectByHandle<WinSection>(Handle, HandleType.SectionHandle, Purpose);
         }
 
+        internal enum CloseTail
+        {
+            None,
+            KernelLock,
+        }
+
+        // What the last close of an object runs. The type and IsNamed do not change once the object is published.
+        internal static CloseTail ClassifyClose(IHandleObject Object) => Object switch
+        {
+            WinEvent { IsNamed: false } or WinSemaphore { IsNamed: false } => CloseTail.None,
+            _ => CloseTail.KernelLock,
+        };
+
+        // False when the handle now names another object, which the caller closes under KernelLock.
+        internal bool TryCloseResolved(ulong Handle, IHandleObject Expected, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_SUCCESS;
+            switch (HandleManager.TryRemoveHandle(Handle, Expected))
+            {
+                case HandleManager.Removal.Removed:
+                    return true;
+                case HandleManager.Removal.Protected:
+                    Status = NTSTATUS.STATUS_HANDLE_NOT_CLOSABLE;
+                    return true;
+                case HandleManager.Removal.Missing:
+                    Status = NTSTATUS.STATUS_INVALID_HANDLE;
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
         public void CloseHandle(ulong Handle)
         {
             WinSection? ClosingSection = null;
@@ -12002,13 +12055,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            bool LastHandle = false;
-            if (HandleManager.TryRemoveHandle(Handle, out _, out LastHandle))
-            {
-                RemoveWinHandle(Handle);
-            }
+            HandleManager.TryRemoveHandle(Handle, out _, out bool LastHandle);
+            if (Entry.Object == null || ClassifyClose(Entry.Object) == CloseTail.None)
+                return;
 
-            if (Entry.Object != null && LastHandle)
+            if (LastHandle)
             {
                 RemoveNamedObject(Entry.Object);
                 if (Entry.Object is WinFile ClosedFile)
@@ -12055,10 +12106,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             switch (Object)
             {
-                case WinSemaphore Semaphore:
-                    WinSemaphores.Remove(Semaphore);
-                    break;
-
                 case WinMutex Mutex:
                     WinMutexes.Remove(Mutex);
                     break;

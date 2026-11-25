@@ -350,17 +350,44 @@ namespace Brovan.Core.Emulation.OS.Windows
             LastHandle = false;
             if (!TryGetEntry(Handle, out ulong Key, out Entry))
                 return false;
+            LastHandle = RemoveLocked(Key, Entry.Object);
+            return true;
+        }
+
+        internal enum Removal
+        {
+            Removed,
+            Protected,
+            Missing,
+            Changed,
+        }
+
+        // NT: ObCloseHandleTableEntry refuses a protected entry before it removes it. An entry that names another object
+        // than Expected is left for the caller to classify again.
+        public Removal TryRemoveHandle(ulong Handle, IHandleObject Expected)
+        {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
+            if (!TryGetEntry(Handle, out ulong Key, out HandleEntry Entry))
+                return Removal.Missing;
+            if (!ReferenceEquals(Entry.Object, Expected))
+                return Removal.Changed;
+            if ((Entry.Flags & ObjectHandleFlags.ProtectFromClose) != 0)
+                return Removal.Protected;
+            RemoveLocked(Key, Entry.Object);
+            return Removal.Removed;
+        }
+
+        private bool RemoveLocked(ulong Key, IHandleObject Object)
+        {
             HandleTable.Remove(Key);
-            IHandleObject obj = Entry.Object;
-            if (ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
+            if (ObjectIdToHandles.TryGetValue(Object.ObjectId, out List<ulong> Handles))
             {
                 Handles.Remove(Key);
                 if (Handles.Count == 0)
-                    ObjectIdToHandles.Remove(obj.ObjectId);
+                    ObjectIdToHandles.Remove(Object.ObjectId);
             }
 
-            LastHandle = !HasHandleToObjectLocked(obj);
-            return true;
+            return !HasHandleToObjectLocked(Object);
         }
 
         public List<KeyValuePair<ulong, IHandleObject>> SnapshotHandles()

@@ -4,6 +4,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtCreateSemaphore : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) => Instance.WinHelper.ResolveCreateDomain(Instance.WinHelper.GetArg(0));
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong SemaphoreHandlePtr = Instance.WinHelper.GetArg(0);
@@ -26,22 +30,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (MaximumCount <= 0 || InitialCount < 0 || InitialCount > MaximumCount)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            NTSTATUS Status = Instance.WinHelper.ReadCreateObjectName(ObjectAttributesPtr, out string Name, out uint Attributes);
-            if (Status != NTSTATUS.STATUS_SUCCESS)
+            NTSTATUS Status = Instance.WinHelper.BeginCreateObjectName(ObjectAttributesPtr, out RankedLock.Scope NameScope, out string Name, out uint Attributes);
+            using (NameScope)
+            {
+                if (Status != NTSTATUS.STATUS_SUCCESS)
+                    return Status;
+
+                if (!Instance.WinHelper.TryLookupNameForCreate(Name, Attributes, out WinSemaphore? Existing, out Status))
+                    return Status;
+
+                AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
+                WinHandle Handle = Existing != null
+                    ? Instance.WinHelper.OpenObjectHandle(Existing, Permissions)
+                    : Instance.WinHelper.CreateSemaphoreHandle(Name, InitialCount, MaximumCount, Permissions);
+
+                if (!Instance.WinHelper.WritePointer(SemaphoreHandlePtr, Handle.Handle))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
                 return Status;
-
-            if (!Instance.WinHelper.TryLookupNameForCreate(Name, Attributes, out WinSemaphore? Existing, out Status))
-                return Status;
-
-            AccessMask Permissions = (AccessMask)(uint)DesiredAccess;
-            WinHandle Handle = Existing != null
-                ? Instance.WinHelper.OpenObjectHandle(Existing, Permissions)
-                : Instance.WinHelper.CreateSemaphoreHandle(Name, InitialCount, MaximumCount, Permissions);
-
-            if (!Instance.WinHelper.WritePointer(SemaphoreHandlePtr, Handle.Handle))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
-            return Status;
+            }
         }
     }
 }

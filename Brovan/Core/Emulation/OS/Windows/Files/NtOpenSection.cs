@@ -68,7 +68,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
 
                 WinHandle ExistingHandle = Instance.WinHelper.HandleManager.AddHandle(Existing, DesiredAccess);
-                Instance.WinHelper.AddWinHandle(ExistingHandle);
                 if (Inherit)
                     Instance.WinHelper.HandleManager.SetHandleFlags(ExistingHandle.Handle, ObjectHandleFlags.Inherit);
 
