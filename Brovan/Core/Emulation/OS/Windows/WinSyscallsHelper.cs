@@ -9756,6 +9756,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
+        internal WinHandle InsertFileHandle(WinFile File, AccessMask Access, bool Inherit)
+        {
+            WinFiles.Add(File);
+            RegisterOpenFile(File);
+            return HandleManager.AddHandle(File, Access, Inherit ? ObjectHandleFlags.Inherit : ObjectHandleFlags.None);
+        }
+
         public void RegisterOpenFile(WinFile File)
         {
             if (File == null || File.Device || string.IsNullOrEmpty(File.Path))

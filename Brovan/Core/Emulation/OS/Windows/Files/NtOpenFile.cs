@@ -95,14 +95,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Mode = NtCreateFile.ModeFromCreateOptions(OpenOptions)
             };
 
-            Instance.WinHelper.WinFiles.Add(FileObj);
-            Instance.WinHelper.RegisterOpenFile(FileObj);
-
-            WinHandle Added = Instance.WinHelper.HandleManager.AddHandle(FileObj, DesiredAccess);
-            if (Inherit)
-                Instance.WinHelper.HandleManager.SetHandleFlags(Added.Handle, ObjectHandleFlags.Inherit);
-
-            Handle = Added.Handle;
+            Handle = Instance.WinHelper.InsertFileHandle(FileObj, DesiredAccess, Inherit).Handle;
             return NTSTATUS.STATUS_SUCCESS;
         }
 

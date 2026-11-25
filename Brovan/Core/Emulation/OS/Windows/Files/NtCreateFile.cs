@@ -104,7 +104,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
-            return CreateRegularHandle64(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, Path, CreateDisposition, CreateOptions, ShareAccess, Inherit);
+            return CreateRegularHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)(uint)DesiredAccess, Path, CreateDisposition, CreateOptions, ShareAccess, Inherit);
         }
 
         private NTSTATUS Handle32(BinaryEmulator Instance)
@@ -176,10 +176,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
             }
 
-            return CreateRegularHandle32(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, Path, CreateDisposition, CreateOptions, ShareAccess, Inherit);
+            return CreateRegularHandle(Instance, FileHandlePtr, IoStatusBlockPtr, (AccessMask)DesiredAccess, Path, CreateDisposition, CreateOptions, ShareAccess, Inherit);
         }
 
-        private static NTSTATUS CreateRegularHandle64(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string Path, uint CreateDisposition, uint CreateOptions, uint ShareAccess, bool Inherit)
+        private static NTSTATUS CreateRegularHandle(BinaryEmulator Instance, ulong FileHandlePtr, ulong IoStatusBlockPtr, AccessMask Permissions, string Path, uint CreateDisposition, uint CreateOptions, uint ShareAccess, bool Inherit)
         {
             Path = NormalizeAndTrimPath(Path);
             bool IsDirectory = (CreateOptions & FILE_DIRECTORY_FILE) != 0 || Path.EndsWith("\\", StringComparison.Ordinal);
@@ -231,79 +231,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Mode = ModeFromCreateOptions(CreateOptions)
             };
 
-            Instance.WinHelper.WinFiles.Add(FileObj);
-            Instance.WinHelper.RegisterOpenFile(FileObj);
-
-            WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
-            if (Inherit)
-                Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
-
-            Instance._emulator.WriteMemory(FileHandlePtr, (ulong)Handle.Handle);
-            Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Information);
-
-            return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        private static NTSTATUS CreateRegularHandle32(BinaryEmulator Instance, uint FileHandlePtr, uint IoStatusBlockPtr, AccessMask Permissions, string Path, uint CreateDisposition, uint CreateOptions, uint ShareAccess, bool Inherit)
-        {
-            Path = NormalizeAndTrimPath(Path);
-            bool IsDirectory = (CreateOptions & FILE_DIRECTORY_FILE) != 0 || Path.EndsWith("\\", StringComparison.Ordinal);
-
-            if ((CreateOptions & FILE_DIRECTORY_FILE) != 0 && (CreateOptions & FILE_NON_DIRECTORY_FILE) != 0)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-            }
-
-            if ((CreateOptions & FILE_NON_DIRECTORY_FILE) != 0 && IsDirectory)
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_OBJECT_NAME_INVALID, 0);
-                return NTSTATUS.STATUS_OBJECT_NAME_INVALID;
-            }
-
-            bool DeleteOnClose = (CreateOptions & FILE_DELETE_ON_CLOSE) != 0;
-            if (DeleteOnClose && !HasDeleteAccess(Permissions))
-            {
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_INVALID_PARAMETER, 0);
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
-            }
-
-            NTSTATUS Status = LookUpRegularPath(Instance, Path, Permissions, CreateDisposition, CreateOptions, ShareAccess, ref IsDirectory, out WindowsFileStream Stream, out bool Exists, out bool ParentExists);
-            uint Information = FILE_OPENED_INFORMATION;
-            if (Status == NTSTATUS.STATUS_SUCCESS)
-                Status = PreparePathForDisposition(Stream, IsDirectory, Exists, ParentExists, CreateDisposition, out Information);
-
-            if (Status != NTSTATUS.STATUS_SUCCESS)
-            {
-                Stream.Dispose();
-                Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, Status, 0);
-                return Status;
-            }
-
-            bool FinalExists = Information != FILE_OPENED_INFORMATION || (IsDirectory ? Stream.ExistsAsDirectory : Stream.ExistsAsFile);
-
-            WinFile FileObj = new WinFile
-            {
-                Path = Path,
-                Device = false,
-                Real = FinalExists,
-                Directory = IsDirectory,
-                Handler = null,
-                FileStream = Stream,
-                DeleteOnClose = DeleteOnClose,
-                GrantedAccess = Permissions,
-                ShareAccess = ShareAccess,
-                Mode = ModeFromCreateOptions(CreateOptions)
-            };
-
-            Instance.WinHelper.WinFiles.Add(FileObj);
-            Instance.WinHelper.RegisterOpenFile(FileObj);
-
-            WinHandle Handle = Instance.WinHelper.HandleManager.AddHandle(FileObj, Permissions);
-            if (Inherit)
-                Instance.WinHelper.HandleManager.SetHandleFlags(Handle.Handle, ObjectHandleFlags.Inherit);
-
-            Instance._emulator.WriteMemory(FileHandlePtr, (uint)Handle.Handle);
+            WinHandle Handle = Instance.WinHelper.InsertFileHandle(FileObj, Permissions, Inherit);
+            Instance.WinHelper.WritePointer(FileHandlePtr, Handle.Handle);
             Instance.WinHelper.WriteIoStatusBlock(Instance, IoStatusBlockPtr, NTSTATUS.STATUS_SUCCESS, Information);
 
             return NTSTATUS.STATUS_SUCCESS;
