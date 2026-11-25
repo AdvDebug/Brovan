@@ -15,7 +15,18 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 return;
             }
 
-            ulong AlignedLength = Instance.AlignToPageSize(length);
+            if (!UnmapRange(Instance, addr, Instance.AlignToPageSize(length)))
+            {
+                Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
+                return;
+            }
+
+            Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
+        }
+
+        // False when the backend refused an unmap.
+        internal static bool UnmapRange(BinaryEmulator Instance, ulong addr, ulong AlignedLength)
+        {
             ulong End = addr + AlignedLength;
             using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             for (int i = Instance._memory.Count - 1; i >= 0; i--)
@@ -35,10 +46,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                     continue;
 
                 if (!Instance._emulator.UnmapMemory(UnmapStart, UnmapSize))
-                {
-                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
-                    return;
-                }
+                    return false;
 
                 using (Instance.AddressSpace.Change())
                 {
@@ -65,7 +73,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 }
             }
 
-            Helper.SetReturnValue(Instance, LinuxErrno.ESUCCESS);
+            return true;
         }
     }
 }

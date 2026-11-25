@@ -93,22 +93,22 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                     Helper.SetReturnValue(Instance, -(long)LinuxErrno.EINVAL);
                     return;
                 }
+
+                // Linux: a fixed target replaces whatever it covers, and the mapping moves whatever the sizes.
+                if (!Munmap.UnmapRange(Instance, NewAddress, NewAlignedSize) ||
+                    !Instance.TryFindMemoryRegionByBase(OldAddress, out SourceIndex, out SourceRegion) ||
+                    !TryMoveRegion(Instance, Helper, SourceIndex, SourceRegion, OldAddress, OldAlignedSize, NewAddress, NewSize, true, out ulong FixedAddress))
+                {
+                    Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
+                    return;
+                }
+
+                Helper.SetReturnValue(Instance, FixedAddress);
+                return;
             }
 
             if (NewAlignedSize == OldAlignedSize)
             {
-                if ((Flags & MREMAP_FIXED) != 0 && NewAddress != OldAddress)
-                {
-                    if (!TryMoveRegion(Instance, Helper, SourceIndex, SourceRegion, OldAddress, OldAlignedSize, NewAddress, NewSize, true, out ulong FixedAddress))
-                    {
-                        Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
-                        return;
-                    }
-
-                    Helper.SetReturnValue(Instance, FixedAddress);
-                    return;
-                }
-
                 SourceRegion.Size = NewSize;
                 UpdatePoisonedMemory(ref SourceRegion, OldAddress, NewSize, NewAlignedSize);
                 Instance.SetMemoryRegion(SourceIndex, SourceRegion);
@@ -140,7 +140,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
 
             ulong ExtensionAddress = OldAddress + OldAlignedSize;
             ulong ExtensionSize = NewAlignedSize - OldAlignedSize;
-            if ((Flags & MREMAP_FIXED) == 0 && !Instance.IsRegionMapped(ExtensionAddress, ExtensionSize))
+            if (!Instance.IsRegionMapped(ExtensionAddress, ExtensionSize))
             {
                 if (Instance._emulator.MapMemory(ExtensionAddress, ExtensionSize, SourceRegion.Protections))
                 {
@@ -158,8 +158,7 @@ namespace Brovan.Core.Emulation.OS.Linux.Process
                 return;
             }
 
-            ulong DestinationAddress = (Flags & MREMAP_FIXED) != 0 ? NewAddress : 0;
-            if (!TryMoveRegion(Instance, Helper, SourceIndex, SourceRegion, OldAddress, OldAlignedSize, DestinationAddress, NewSize, (Flags & MREMAP_FIXED) != 0, out ulong ResultAddress))
+            if (!TryMoveRegion(Instance, Helper, SourceIndex, SourceRegion, OldAddress, OldAlignedSize, 0, NewSize, false, out ulong ResultAddress))
             {
                 Helper.SetReturnValue(Instance, -(long)LinuxErrno.ENOMEM);
                 return;
