@@ -23,6 +23,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         // NT: the attribute flags both the capture and MiMapViewOfSectionExCommon let through.
         private const ulong MapAttributeFlags = 0x220;
 
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) =>
+            NtMapViewOfSection.ResolveMapDomain(Instance, Instance.WinHelper.GetArg(0), Instance.WinHelper.GetArg(1));
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong SectionHandle = Instance.WinHelper.GetArg(0);

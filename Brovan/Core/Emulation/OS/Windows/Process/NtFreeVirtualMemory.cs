@@ -100,10 +100,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            // NT: fails inside any view, SEC_RESERVE included.
-            if (Instance.WinHelper.IsSectionViewAddress(BaseAddress))
-                return NTSTATUS.STATUS_UNABLE_TO_DELETE_SECTION;
-
             if (!Instance.TryFindMemoryRegion(Start, out MemoryRegion Region))
             {
                 if (Release && (Instance.Settings.Flags & LogFlags.Issues) != 0 && Instance.IsRegionFreed(BaseAddress, true))
@@ -111,7 +107,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
             }
 
-            if ((Region.Flags & AllocationType.Image) != 0)
+            // NT: fails inside any view, SEC_RESERVE included.
+            if (Instance.WinHelper.IsViewAddress(BaseAddress, Region))
                 return NTSTATUS.STATUS_UNABLE_TO_DELETE_SECTION;
 
             if (!Release && Region.IsPlaceholder)

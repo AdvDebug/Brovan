@@ -564,20 +564,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return string.IsNullOrEmpty(Path) ? NTSTATUS.STATUS_INVALID_ADDRESS : NTSTATUS.STATUS_SUCCESS;
             }
 
-            using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
-            foreach (WinSection Section in Instance.WinHelper.WinSections)
-            {
-                if (Section == null || !Section.IsViewAddress(Address))
-                    continue;
+            if (!Instance.WinHelper.TryFindSectionView(Address, out WinSection Section, out _))
+                return NTSTATUS.STATUS_INVALID_ADDRESS;
 
-                Path = Section.Path;
-                if (string.IsNullOrEmpty(Path))
-                    Path = Section.GetFileStream()?.GuestPath;
+            Path = Section.Path;
+            if (string.IsNullOrEmpty(Path))
+                Path = Section.GetFileStream()?.GuestPath;
 
-                return string.IsNullOrEmpty(Path) ? NTSTATUS.STATUS_FILE_INVALID : NTSTATUS.STATUS_SUCCESS;
-            }
-
-            return NTSTATUS.STATUS_INVALID_ADDRESS;
+            return string.IsNullOrEmpty(Path) ? NTSTATUS.STATUS_FILE_INVALID : NTSTATUS.STATUS_SUCCESS;
         }
 
         internal static void Serialize(in MEMORY_BASIC_INFORMATION Info, bool Is64, Span<byte> Data)

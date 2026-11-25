@@ -1247,6 +1247,10 @@ namespace Brovan.Core.Emulation.Guests
                 SyncIoRetry,
                 ConnectReplies,
                 ObjectNeedsKernelLock,
+
+                // Taken inside a call that runs without it: an unmap outside the section index, and a section's release.
+                ViewUnmap,
+                SectionRelease,
             }
 
             // Why a request on a file object needs KernelLock: a breakdown of ObjectNeedsKernelLock.

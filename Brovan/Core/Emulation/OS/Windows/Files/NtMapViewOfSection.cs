@@ -180,6 +180,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) =>
+            ResolveMapDomain(Instance, Instance.WinHelper.GetArg(0), Instance.WinHelper.GetArg(1));
+
+        // A data view of this process needs only the address space. Anything else takes KernelLock.
+        internal static WinSyscallDomain ResolveMapDomain(BinaryEmulator Instance, ulong SectionHandle, ulong ProcessHandle)
+        {
+            if (Instance.WinHelper.ResolveAddressSpaceCall(ProcessHandle, AccessMask.ProcessVMOperation) != WinSyscallDomain.Self
+                || Instance.WinHelper.ReferenceObjectByHandle(SectionHandle, AccessMask.None, out WinSection Section, out AccessMask Granted) != NTSTATUS.STATUS_SUCCESS
+                || Section.IsImage || NtOpenSection.IsWindowsSharedSection(Section.Name))
+                return WinSyscallDomain.KernelLock;
+
+            Instance.WinHelper.SetResolvedObject(SectionHandle, Section, Granted);
+            return WinSyscallDomain.Self;
+        }
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             ulong SectionHandle = Instance.WinHelper.GetArg(0);
@@ -207,7 +224,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ProtectionMask < 0)
                 return NTSTATUS.STATUS_INVALID_PAGE_PROTECTION;
 
-            NTSTATUS ProcessStatus = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess TargetProcess);
+            NTSTATUS ProcessStatus = Instance.WinHelper.TakeOrResolveProcess(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess TargetProcess);
             if (ProcessStatus != NTSTATUS.STATUS_SUCCESS)
                 return ProcessStatus;
 
@@ -220,12 +237,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(BaseAddressPtr, (uint)Instance.WinHelper.PointerSize) || !Instance.IsRegionMapped(ViewSizePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            WinSection Section = Instance.WinHelper.GetSectionByHandle(SectionHandle, AccessMask.GiveTemp);
-            if (Section == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
+            NTSTATUS SectionStatus = Instance.WinHelper.TakeOrReference(SectionHandle, AccessMask.None, out WinSection Section, out AccessMask Granted);
+            if (SectionStatus != NTSTATUS.STATUS_SUCCESS)
+                return SectionStatus;
 
             AccessMask RequiredAccess = (AccessMask)SectionAccessByMask[ProtectionMask & 7];
-            if ((MapSectionAccess(Instance.WinHelper.HandleManager.GetPermissionsByHandle(SectionHandle)) & RequiredAccess) != RequiredAccess)
+            if ((MapSectionAccess(Granted) & RequiredAccess) != RequiredAccess)
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
             if (NtOpenSection.IsWindowsSharedSection(Section.Name))
@@ -463,6 +480,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             ViewBase = RequestedBase;
+            if (Section.Released)
+                return NTSTATUS.STATUS_INVALID_HANDLE;
+
             if (ViewBase == 0 && !TryFindViewBase(Instance, SectionOffset, ViewSize, Instance.BaseAddress, Instance.MaxAddress, out ViewBase))
                 return NTSTATUS.STATUS_NO_MEMORY;
 
@@ -497,7 +517,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Section.AddView(SectionOffset, ViewBase, ViewSize, true, ViewProtection, FromPlaceholder);
             }
 
-            Instance.WinHelper.TrackSectionRange(ViewBase, ViewSize, Section: Section);
+            Instance.WinHelper.TrackSectionRange(ViewBase, ViewSize, WinSysHelper.SectionRangeKind.View, Section);
             Section.MappedViewCount++;
             return NTSTATUS.STATUS_SUCCESS;
         }

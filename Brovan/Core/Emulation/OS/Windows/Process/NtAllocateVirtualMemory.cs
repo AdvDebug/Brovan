@@ -372,8 +372,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
             // NT: only a section view can be copy-on-write.
-            if (!Reserve && (Protect & (PageWriteCopy | PageExecuteWriteCopy)) != 0 && !Target.Flags.HasFlag(Brovan.Core.Emulation.AllocationType.Image) &&
-                !Instance.WinHelper.IsSectionViewAddress(BaseAddress))
+            if (!Reserve && (Protect & (PageWriteCopy | PageExecuteWriteCopy)) != 0 && !Instance.WinHelper.IsViewAddress(BaseAddress, Target))
                 return NTSTATUS.STATUS_INVALID_PAGE_PROTECTION;
 
             if (!Reserve)

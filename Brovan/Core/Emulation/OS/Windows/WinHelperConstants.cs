@@ -2359,7 +2359,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool FromPlaceholder;
     }
 
-    // Views, the view counts, BackingAddress, Storage and SharedMemoryPath change under the address space lock.
+    // Views, the view counts, BackingAddress, Storage, SharedMemoryPath and Released change under the address space lock.
     public class WinSection : IHandleObject
     {
         public string Name;
@@ -2379,6 +2379,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public ulong ImageSectionId;
         public int MappedViewCount;
+
+        // Set when the last view and the last handle are gone. A map that still holds the object maps nothing.
+        public bool Released;
         public bool IsImage => ((Attributes & 0x01000000) != 0);
         public ulong ImageBase;
         public bool Initialized;
@@ -2406,11 +2409,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return -1;
-        }
-
-        public bool IsViewAddress(ulong Address)
-        {
-            return FindViewIndex(Address) >= 0;
         }
 
         public bool TryFindView(ulong Address, out WinSectionView View)

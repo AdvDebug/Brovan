@@ -2974,6 +2974,27 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.Resolved = Object;
         }
 
+        // The object and the access of the one handle entry the resolve found, taken back as a pair.
+        internal void SetResolvedObject(ulong Handle, IHandleObject Object, AccessMask Granted)
+        {
+            SetResolvedObject(Handle, Object);
+            Call.ResolvedAccess = Granted;
+        }
+
+        internal NTSTATUS TakeOrReference<T>(ulong Handle, AccessMask RequiredAccess, out T Object, out AccessMask Granted) where T : class, IHandleObject
+        {
+            CallState State = Call;
+            AccessMask Kept = State.ResolvedAccess;
+            State.ResolvedAccess = AccessMask.None;
+            T? Resolved = TakeResolvedObject<T>(Handle);
+            if (Resolved == null)
+                return ReferenceObjectByHandle(Handle, RequiredAccess, out Object, out Granted);
+
+            Object = Resolved;
+            Granted = Kept;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
         internal T? TakeResolvedObject<T>(ulong Handle) where T : class, IHandleObject
         {
             CallState State = Call;
@@ -3616,7 +3637,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong PreAllocSharedBase = Emulator.MapUniqueAddress(PreAllocSharedSectionSize, MemoryProtection.ReadWrite);
             if (PreAllocSharedBase != 0)
             {
-                WinSections.Add(new WinSection
+                WinSection Shared = new WinSection
                 {
                     Name = "\\Windows\\SharedSection",
                     Size = PreAllocSharedSectionSize,
@@ -3624,8 +3645,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Attributes = 0,
                     BackingAddress = PreAllocSharedBase,
                     Initialized = false
-                });
-                TrackSectionRange(PreAllocSharedBase, PreAllocSharedSectionSize);
+                };
+                WinSections.Add(Shared);
+                TrackSectionRange(PreAllocSharedBase, PreAllocSharedSectionSize, SectionRangeKind.Backing, Shared);
             }
 
             foreach (string PortName in new[]
@@ -3758,8 +3780,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             internal static readonly ulong[] SingleZeroParameter = new ulong[1];
         }
 
-        // Section is the mapped section of a view, null for a system view or a section's backing range.
-        private readonly record struct SectionRange(ulong Base, ulong End, bool GuestUnmaps, WinSection? Section);
+        internal enum SectionRangeKind
+        {
+            View,
+            Backing,
+            System,
+        }
+
+        // The one index from an address to its section. Section is null only for a system view.
+        private readonly record struct SectionRange(ulong Base, ulong End, SectionRangeKind Kind, bool GuestUnmaps, WinSection? Section);
 
         // Sorted by base and disjoint. The address space lock covers it, the section views and their counts.
         private readonly List<SectionRange> SectionRanges = new();
@@ -3788,14 +3817,20 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Found;
         }
 
-        internal void TrackSectionRange(ulong Base, ulong Size, bool GuestUnmaps = false, WinSection? Section = null)
+        internal void TrackSectionRange(ulong Base, ulong Size, SectionRangeKind Kind, WinSection? Section = null, bool GuestUnmaps = false)
         {
             using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             int Index = FindSectionRangeIndex(Base);
             if (Index >= 0 && SectionRanges[Index].Base == Base)
                 return;
 
-            SectionRanges.Insert(Index + 1, new SectionRange(Base, Base + Size, GuestUnmaps, Section));
+            SectionRanges.Insert(Index + 1, new SectionRange(Base, Base + Size, Kind, GuestUnmaps, Section));
+        }
+
+        private bool TryFindSectionRange(ulong Address, out int Index)
+        {
+            Index = FindSectionRangeIndex(Address);
+            return Index >= 0 && Address < SectionRanges[Index].End;
         }
 
         internal void UntrackSectionRange(ulong Base)
@@ -3826,7 +3861,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryMapStorage(Storage, Size, out Base))
                 return false;
 
-            TrackSectionRange(Base, Size, GuestUnmaps);
+            TrackSectionRange(Base, Size, SectionRangeKind.System, GuestUnmaps: GuestUnmaps);
             if (NoChange)
                 Emulator.MarkNoChangeView(Base);
             return true;
@@ -3852,27 +3887,57 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool IsSectionViewAddress(ulong Address)
         {
             using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
-            int Index = FindSectionRangeIndex(Address);
-            return Index >= 0 && Address < SectionRanges[Index].End;
+            return TryFindSectionRange(Address, out _);
         }
 
-        internal bool TryFindSectionView(ulong Address, out WinSectionView View)
+        // NT: a section view, data or image, of any kind; Region is the region at Address.
+        internal bool IsViewAddress(ulong Address, in MemoryRegion Region)
+            => (Region.Flags & AllocationType.Image) != 0 || IsSectionViewAddress(Address);
+
+        internal bool TryFindSectionView(ulong Address, out WinSectionView View) => TryFindSectionView(Address, out _, out View);
+
+        internal bool TryFindSectionView(ulong Address, out WinSection Section, out WinSectionView View)
         {
             using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
-            for (int Index = 0; Index < WinSections.Count; Index++)
+            if (TryFindSectionRange(Address, out int Index) && SectionRanges[Index] is { Kind: SectionRangeKind.View, Section: not null } Range
+                && Range.Section.TryFindView(Address, out View))
             {
-                if (WinSections[Index]?.TryFindView(Address, out View) == true)
-                    return true;
+                Section = Range.Section;
+                return true;
             }
 
+            Section = null!;
             View = default;
             return false;
         }
 
+        // The section a view or a backing range maps at Address, with its offset there and the bytes left in that range.
+        internal WinSection? FindSectionAt(ulong Address, out ulong SectionOffset, out ulong Remaining)
+        {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
+            SectionOffset = 0;
+            Remaining = 0;
+            if (!TryFindSectionRange(Address, out int Index) || SectionRanges[Index].Section is not WinSection Section)
+                return null;
+
+            if (SectionRanges[Index].Kind == SectionRangeKind.Backing)
+            {
+                SectionOffset = Address - Section.BackingAddress;
+                Remaining = Section.Size - SectionOffset;
+                return Section;
+            }
+
+            if (!Section.TryFindView(Address, out WinSectionView View))
+                return null;
+
+            SectionOffset = View.Offset + (Address - View.Base);
+            Remaining = View.Size - (Address - View.Base);
+            return Section;
+        }
+
         public void MirrorCommitToSectionAliases(ulong Address, ulong Size)
         {
-            int RangeIndex = FindSectionRangeIndex(Address);
-            if (RangeIndex < 0 || Address >= SectionRanges[RangeIndex].End)
+            if (!TryFindSectionRange(Address, out int RangeIndex) || SectionRanges[RangeIndex].Kind != SectionRangeKind.View)
                 return;
 
             WinSection? Section = SectionRanges[RangeIndex].Section;
@@ -3891,120 +3956,147 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        internal enum ViewUnmap
+        {
+            Unmapped,
+            NotMapped,
+            NeedsKernelLock,
+        }
+
+        // For a caller under KernelLock, which releases a section that lost its last view at once.
         public bool UnmapViewOfSection(ulong BaseAddress)
         {
+            ViewUnmap Outcome = TryUnmapView(BaseAddress, out WinSection? Release);
+            if (Release != null)
+                ReleaseSectionIfUnreferenced(Release);
+            return Outcome == ViewUnmap.Unmapped;
+        }
+
+        // The index kinds need only the address space, anything else needs KernelLock. The caller releases Release once
+        // it holds no address space scope.
+        internal ViewUnmap TryUnmapView(ulong BaseAddress, out WinSection? Release)
+        {
             using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
+            Release = null;
             if (BaseAddress == 0)
-                return false;
+                return ViewUnmap.NotMapped;
+
+            if (TryFindSectionRange(BaseAddress, out int RangeIndex))
+                return UnmapIndexedView(BaseAddress, RangeIndex, out Release);
+
+            if (!Emulator.KernelLockCovered)
+                return ViewUnmap.NeedsKernelLock;
 
             WinModule Module = FindMappedImageViewByAddress(BaseAddress);
-            if (Module != null)
+            return Module != null && UnmapImageView(Module) ? ViewUnmap.Unmapped : ViewUnmap.NotMapped;
+        }
+
+        private ViewUnmap UnmapIndexedView(ulong BaseAddress, int RangeIndex, out WinSection? Release)
+        {
+            Release = null;
+            SectionRange Range = SectionRanges[RangeIndex];
+            if (Range.Kind == SectionRangeKind.System)
             {
-                ulong ViewBase = Module.MappedBase;
-                ulong End = ViewBase + Module.SizeOfImage;
+                if (!Range.GuestUnmaps)
+                    return ViewUnmap.NotMapped;
 
-                int First = Emulator.FindFirstRegionStartingBefore(ViewBase) + 1;
-                int Last = Emulator.FindFirstRegionStartingBefore(End) + 1;
+                RemoveSystemView(RangeIndex);
+                return ViewUnmap.Unmapped;
+            }
 
-                bool UnmappedAny = false;
-                for (int i = Last - 1; i >= First; i--)
-                {
-                    MemoryRegion Region = Emulator._memory[i];
-                    ulong Size = Region.Size != 0 ? Region.Size : (Region.RequestedSize + 0xFFF) & ~0xFFFUL;
-                    if (Size == 0)
-                        continue;
+            WinSection Section = Range.Section!;
+            if (Range.Kind == SectionRangeKind.Backing)
+            {
+                if (Section.BackingViewCount == 0)
+                    return ViewUnmap.NotMapped;
 
-                    if (Emulator._emulator.UnmapMemory(Region.BaseAddress, Size))
-                    {
-                        using (Emulator.AddressSpace.Change())
-                        {
-                            Emulator.RemoveMemoryRegionAt(i);
-                            Emulator.AddFreedRegion(Region.BaseAddress, Size);
-                        }
-                        UnmappedAny = true;
-                    }
-                }
+                Section.BackingViewCount--;
+                if (Section.MappedViewCount > 0)
+                    Section.MappedViewCount--;
 
-                if (UnmappedAny)
-                {
-                    ForgetLockedPages(ViewBase, End);
-                    UnregisterMappedImageView(Module);
-
-                    if (!Module.IsSectionView)
-                    {
-                        WinModule LoadedModule = WinModules?.FirstOrDefault(M => M != null && M.MappedBase == Module.MappedBase);
-                        if (LoadedModule != null)
-                            LoadedModule.Initialized = false;
-                    }
-                }
-
-                return UnmappedAny;
+                ForgetLockedPages(Section.BackingAddress, Section.BackingAddress + Section.Size);
+                Release = Section;
+                return ViewUnmap.Unmapped;
             }
 
             // A section that keeps its storage in the views themselves has to forget the range as it goes
             // away, or a later view of the same section offset would alias pages that are no longer mapped.
-            for (int Index = 0; Index < WinSections.Count; Index++)
-            {
-                WinSection Section = WinSections[Index];
-                if (Section == null || !Section.RemoveViewContaining(BaseAddress, out WinSectionView Removed))
-                    continue;
+            if (!Section.RemoveViewContaining(BaseAddress, out WinSectionView Removed))
+                return ViewUnmap.NotMapped;
 
-                UntrackSectionRange(Removed.Base);
+            UntrackSectionRange(Removed.Base);
 
-                if (Section.MappedViewCount > 0)
-                    Section.MappedViewCount--;
+            if (Section.MappedViewCount > 0)
+                Section.MappedViewCount--;
 
-                if (Section.BackingAddress == Removed.Base)
-                    Section.BackingAddress = 0;
+            if (Section.BackingAddress == Removed.Base)
+                Section.BackingAddress = 0;
 
-                bool UnmappedView = Emulator.UnmapMemoryRuns(Removed.Base, Removed.Size);
-                ForgetLockedPages(Removed.Base, Removed.Base + Removed.Size);
-
-                ReleaseSectionIfUnreferenced(Section);
-                return UnmappedView;
-            }
-
-            WinSection? ViewSection = FindSectionByBackingAddress(BaseAddress);
-            if (ViewSection != null)
-            {
-                if (ViewSection.BackingViewCount == 0)
-                    return false;
-
-                ViewSection.BackingViewCount--;
-                if (ViewSection.MappedViewCount > 0)
-                    ViewSection.MappedViewCount--;
-
-                ForgetLockedPages(ViewSection.BackingAddress, ViewSection.BackingAddress + ViewSection.Size);
-                ReleaseSectionIfUnreferenced(ViewSection);
-                return true;
-            }
-
-            int RangeIndex = FindSectionRangeIndex(BaseAddress);
-            if (RangeIndex >= 0 && BaseAddress < SectionRanges[RangeIndex].End && SectionRanges[RangeIndex].GuestUnmaps)
-            {
-                RemoveSystemView(RangeIndex);
-                return true;
-            }
-
-            return false;
+            bool UnmappedView = Emulator.UnmapMemoryRuns(Removed.Base, Removed.Size);
+            ForgetLockedPages(Removed.Base, Removed.Base + Removed.Size);
+            Release = Section;
+            return UnmappedView ? ViewUnmap.Unmapped : ViewUnmap.NotMapped;
         }
 
-        private WinSection? FindSectionByBackingAddress(ulong Address)
+        private bool UnmapImageView(WinModule Module)
         {
-            for (int Index = 0; Index < WinSections.Count; Index++)
+            ulong ViewBase = Module.MappedBase;
+            ulong End = ViewBase + Module.SizeOfImage;
+
+            int First = Emulator.FindFirstRegionStartingBefore(ViewBase) + 1;
+            int Last = Emulator.FindFirstRegionStartingBefore(End) + 1;
+
+            bool UnmappedAny = false;
+            for (int i = Last - 1; i >= First; i--)
             {
-                WinSection Section = WinSections[Index];
-                if (Section.BackingAddress != 0 && Address >= Section.BackingAddress && Address - Section.BackingAddress < Section.Size)
-                    return Section;
+                MemoryRegion Region = Emulator._memory[i];
+                ulong Size = Region.Size != 0 ? Region.Size : (Region.RequestedSize + 0xFFF) & ~0xFFFUL;
+                if (Size == 0)
+                    continue;
+
+                if (Emulator._emulator.UnmapMemory(Region.BaseAddress, Size))
+                {
+                    using (Emulator.AddressSpace.Change())
+                    {
+                        Emulator.RemoveMemoryRegionAt(i);
+                        Emulator.AddFreedRegion(Region.BaseAddress, Size);
+                    }
+                    UnmappedAny = true;
+                }
             }
 
-            return null;
+            if (UnmappedAny)
+            {
+                ForgetLockedPages(ViewBase, End);
+                UnregisterMappedImageView(Module);
+
+                if (!Module.IsSectionView)
+                {
+                    WinModule LoadedModule = WinModules?.FirstOrDefault(M => M != null && M.MappedBase == Module.MappedBase);
+                    if (LoadedModule != null)
+                        LoadedModule.Initialized = false;
+                }
+
+                LdrTracker?.NotifyImageMapped();
+            }
+
+            return UnmappedAny;
+        }
+
+        // A section that lost its last view and has no handle left; the release itself needs KernelLock.
+        internal bool MayRelease(WinSection Section)
+        {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
+            return Section.MappedViewCount == 0 && !Section.Released && HandleManager.CountHandlesByObjectId(Section.ObjectId) == 0;
         }
 
         internal void ReleaseSectionIfUnreferenced(WinSection Section)
         {
+            if (RankedLock.OrderChecked && !Emulator.KernelLockCovered)
+                RankedLock.FailOrder("A section release runs without KernelLock.");
+
             using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
-            if (Section.MappedViewCount != 0)
+            if (Section.Released || Section.MappedViewCount != 0)
                 return;
 
             if (HandleManager.CountHandlesByObjectId(Section.ObjectId) != 0)
@@ -4024,6 +4116,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Section.Storage = IntPtr.Zero;
             }
 
+            Section.Released = true;
             Section.ReleaseFileStream();
             WinSections.Remove(Section);
         }
@@ -11675,13 +11768,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return 0;
             }
 
-            WinSection Section = CreateSection(null, (ulong)Data.Length, (uint)ConvertInternalToWinProtect(Protection), 0, null, Base, IntPtr.Zero);
-            Section.MappedViewCount = 1;
-            Section.BackingViewCount = 1;
+            CreateSection(null, (ulong)Data.Length, (uint)ConvertInternalToWinProtect(Protection), 0, null, Base, IntPtr.Zero, MappedViews: 1, BackingViews: 1);
             return Base;
         }
 
-        private WinSection CreateSection(string? Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, IntPtr Storage, string SharedMemoryPath = null)
+        // The counts are set before the section is published, so no writer changes them outside the address space lock.
+        private WinSection CreateSection(string? Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, IntPtr Storage,
+            string SharedMemoryPath = null, int MappedViews = 0, int BackingViews = 0)
         {
             if (string.IsNullOrEmpty(Name))
                 Name = GenerateAnonymousObjectName("Section_");
@@ -11696,7 +11789,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 FileStream = string.IsNullOrEmpty(Path) ? null : WindowsFileStream.FromGuestPath(Path),
                 BackingAddress = BackingAddress,
                 Storage = Storage,
-                SharedMemoryPath = SharedMemoryPath
+                SharedMemoryPath = SharedMemoryPath,
+                MappedViewCount = MappedViews,
+                BackingViewCount = BackingViews,
             };
 
             if (Sec.IsImage && !string.IsNullOrEmpty(Path))
@@ -11704,7 +11799,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinSections.Add(Sec);
             if (BackingAddress != 0)
-                TrackSectionRange(BackingAddress, Size);
+                TrackSectionRange(BackingAddress, Size, SectionRangeKind.Backing, Sec);
 
             return Sec;
         }
@@ -11746,10 +11841,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return null;
             }
 
-            Section = CreateSection(Name, Size, PAGE_READONLY, SEC_COMMIT, null, 0, Storage);
-
             // NT keeps these sections for the life of the system.
-            Section.MappedViewCount++;
+            Section = CreateSection(Name, Size, PAGE_READONLY, SEC_COMMIT, null, 0, Storage, MappedViews: 1);
 
             if (Name == null)
                 NlsLocaleSection = Section;

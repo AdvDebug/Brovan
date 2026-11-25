@@ -1,4 +1,5 @@
 using System;
+using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
 namespace Brovan.Core.Emulation.OS.Windows
@@ -79,18 +80,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Status;
         }
 
-        private static NTSTATUS FlushRange(BinaryEmulator Instance, ulong BaseAddress, ulong RegionSize, out ulong FlushedSize)
+        private static unsafe NTSTATUS FlushRange(BinaryEmulator Instance, ulong BaseAddress, ulong RegionSize, out ulong FlushedSize)
         {
             FlushedSize = 0;
 
             if (BaseAddress == 0 || !Instance.IsRegionMapped(BaseAddress, 1))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            WinSection Section;
-            ulong SectionOffset;
-            ulong ViewRemaining;
-            using (Instance.AddressSpace.Hold())
-                Section = FindSectionByAddress(Instance, BaseAddress, out SectionOffset, out ViewRemaining);
+            WinSection Section = Instance.WinHelper.FindSectionAt(BaseAddress, out ulong SectionOffset, out ulong ViewRemaining);
             if (Section == null)
                 return NTSTATUS.STATUS_SUCCESS;
 
@@ -105,8 +102,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (string.IsNullOrEmpty(Section.Path) || Section.IsImage)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            if (!Instance.IsRegionCommitted(BaseAddress, FlushedSize))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
+            // A view's address can be unmapped and mapped again meanwhile; its storage stays until a release under KernelLock.
+            if (Section.Storage == IntPtr.Zero)
+            {
+                Utils.LogError($"[NtFlushVirtualMemory] File section \"{Section.Path}\" has no storage to flush from.");
+                return NTSTATUS.STATUS_ACCESS_DENIED;
+            }
 
             WindowsFileStream Stream = Section.GetFileStream(true);
             if (Stream == null)
@@ -117,10 +118,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 for (ulong Done = 0; Done < FlushedSize;)
                 {
                     int ChunkSize = (int)Math.Min(FlushedSize - Done, (ulong)NtReadFile.IoChunkBytes);
-                    Span<byte> Chunk = Instance.WinHelper.ReadMemorySpan(BaseAddress + Done, (uint)ChunkSize);
-                    if (Chunk.Length < ChunkSize)
-                        return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
+                    ReadOnlySpan<byte> Chunk = new ReadOnlySpan<byte>((byte*)Section.Storage + SectionOffset + Done, ChunkSize);
                     Stream.WriteAt((long)(SectionOffset + Done), Chunk);
                     Done += (ulong)ChunkSize;
                 }
@@ -134,33 +132,5 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.TriggerEventMessage($"[+] NtFlushVirtualMemory: Base=0x{BaseAddress:X}, Size=0x{FlushedSize:X}, File=\"{Section.Path}\".", LogFlags.Syscall);
             return NTSTATUS.STATUS_SUCCESS;
         }
-
-        private static WinSection FindSectionByAddress(BinaryEmulator Instance, ulong Address, out ulong SectionOffset, out ulong ViewRemaining)
-        {
-            foreach (WinSection Section in Instance.WinHelper.WinSections)
-            {
-                if (Section == null || Section.Size == 0)
-                    continue;
-
-                if (Section.TryFindView(Address, out WinSectionView View))
-                {
-                    SectionOffset = View.Offset + (Address - View.Base);
-                    ViewRemaining = View.Size - (Address - View.Base);
-                    return Section;
-                }
-
-                if (Section.BackingAddress != 0 && Address >= Section.BackingAddress && Address - Section.BackingAddress < Section.Size)
-                {
-                    SectionOffset = Address - Section.BackingAddress;
-                    ViewRemaining = Section.Size - SectionOffset;
-                    return Section;
-                }
-            }
-
-            SectionOffset = 0;
-            ViewRemaining = 0;
-            return null;
-        }
-
     }
 }
