@@ -81,6 +81,45 @@ namespace Brovan.Core.Emulation
             _runs.Add(new Run { Key = key, Start = start, Size = size });
         }
 
+        // The parts of a run before and after [start, start + size); either can be empty.
+        private static bool TrySplit(in Run run, IntPtr start, ulong size, out Run head, out Run tail)
+        {
+            ulong runStart = (ulong)run.Start;
+            ulong runEnd = runStart + run.Size;
+            ulong cutStart = (ulong)start;
+            ulong cutEnd = cutStart + size;
+            head = default;
+            tail = default;
+            if (cutStart >= runEnd || cutEnd <= runStart)
+                return false;
+
+            if (cutStart > runStart)
+                head = new Run { Key = run.Key, Start = run.Start, Size = cutStart - runStart };
+            if (cutEnd < runEnd)
+                tail = new Run { Key = run.Key, Start = (IntPtr)(long)cutEnd, Size = runEnd - cutEnd };
+            return true;
+        }
+
+        // Returns the bytes that left the runs.
+        internal ulong Withdraw(IntPtr key, IntPtr start, ulong size)
+        {
+            ulong gone = 0;
+            for (int i = 0; i < _runs.Count; i++)
+            {
+                if (_runs[i].Key != key || !TrySplit(_runs[i], start, size, out Run head, out Run tail))
+                    continue;
+
+                gone += _runs[i].Size - head.Size - tail.Size;
+                if (tail.Size != 0)
+                    _runs.Add(tail);
+                if (head.Size != 0)
+                    _runs[i] = head;
+                else
+                    _runs.RemoveAt(i--);
+            }
+            return gone;
+        }
+
         internal void Remove(IntPtr key)
         {
             int kept = 0;

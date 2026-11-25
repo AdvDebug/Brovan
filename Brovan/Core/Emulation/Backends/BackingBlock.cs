@@ -128,12 +128,12 @@ namespace Brovan.Core.Emulation
         {
             public IntPtr Base;
             public T Block;
-            public HostDiscardRuns.Run Run;
         }
 
         private sealed class Batch
         {
             public readonly List<Entry> Entries = new();
+            public readonly HostDiscardRuns Runs = new();
             public QuiescenceSnapshot Snapshot;
             public ulong Bytes;
             public long SealedAt;
@@ -273,10 +273,25 @@ namespace Brovan.Core.Emulation
             if (!HostDiscard.ZeroUnderReaders(Start, Size))
                 return false;
 
+            WithdrawDiscards(First.OwnedBacking, Start, Size);
             AddLive(Block, (int)(Size / PageSize));
             Base = First.OwnedBacking;
             Host = Start;
             return true;
+        }
+
+        // A freed page that a new commit takes before its queued discard ran is live again, so its queued discard goes.
+        public void WithdrawDiscards(IntPtr Key, IntPtr Start, ulong Size)
+        {
+            Discards.Withdraw(Key, Start, Size);
+            if (_open != null)
+                _open.Bytes -= _open.Runs.Withdraw(Key, Start, Size);
+            foreach (Batch Pending in _sealed)
+            {
+                ulong Gone = Pending.Runs.Withdraw(Key, Start, Size);
+                Pending.Bytes -= Gone;
+                _deferredBytes -= Gone;
+            }
         }
 
         private void ReleaseParked(GuestPage Parked)
@@ -367,7 +382,7 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 if (Deferring)
-                    Defer(new Entry { Run = Run }, Run.Size);
+                    DeferRun(Run);
                 else
                     _site.DiscardRun(Run, Block);
             }
@@ -441,16 +456,25 @@ namespace Brovan.Core.Emulation
             Open.Bytes += Bytes;
         }
 
+        private void DeferRun(in HostDiscardRuns.Run Run)
+        {
+            Batch Open = _open ??= new Batch();
+            Open.Runs.Add(Run.Key, Run.Start, Run.Size);
+            Open.Bytes += Run.Size;
+        }
+
+        // A block freed in this batch has left the table, so its runs here find nothing, whichever goes first.
         private void RunEntries(Batch Done)
         {
             List<Entry> Entries = Done.Entries;
             for (int i = 0; i < Entries.Count; i++)
+                _site.FreeBlock(Entries[i].Base, Entries[i].Block);
+
+            for (int i = 0; i < Done.Runs.Count; i++)
             {
-                Entry Item = Entries[i];
-                if (Item.Block != null)
-                    _site.FreeBlock(Item.Base, Item.Block);
-                else if (TryGetDiscardable(Item.Run, out T Block))
-                    _site.DiscardRun(Item.Run, Block);
+                HostDiscardRuns.Run Run = Done.Runs[i];
+                if (TryGetDiscardable(Run, out T Block))
+                    _site.DiscardRun(Run, Block);
             }
         }
 

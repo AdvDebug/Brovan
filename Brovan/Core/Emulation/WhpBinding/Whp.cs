@@ -2234,10 +2234,15 @@ namespace Brovan.Core.Emulation
             {
                 // A slot frees for reuse once its deferred discard runs.
                 _frees.CompletePassedIfAny();
-                if (!window.CanCommit(first, count) && !(allocation.IsDiscardable && window.TryZeroFreed(first, count)))
+                if (!window.CanCommit(first, count))
                 {
-                    WindowStats.Fallback(WindowFallback.SlotCommitted);
-                    return false;
+                    if (!allocation.IsDiscardable || !window.TryZeroFreed(first, count))
+                    {
+                        WindowStats.Fallback(WindowFallback.SlotCommitted);
+                        return false;
+                    }
+
+                    _frees.WithdrawDiscards(backing, window.SlotOf(first), size);
                 }
             }
 
@@ -2286,6 +2291,16 @@ namespace Brovan.Core.Emulation
         // A revived page keeps the flags of the map it is revived under.
         private bool InstalledWritableAt(ulong gpa, IntPtr host) => IsInstalledAt(gpa, host, out bool writable) && writable;
 
+        // A queued run moves rather than copies, so a freed slot never has two that a later commit could outlive.
+        private void RequeueFreedSlots(BackingAllocation allocation)
+        {
+            if (allocation.Window == null)
+                return;
+
+            _frees.WithdrawDiscards(allocation.Window.Host, allocation.Window.Host, BackingWindowSize);
+            allocation.Window.AddFreedSlots(_frees.Discards);
+        }
+
         // Only after the rebuild unmaps the pages. Until then other processors can reach the backing.
         private void FreeReleasedBackings()
         {
@@ -2324,7 +2339,7 @@ namespace Brovan.Core.Emulation
 
             public void PageLeft(BackingAllocation allocation, IntPtr hostPage) => allocation.Window?.Free(hostPage);
 
-            public void AliasLeft(BackingAllocation allocation) => allocation.Window?.AddFreedSlots(_owner._frees.Discards);
+            public void AliasLeft(BackingAllocation allocation) => _owner.RequeueFreedSlots(allocation);
 
             public void MarkPageDirty(ulong guest)
             {
@@ -2390,8 +2405,8 @@ namespace Brovan.Core.Emulation
                 return;
 
             allocation.Pins--;
-            if (allocation.Window != null && allocation.IsReferenced && allocation.IsDiscardable)
-                allocation.Window.AddFreedSlots(_frees.Discards);
+            if (allocation.IsReferenced && allocation.IsDiscardable)
+                RequeueFreedSlots(allocation);
             _frees.FreeIfUnreferenced(pin, allocation);
             _frees.Settle();
         }
