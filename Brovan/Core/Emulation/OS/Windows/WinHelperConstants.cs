@@ -1514,7 +1514,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // Poisoned across a bump, so either store leaves a value above any epoch a scan checked at.
         internal long LastSignalEpoch;
 
-        // Written only under the kernel lock.
+        // Written under the scheduler lock.
         internal FiledWaiter[] FiledWaiters;
         internal int FiledWaiterCount;
 
@@ -2083,6 +2083,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             get => NotifySignaledState;
             set
             {
+                CheckWrite();
                 NotifySignaledState = value;
                 if (value)
                     Signal();
@@ -2548,6 +2549,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal readonly List<WinWaitCompletionPacket> WaitPackets = new List<WinWaitCompletionPacket>();
 
+        // Of those, the ones whose target has no wait object, such as console input, which only KernelLock covers.
+        internal int UnwaitableTargetPackets;
+
         public int PendingCount => Queued.Count;
 
         public void Post(WinIoCompletionEntry Entry)
@@ -2903,6 +2907,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             Port.WaitPackets.Add(this);
             if (TargetWait.Waitable != null)
                 (TargetWait.Waitable.TargetedBy ??= new List<WinWaitCompletionPacket>()).Add(this);
+            else
+                Port.UnwaitableTargetPackets++;
         }
 
         public void Disassociate()
@@ -2911,7 +2917,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Associated)
             {
                 Completion.WaitPackets.Remove(this);
-                Target.Waitable?.TargetedBy.Remove(this);
+                if (Target.Waitable != null)
+                    Target.Waitable.TargetedBy.Remove(this);
+                else
+                    Completion.UnwaitableTargetPackets--;
             }
 
             Associated = false;
@@ -2984,6 +2993,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             get => SignaledState;
             set
             {
+                CheckWrite();
                 SignaledState = value;
                 if (value)
                     Signal();

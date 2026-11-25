@@ -4285,9 +4285,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 && OwnedByThread(Window, ThreadId);
         }
 
-        internal static bool HasQueuedInputEvent(BinaryEmulator Instance, uint WakeMask, uint ThreadId)
+        internal static bool HasQueuedInputEvent(BinaryEmulator Instance, uint WakeMask, uint ThreadId, bool DrainHost = true)
         {
-            return GetQueuedWakeBits(Instance, WakeMask, ThreadId) != 0;
+            return GetQueuedWakeBits(Instance, WakeMask, ThreadId, DrainHost) != 0;
         }
 
         // For a layout that is not a substitute, both halves of the HKL are the language the KLID ends with.
@@ -4388,9 +4388,11 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         }
 
         // A thread told about work it may not dequeue wakes, finds nothing, and parks again at once.
-        internal static uint GetQueuedWakeBits(BinaryEmulator Instance, uint WakeMask, uint ThreadId)
+        // The wake scan passes DrainHost false: the pass drains host input for blocked waiters before it.
+        internal static uint GetQueuedWakeBits(BinaryEmulator Instance, uint WakeMask, uint ThreadId, bool DrainHost = true)
         {
-            DrainHostEvents(Instance);
+            if (DrainHost)
+                DrainHostEvents(Instance);
 
             if (WakeMask == 0)
                 return 0;

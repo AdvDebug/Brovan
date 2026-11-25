@@ -73,6 +73,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // A timer that came due before the cancel keeps its signal, as on NT.
         public static void CancelTimer(BinaryEmulator Instance, WinTimer Timer)
         {
+            using RankedLock.Scope StateScope = Timer.EnterStateScope();
             Instance.RefreshTimer(Timer);
             Timer.Active = false;
             ClearTimerApc(Instance, Timer);
@@ -81,6 +82,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static void SetTimerApc(BinaryEmulator Instance, WinTimer Timer, ulong ApcRoutine, ulong ApcContext)
         {
+            using RankedLock.Scope StateScope = Timer.EnterStateScope();
             ClearTimerApc(Instance, Timer);
             if (ApcRoutine == 0)
                 return;
@@ -111,11 +113,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Timer.ApcThread == null)
                 return;
 
+            using RankedLock.Scope SchedulerScope = Instance.SchedulerLock.EnterScope();
             if (Timer.QueuedApc != null)
-            {
-                using (Instance.SchedulerLock.EnterScope())
-                    WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Remove(Timer.QueuedApc);
-            }
+                WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Remove(Timer.QueuedApc);
 
             Timer.ApcThread = null;
             Timer.ApcRoutine = 0;
@@ -135,6 +135,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static void ArmTimer(BinaryEmulator Instance, WinTimer Timer, long DueMilliseconds, long PeriodMilliseconds, out bool WasSignaled)
         {
+            using RankedLock.Scope StateScope = Timer.EnterStateScope();
             WasSignaled = Timer.Signaled;
             Timer.Signaled = false;
             Timer.Active = true;

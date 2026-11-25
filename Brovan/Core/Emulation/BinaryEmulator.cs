@@ -897,19 +897,23 @@ namespace Brovan.Core.Emulation
             if (!SmpEnabled || MlfqLevels == 0 || WakeSignal.Current == EpochBeforeCallback)
                 return;
 
-            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
-            if (WakeSignal.Current == LastScannedWakeEpoch)
-                return;
+            using (SchedulerLock.EnterScope())
+            {
+                if (WakeSignal.Current == LastScannedWakeEpoch)
+                    return;
 
-            long Mark = HoldMark();
-            UpdateMlfqWakeups(MlfqReadyQueues, MlfqQueuedThreads, MlfqLevels, MlfqSchedulerTick);
-            NoteHold(HoldSite.ProducerScan, Mark);
+                long Mark = HoldMark();
+                UpdateMlfqWakeups(MlfqReadyQueues, MlfqQueuedThreads, MlfqLevels, MlfqSchedulerTick);
+                NoteHold(HoldSite.ProducerScan, Mark);
+            }
+
+            CheckDeferredWaits(MlfqReadyQueues, MlfqQueuedThreads, MlfqLevels, MlfqSchedulerTick);
         }
 
-        private enum HoldSite { PollHostWork, WakeScan, Dispatch, Slice, SliceEnd, GuestCallback, ProducerScan }
+        private enum HoldSite { PollHostWork, WakeScan, Dispatch, Slice, SliceEnd, GuestCallback, ProducerScan, DeferredWaitCheck }
 
         private static readonly string[] HoldSiteNames =
-            { "host work poll", "wake scan", "dispatch", "slice", "slice end", "guest callback", "producer scan" };
+            { "host work poll", "wake scan", "dispatch", "slice", "slice end", "guest callback", "producer scan", "deferred wait check" };
 
         private long HoldMark() => KernelLock.CountsHolds ? KernelLock.HeldTicks() : 0;
 
@@ -1141,6 +1145,8 @@ namespace Brovan.Core.Emulation
             // read none. Only this worker writes it.
             public long Quiescence = 1;
             public bool DeferredFreeWaitDue;
+
+            public readonly List<(EmulatedThread Thread, long Generation)> DeferredWaits = new();
 
             public SchedulerWorker(BinaryEmulator Owner, int Index)
             {
@@ -3167,7 +3173,9 @@ namespace Brovan.Core.Emulation
 
             if (Thread.HostWorker != -1)
             {
-                TryClaimWait(Thread, Now);
+                // A claim refuses the current thread, so its own wait is not deferred for one.
+                if (Thread == CurrentThread || !DeferWaitCheck(Thread))
+                    TryClaimWait(Thread, Now);
                 return false;
             }
 
@@ -3185,7 +3193,7 @@ namespace Brovan.Core.Emulation
                 Thread.State = EmulatedThreadState.Ready;
                 Changed = true;
             }
-            else if (Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive)
+            else if (Thread.State == EmulatedThreadState.Waiting && Thread.WaitActive && !DeferWaitCheck(Thread))
             {
                 bool Check = !CanSkipWaitCheck(Thread, Now);
                 if (Check && TrySatisfyThreadWait(Thread, Now))
@@ -3210,12 +3218,48 @@ namespace Brovan.Core.Emulation
             return Changed;
         }
 
+        private bool DeferWaitCheck(EmulatedThread Thread)
+        {
+            if (KernelLockCovered || !Thread.WaitActive
+                || !(Guest.WaitNeedsKernelLock(this, Thread) || Guest.WaitPrefersKernelLock(this, Thread)))
+                return false;
+
+            Worker.DeferredWaits.Add((Thread, Thread.WaitGeneration));
+            return true;
+        }
+
+        // Runs with no lock held. A wait that ended or started again since the scan is skipped.
+        private void CheckDeferredWaits(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick)
+        {
+            SchedulerWorker Self = Worker;
+            if (Self.DeferredWaits.Count == 0)
+                return;
+
+            using (EnterKernelLockScope())
+            using (SchedulerLock.EnterScope())
+            {
+                long Mark = HoldMark();
+                long Now = EmulatedTickCount64;
+                long Epoch = WakeSignal.Current;
+                long EarliestDeadline = EarliestWaitDeadline;
+                foreach ((EmulatedThread Thread, long Generation) in Self.DeferredWaits)
+                {
+                    if (Thread.WaitGeneration == Generation && Thread.WaitActive && !IsWaitFiled(Thread))
+                        UpdateMlfqThreadWakeup(Thread, ReadyQueues, InQueue, Levels, SchedulerTick, Now, Epoch, ref EarliestDeadline);
+                }
+
+                EarliestWaitDeadline = EarliestDeadline;
+                NoteHold(HoldSite.DeferredWaitCheck, Mark);
+            }
+
+            Self.DeferredWaits.Clear();
+        }
+
         private bool UpdateMlfqWakeups(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick)
         {
             using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
-            // Read before the timer refresh, so a timer that signals inside this scan counts as later.
             long ScanEpoch = WakeSignal.Current;
-            bool Changed = RefreshWindowsTimersAndWakeWaiters();
+            bool Changed = false;
             long EarliestDeadline = long.MaxValue;
             long Now = EmulatedTickCount64;
 
@@ -3872,23 +3916,26 @@ namespace Brovan.Core.Emulation
                     _emulator.ResolveCodeCache();
 
                 long Mark;
-                bool HostWorkFinished;
-                using (EnterKernelLockScope())
+                bool HostWorkFinished = false;
+                if (Volatile.Read(ref TerminationRequested) != 0 || Guest.HostWorkDue(this))
                 {
-                    Mark = HoldMark();
-                    AssertKernelLockHeld(nameof(IGuestEnvironment.PollHostWork));
-                    HostWorkFinished = Guest.PollHostWork(this);
-                    NoteHold(HoldSite.PollHostWork, Mark);
-
-                    if (Volatile.Read(ref TerminationRequested) != 0 && Interlocked.Exchange(ref TerminationRequested, 0) != 0)
+                    using (EnterKernelLockScope())
                     {
-                        AssertKernelLockHeld(nameof(IGuestEnvironment.OnTerminationRequested));
-                        Guest.OnTerminationRequested(this);
-                        StopEmulation();
+                        Mark = HoldMark();
+                        AssertKernelLockHeld(nameof(IGuestEnvironment.PollHostWork));
+                        HostWorkFinished = Guest.PollHostWork(this);
+                        NoteHold(HoldSite.PollHostWork, Mark);
+
+                        if (Volatile.Read(ref TerminationRequested) != 0 && Interlocked.Exchange(ref TerminationRequested, 0) != 0)
+                        {
+                            AssertKernelLockHeld(nameof(IGuestEnvironment.OnTerminationRequested));
+                            Guest.OnTerminationRequested(this);
+                            StopEmulation();
+                        }
                     }
                 }
 
-                // The rebuild and the wake scan reach guest code, so they take KernelLock; the checks before them do not.
+                // The aging rebuild takes KernelLock. The wake scan does not.
                 bool AgingDue = AgingThresholdSlices > 0 && SchedulerTick % AgingThresholdSlices == 0;
                 bool ScanDue;
                 using (SchedulerLock.EnterScope())
@@ -3904,30 +3951,32 @@ namespace Brovan.Core.Emulation
                     ScanDue = !AgingDue && (Self.WakeupScanRequired || SchedulerRefreshRequested || WakeSignal.Current != LastScannedWakeEpoch || HostWorkFinished);
                 }
 
-                if (AgingDue || ScanDue)
+                if (AgingDue)
                 {
                     using (EnterKernelLockScope())
                     using (SchedulerLock.EnterScope())
                     {
-                        if (AgingDue)
-                        {
-                            RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
-                            KnownThreadOrderCount = ThreadOrder.Count;
-                            Self.WakeupScanRequired = false;
-                        }
-                        else
-                        {
-                            if (Debug)
-                                TriggerDebugMessage($"scheduler: wakeup scan required={Self.WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
-
-                            Mark = HoldMark();
-                            UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
-                            NoteHold(HoldSite.WakeScan, Mark);
-                            KnownThreadOrderCount = ThreadOrder.Count;
-                            SchedulerRefreshRequested = false;
-                            Self.WakeupScanRequired = false;
-                        }
+                        RebuildMlfqReadyQueues(ReadyQueues, InQueue, Levels, SchedulerTick, AgingThresholdBudget, 1);
+                        KnownThreadOrderCount = ThreadOrder.Count;
+                        Self.WakeupScanRequired = false;
                     }
+                }
+                else if (ScanDue)
+                {
+                    using (SchedulerLock.EnterScope())
+                    {
+                        if (Debug)
+                            TriggerDebugMessage($"scheduler: wakeup scan required={Self.WakeupScanRequired} refresh={SchedulerRefreshRequested} tick={SchedulerTick}");
+
+                        Mark = HoldMark();
+                        UpdateMlfqWakeups(ReadyQueues, InQueue, Levels, SchedulerTick);
+                        NoteHold(HoldSite.WakeScan, Mark);
+                        KnownThreadOrderCount = ThreadOrder.Count;
+                        SchedulerRefreshRequested = false;
+                        Self.WakeupScanRequired = false;
+                    }
+
+                    CheckDeferredWaits(ReadyQueues, InQueue, Levels, SchedulerTick);
                 }
 
                 if (!TryDispatchMlfqThread(Self, ReadyQueues, InQueue, Levels, out EmulatedThread ImmaBeEmulatedOOO, out int SelectedLevel, out EmulatedThreadState StateBeforeSlice))
@@ -4381,11 +4430,7 @@ namespace Brovan.Core.Emulation
             }
 
             NoteHold(HoldSite.GuestCallback, Mark);
-            if (WakeSignal.Current != EpochBeforeCallback)
-            {
-                using RankedLock.Scope KernelScope = EnterKernelLockScope();
-                ScanWakeupsAfterCallback(EpochBeforeCallback);
-            }
+            ScanWakeupsAfterCallback(EpochBeforeCallback);
 
             if (OwnWorker is SchedulerWorker Own && Own.DeferredFreeWaitDue)
                 WaitForDeferredFrees(Own);

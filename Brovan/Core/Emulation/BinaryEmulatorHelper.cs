@@ -147,6 +147,8 @@ namespace Brovan.Core.Emulation
         void OnThreadContextLoaded(BinaryEmulator Instance, EmulatedThread Thread);
         // Runs under KernelLock after a thread ended its own slice.
         void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread);
+        // Checkable under the scheduler lock, but KernelLock sees more. The answer can change while the wait lasts.
+        bool WaitPrefersKernelLock(BinaryEmulator Instance, EmulatedThread Thread) => false;
         // Runs under SchedulerLock alone, after the state is Terminated.
         void OnThreadEnded(BinaryEmulator Instance, EmulatedThread Thread) { }
         // Runs under SchedulerLock and reads only scheduler state.
@@ -154,6 +156,9 @@ namespace Brovan.Core.Emulation
 
         // Runs between slices. True when finished host work needs a wakeup scan.
         bool PollHostWork(BinaryEmulator Instance) => false;
+
+        // Read without KernelLock. Every producer bumps or rings, so a stale false costs one pass.
+        bool HostWorkDue(BinaryEmulator Instance) => true;
 
         // True while host work or another process can still wake a thread, so the scheduler waits instead of ending.
         bool AwaitsHostWork(BinaryEmulator Instance) => false;

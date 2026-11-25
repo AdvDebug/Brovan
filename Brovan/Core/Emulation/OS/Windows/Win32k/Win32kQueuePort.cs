@@ -77,7 +77,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             return -1;
         }
 
-        internal static bool TryEndMsgWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State, uint WakeMask)
+        internal static bool TryEndMsgWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State, uint WakeMask, bool DrainHost = true)
         {
             if (State.QueuePort == null)
                 return false;
@@ -86,7 +86,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             while (State.QueuePort.PendingCount > 0)
             {
                 WinIoCompletionEntry Entry = Instance.TakeIoCompletionEntry(State.QueuePort);
-                if (!HandlePacket(Instance, State, Entry, InputContext) || Win32kHelper.HasQueuedInputEvent(Instance, WakeMask, Thread.ThreadId))
+                if (!HandlePacket(Instance, State, Entry, InputContext) || Win32kHelper.HasQueuedInputEvent(Instance, WakeMask, Thread.ThreadId, DrainHost))
                     return true;
             }
 

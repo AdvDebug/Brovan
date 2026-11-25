@@ -2087,6 +2087,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             internal bool HasWork => HasPending || (Watcher != null && Watcher.HasReady);
 
+            internal bool IsDue(long Now)
+            {
+                long Deadline = Volatile.Read(ref EarliestDeadline);
+                return (Watcher is { } Ready && Ready.HasReady) || (Deadline >= 0 && BinaryEmulator.IsDeadlineExpired(Deadline, Now));
+            }
+
             internal NTSTATUS Pend(BinaryEmulator Instance, PendingPoll Poll)
             {
                 if (!TryStartWatcher(Instance))

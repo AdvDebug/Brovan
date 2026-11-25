@@ -65,6 +65,25 @@ namespace Brovan.Core.Emulation.OS.Windows
             RPC.Ports.RpcssPortHandler.Advance();
         }
 
+        // A member without a doorbell serves every pass.
+        internal static bool IsDue
+        {
+            get
+            {
+                int Slot = GuestSession.OwnSlot;
+                if (Slot < 0)
+                    return false;
+
+                lock (Sync)
+                {
+                    if (_doorbells == null)
+                        return _unavailable;
+
+                    return _rescan || Volatile.Read(ref *(uint*)Doorbell(Slot)) != _seenDoorbell;
+                }
+            }
+        }
+
         internal static void RingAll()
         {
             for (int Slot = 0; Slot < GuestSession.SlotCount; Slot++)

@@ -413,8 +413,19 @@ namespace Brovan.Core.Emulation.Guests
             if (WinHelper.AfdRequests.HasWork)
                 WinHelper.AfdRequests.Service(Instance);
 
-            return WinHelper.AfdConnects.HasFinished;
+            // A thread that polls drains host input in its own syscall, where raw input and activation name that thread.
+            if (OS.SharedHelpers.HostEventQueue.HasPending && Instance.HasActiveGetMessageWait())
+                Win32kHelper.DrainHostEvents(Instance);
+
+            bool ConnectsFinished = WinHelper.AfdConnects.HasFinished;
+            return Instance.RefreshWindowsTimersAndWakeWaiters() || ConnectsFinished;
         }
+
+        public bool HostWorkDue(BinaryEmulator Instance)
+            => WinHelper == null || SessionPump.IsDue || RemoteCalls.HasPending || WinHelper.PipeRequests.Count != 0
+                || WinHelper.AfdRequests.IsDue(Instance.EmulatedTickCount64) || WinHelper.AfdConnects.HasFinished || WinHelper.DxgkProcess.NeedsService
+                || WinHelper.Composition.NeedsService || Instance.IsWindowsTimerDue
+                || OS.SharedHelpers.HostEventQueue.HasPending;
 
         public bool AwaitsHostWork(BinaryEmulator Instance)
             => WinHelper != null && (Instance.HasActiveGetMessageWait() || Instance.HasPendingHostIo() || AlpcMessaging.HasRemoteWork || AlpcMessaging.HasDeferredAnswers
@@ -446,7 +457,23 @@ namespace Brovan.Core.Emulation.Guests
         public bool WaitNeedsKernelLock(BinaryEmulator Instance, EmulatedThread Thread)
         {
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-            return State == null || State.WaitKind.NeedsKernelLock();
+            return State == null || State.WaitKind.NeedsKernelLock() || State.ObjectsNeedKernelLock;
+        }
+
+        // A check without KernelLock skips a packet that targets an object with no wait object.
+        public bool WaitPrefersKernelLock(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State == null)
+                return false;
+
+            WinIoCompletion Port = State.WaitKind switch
+            {
+                WindowsWaitKind.IoCompletion => State.IoCompletion,
+                WindowsWaitKind.WorkerFactory => State.WorkerFactory?.Completion,
+                _ => null,
+            };
+            return Port != null && Volatile.Read(ref Port.UnwaitableTargetPackets) != 0;
         }
 
         public void OnThreadWaitSatisfied(BinaryEmulator Instance, EmulatedThread Thread)

@@ -49,8 +49,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         // returns success.
         internal static bool EndsWithTimeoutStatus(this WindowsWaitKind Kind) => Kind.HoldsObjects() || Kind == WindowsWaitKind.Alert;
 
-        // An alert wait needs only scheduler state.
-        internal static bool NeedsKernelLock(this WindowsWaitKind Kind) => Kind != WindowsWaitKind.Alert;
+        // Message and send-reply waits read win32k state, and an I/O request's timeout finishes the request.
+        internal static bool NeedsKernelLock(this WindowsWaitKind Kind)
+            => Kind is WindowsWaitKind.WaitMessage or WindowsWaitKind.GetMessage or WindowsWaitKind.MessageObjects
+                or WindowsWaitKind.SendReply or WindowsWaitKind.IoRequest;
     }
 
     public sealed class WindowsThreadState
@@ -165,7 +167,22 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             if (!Kind.HoldsObjects())
                 ClearWaitObjects();
+            ObjectsNeedKernelLock = Kind == WindowsWaitKind.Objects && HasObjectCheckedUnderKernelLock();
             WaitKind = Kind;
+        }
+
+        // Set while an Objects wait holds an object checked only under KernelLock.
+        internal bool ObjectsNeedKernelLock { get; private set; }
+
+        private bool HasObjectCheckedUnderKernelLock()
+        {
+            for (int i = 0; i < WaitObjectCount; i++)
+            {
+                if (WaitObjects[i].Waitable is null or WinIoCompletion or WinWorkerFactory)
+                    return true;
+            }
+
+            return false;
         }
 
         // Data that outlives a wait stays with its owner: HostWork, the sync I/O and pipe retry state,
@@ -207,13 +224,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ClearWaitObjects();
             WaitKind = WindowsWaitKind.None;
+            ObjectsNeedKernelLock = false;
             WaitResumeRIP = 0;
             WaitReturnRIP = 0;
             WaitAlertable = false;
             ApcAlertable = false;
         }
 
-        // The scan turns a send-reply or get-message wait into a retry of its syscall. Both stay KernelLock kinds.
+        // Called by the scan. Each change goes to a kind that needs no more than the scheduler lock.
         internal void ChangeKindInScan(WindowsWaitKind To)
         {
             bool Allowed = To == WindowsWaitKind.Retry

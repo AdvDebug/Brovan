@@ -390,7 +390,11 @@ namespace Brovan.Core.Emulation
 
         internal bool RefreshTimerState(WinTimer Timer)
         {
-            if (Timer == null || !Timer.Active)
+            if (Timer == null)
+                return false;
+
+            using RankedLock.Scope StateScope = Timer.EnterStateScope();
+            if (!Timer.Active)
                 return false;
 
             long Now = EmulatedTickCount64;
@@ -457,7 +461,10 @@ namespace Brovan.Core.Emulation
                 {
                     Timer.HandlesClosed = !WinHelper.HandleManager.HasHandleToObject(Timer);
                     if (Timer.HandlesClosed)
+                    {
+                        using RankedLock.Scope StateScope = Timer.EnterStateScope();
                         Timer.Active = false;
+                    }
                 }
 
                 if (Timer.Active)
@@ -466,8 +473,11 @@ namespace Brovan.Core.Emulation
                     continue;
                 }
 
-                if (Timer.ApcThread != null && (Timer.QueuedApc == null || !WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Contains(Timer.QueuedApc)))
-                    NtTimerHelpers.ClearTimerApc(this, Timer);
+                using (SchedulerLock.EnterScope())
+                {
+                    if (Timer.ApcThread != null && (Timer.QueuedApc == null || !WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Contains(Timer.QueuedApc)))
+                        NtTimerHelpers.ClearTimerApc(this, Timer);
+                }
 
                 if (Timer.ApcThread == null)
                 {
@@ -481,10 +491,23 @@ namespace Brovan.Core.Emulation
         }
 
         private long EarliestWindowsTimerDue = -1;
+        private long TimerDueInvalidations;
 
+        // The walk publishes its due only when no timer changed during it, so an invalidation is never lost.
         internal void InvalidateWindowsTimerDue()
         {
-            EarliestWindowsTimerDue = -1;
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
+            TimerDueInvalidations++;
+            Volatile.Write(ref EarliestWindowsTimerDue, -1);
+        }
+
+        internal bool IsWindowsTimerDue
+        {
+            get
+            {
+                long Due = Volatile.Read(ref EarliestWindowsTimerDue);
+                return Due < 0 || EmulatedTickCount64 >= Due;
+            }
         }
 
         internal bool RefreshWindowsTimersAndWakeWaiters()
@@ -503,11 +526,17 @@ namespace Brovan.Core.Emulation
             if (WinHelper.Composition.NeedsService)
                 WinHelper.Composition.Service(this);
 
-            long Now = EmulatedTickCount64;
-            if (EarliestWindowsTimerDue >= 0 && Now < EarliestWindowsTimerDue)
-                return false;
+            if (!IsWindowsTimerDue)
+                return WokeThread;
 
-            EarliestWindowsTimerDue = RefreshListedTimers(ref WokeThread);
+            long Invalidations = Volatile.Read(ref TimerDueInvalidations);
+            long NextDue = RefreshListedTimers(ref WokeThread);
+            using (SchedulerLock.EnterScope())
+            {
+                if (TimerDueInvalidations == Invalidations)
+                    Volatile.Write(ref EarliestWindowsTimerDue, NextDue);
+            }
+
             return WokeThread;
         }
 
@@ -579,11 +608,10 @@ namespace Brovan.Core.Emulation
             if (WinHelper == null)
                 return false;
 
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             List<WinWaitCompletionPacket> Packets = Target.TargetedBy;
             for (int i = 0; Packets != null && i < Packets.Count; i++)
                 MaterializeSignaledWaitPackets(Packets[i].Completion);
-
-            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
 
             // Port waiters are never filed.
             List<EmulatedThread> Candidates = WindowsWakeCandidates;
@@ -638,7 +666,8 @@ namespace Brovan.Core.Emulation
             for (int i = 0; i < Packets.Count; i++)
             {
                 WinWaitCompletionPacket Packet = Packets[i];
-                if (Packet.QueuedCompletion || !TryAcquireWaitEntry(Packet.Target, null, out _))
+                // A check without KernelLock leaves a target with no wait object to the next check that holds it.
+                if (Packet.QueuedCompletion || (Packet.Target.Waitable == null && !KernelLockCovered) || !TryAcquireWaitEntry(Packet.Target, null, out _))
                     continue;
 
                 WinIoCompletionEntry Entry = new WinIoCompletionEntry
@@ -1019,6 +1048,7 @@ namespace Brovan.Core.Emulation
         // Completion and message waits are never filed, so the scan list holds every thread parked on a completion port.
         internal bool HasParkedTaker(WinIoCompletion Completion)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             for (int i = 0; i < WakeScanList.Count; i++)
             {
                 if (CompletionTakenBy(WakeScanList[i]) == Completion)
@@ -1033,6 +1063,7 @@ namespace Brovan.Core.Emulation
             if (WinHelper == null)
                 return false;
 
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             List<WinWaitCompletionPacket> Packets = Completion?.WaitPackets;
             for (int i = 0; Packets != null && i < Packets.Count; i++)
             {
@@ -1131,7 +1162,7 @@ namespace Brovan.Core.Emulation
 
                 case WindowsWaitKind.WaitMessage:
                     Win32kQueuePort.TakePackets(this, State);
-                    if (!Win32kHelper.HasQueuedInputEvent(this, Win32kHelper.QS_ALLINPUT, Thread.ThreadId))
+                    if (!Win32kHelper.HasQueuedInputEvent(this, Win32kHelper.QS_ALLINPUT, Thread.ThreadId, DrainHost: false))
                         return false;
 
                     State.ChangeKindInScan(WindowsWaitKind.None);
@@ -1169,7 +1200,6 @@ namespace Brovan.Core.Emulation
 
         private bool TrySatisfyGetMessage(EmulatedThread Thread, WindowsThreadState State)
         {
-            Win32kHelper.DrainHostEvents(this);
             if (Win32kHelper.HasSentMessageFor(this, Thread.ThreadId))
             {
                 State.ChangeKindInScan(WindowsWaitKind.Retry);
@@ -1201,7 +1231,7 @@ namespace Brovan.Core.Emulation
             if (IsDeadlineExpired(Thread.WaitDeadline, Now) && !IsDeadlineExpired(State.MsgWaitTimeout, Now))
                 Thread.WaitDeadline = Win32kHelper.GetMsgWaitDeadline(this, Thread.ThreadId, State.MsgWaitMask, State.MsgWaitTimeout);
 
-            bool MessageReady = Win32kHelper.HasQueuedInputEvent(this, State.MsgWaitMask, Thread.ThreadId);
+            bool MessageReady = Win32kHelper.HasQueuedInputEvent(this, State.MsgWaitMask, Thread.ThreadId, DrainHost: false);
 
             if (Thread.WaitAll)
             {
@@ -1220,7 +1250,7 @@ namespace Brovan.Core.Emulation
                 return true;
             }
 
-            if (MessageReady || Win32kQueuePort.TryEndMsgWait(this, Thread, State, State.MsgWaitMask))
+            if (MessageReady || Win32kQueuePort.TryEndMsgWait(this, Thread, State, State.MsgWaitMask, DrainHost: false))
             {
                 Thread.WaitSatisfiedIndex = State.WaitObjectCount;
                 State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
@@ -1262,6 +1292,7 @@ namespace Brovan.Core.Emulation
 
         internal bool HasActiveGetMessageWait()
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             for (int i = 0; i < WakeScanList.Count; i++)
             {
                 EmulatedThread Thread = WakeScanList[i];

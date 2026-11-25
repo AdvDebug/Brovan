@@ -46,10 +46,18 @@ namespace Brovan.Core.Emulation.OS.SharedHelpers
         private static long _unansweredClose;
         private static int _pendingDpi;
 
-        // The GUI thread fills this queue, and DrainHostEvents on the scheduler thread is the only thing that
-        // moves it into a guest message queue. Without the bump a scheduler that skips its wakeup scan never
-        // reaches DrainHostEvents and host input stops arriving.
+        // Filled by the GUI thread and moved into guest queues only by DrainHostEvents.
         internal static WakeSignal WakeSignal;
+
+        // Read with no lock by the scheduler pass. A stale false costs one pass, since every producer bumps.
+        internal static bool HasPending
+        {
+            get
+            {
+                return Volatile.Read(ref _count) != 0 || Volatile.Read(ref _pendingRepaint) != 0 || Volatile.Read(ref _pendingDpi) != 0
+                    || _repaintWindows.Count != 0;
+            }
+        }
 
         private static void Signal()
         {

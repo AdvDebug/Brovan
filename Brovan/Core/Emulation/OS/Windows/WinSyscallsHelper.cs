@@ -10908,7 +10908,10 @@ namespace Brovan.Core.Emulation.OS.Windows
                 {
                     WinRegKey Key = HandleManager.GetObjectByHandle<WinRegKey>(Notification.KeyHandle);
                     if (Key != null)
+                    {
+                        using RankedLock.Scope StateScope = Key.EnterStateScope();
                         Key.NotifySignaled = true;
+                    }
                 }
 
                 RegistryNotifications.Remove(Notification);
