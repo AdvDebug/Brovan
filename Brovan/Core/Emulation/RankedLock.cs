@@ -9,6 +9,7 @@ namespace Brovan.Core.Emulation
     {
         // Guest domain locks take ranks 2 to 10, between Big and Core's address space (11) and scheduler lock (12).
         internal const int BigRank = 1;
+        internal const int DeviceRank = 2;
         internal const int SchedulerRank = 12;
         internal const int BackendMappingRank = 13;
 

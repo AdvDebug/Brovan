@@ -335,6 +335,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        // The emulator's final report does not walk the device lock, which belongs to the process-wide device.
+        internal static void ReportBrovVulkLock()
+        {
+            if (!DeviceRegistry.IsValueCreated)
+                return;
+
+            foreach (IWinDevice Device in DeviceRegistry.Value.Values)
+            {
+                if (Device is BrovVulkDevice Vulkan)
+                    Vulkan.ReportLock();
+            }
+        }
+
         private static bool ReleaseBrovVulk()
         {
             if (!DeviceRegistry.IsValueCreated)

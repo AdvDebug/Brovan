@@ -15,7 +15,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint MaxBatchCommands = 1u << 20;
         private const int VK_ERROR_INITIALIZATION_FAILED = -3;
 
-        private readonly object Lock = new object();
+        private const int RetirePollSite = 0;
+
+        // One device serves the whole process, so its lock has no emulator to gate it.
+        private readonly RankedLock Lock = new RankedLock("BrovVulk", RankedLock.DeviceRank, CountsCalls: true);
         internal readonly GenState GenState = new GenState();
         private readonly GenReader Reader = new GenReader();
         private readonly GenReader PostedReader = new GenReader();
@@ -26,9 +29,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal bool ReleaseHostMemory()
         {
-            lock (Lock)
+            using (Lock.EnterScope())
                 return GenState.TryDispose();
         }
+
+        internal void ReportLock() => Lock.Report();
 
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
         {
@@ -98,12 +103,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             byte[] OutBytes;
-            lock (Lock)
+            using (Lock.EnterScope())
             {
                 Reader.Reset(Input, 8, (int)PayloadLen);
                 Writer.Reset();
                 if (GenState.Retire.HasPending)
-                    GenState.Retire.Poll(GenState);
+                    PollRetire();
                 int Result;
                 uint Failing = Id;
                 IntPtr PreviousDpiContext = HostDisplayMetrics.EnterWindowDpiContext(Instance.GuestDpiAwareness);
@@ -123,7 +128,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         if (BrovVulkGenDispatch.CreatesGuestIds.Contains(Id))
                             PostStats.SentNow();
                         GenState.Waits.BeginCommand(CanPark, Rerun);
-                        try { Result = BrovVulkGenDispatch.Dispatch(Id, Reader, Writer, GenState, Instance); }
+                        try { Result = Dispatch(Id, Reader, Instance); }
                         catch { GenState.FailCall(); throw; }
                         finally { GenState.FreeCallAllocs(); }
                         Parked = GenState.Waits.TakeParked();
@@ -193,7 +198,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 try
                 {
-                    Result = BrovVulkGenDispatch.Dispatch(SubId, SubReader, Writer, GenState, Instance);
+                    Result = Dispatch(SubId, SubReader, Instance);
                 }
                 catch (EntryPointNotFoundException Ex)
                 {
@@ -233,6 +238,36 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return Posted ? 0 : Result;
+        }
+
+        // Under BROVAN_LOCK_STATS=1 each command's hold of the device lock is counted by command.
+        private int Dispatch(uint Id, GenReader CommandReader, IGuestMemory Instance)
+        {
+            if (!Lock.CountsHolds)
+                return BrovVulkGenDispatch.Dispatch(Id, CommandReader, Writer, GenState, Instance);
+
+            long HeldBefore = Lock.HeldTicks();
+            try
+            {
+                return BrovVulkGenDispatch.Dispatch(Id, CommandReader, Writer, GenState, Instance);
+            }
+            finally
+            {
+                Lock.NoteCall(Id, CommandName(Id), HeldBefore);
+            }
+        }
+
+        private void PollRetire()
+        {
+            if (!Lock.CountsHolds)
+            {
+                GenState.Retire.Poll(GenState);
+                return;
+            }
+
+            long HeldBefore = Lock.HeldTicks();
+            GenState.Retire.Poll(GenState);
+            Lock.NoteSite(RetirePollSite, "retire poll", HeldBefore);
         }
 
         private static string CommandName(uint Id) => Id < (uint)BrovVulkApi.CommandNames.Length ? BrovVulkApi.CommandNames[Id] : Id.ToString();

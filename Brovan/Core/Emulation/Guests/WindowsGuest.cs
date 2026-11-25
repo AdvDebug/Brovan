@@ -308,6 +308,7 @@ namespace Brovan.Core.Emulation.Guests
             }
 
             WinHelper.KernelFiles?.Dispose();
+            WinSysHelper.ReportBrovVulkLock();
         }
 
         public void Shutdown(BinaryEmulator Instance)
