@@ -45,7 +45,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                     Start.Signaled = true;
             }
 
-            return Finish == null || Instance.TryAcquireWaitObject(Finish, null, out _) == true;
+            return Finish == null || Finish.TryAcquireFor(Instance, null, out _);
         }
     }
 

@@ -23,7 +23,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.IsRegionMapped(WorkerFactoryHandlePtr, (uint)Instance.WinHelper.PointerSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (!Instance.WinHelper.HandleExists(IoCompletionHandle, HandleType.IoCompletionHandle))
+            WinIoCompletion Completion = Instance.WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(IoCompletionHandle);
+            if (Completion == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             if (!HandleManager.IsCurrentProcessPseudoHandle(WorkerProcessHandle) && !Instance.WinHelper.ValidProcessHandle(WorkerProcessHandle))
@@ -34,7 +35,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 Name = "WorkerFactory_" + Id.ToString(),
                 FactoryId = Id,
-                IoCompletionHandle = IoCompletionHandle,
+                Completion = Completion,
                 WorkerProcessHandle = WorkerProcessHandle,
                 StartRoutine = StartRoutine,
                 StartParameter = StartParameter,

@@ -53,13 +53,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (ApcRoutine != 0 || ApcContext != 0 || WakeContext != 0 || TolerableDelay != 0 || PreviousStatePtr != 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                return NtTimerHelpers.SetTimer2(Instance, IRTimer, TimerHandle, DueTime, Period * NtTimerHelpers.IntervalsPerMillisecond, ReadOnlySpan<byte>.Empty);
+                return NtTimerHelpers.SetTimer2(Instance, IRTimer, DueTime, Period * NtTimerHelpers.IntervalsPerMillisecond, ReadOnlySpan<byte>.Empty);
             }
 
-            Instance.CanSatisfyWaitHandle(TimerHandle);
+            Instance.RefreshTimerState(Timer);
             long DueMilliseconds = Helper.TimeoutToMilliseconds(DueTime);
             NtTimerHelpers.SetTimerApc(Instance, Timer, ApcRoutine, ApcContext);
-            NtTimerHelpers.ArmTimer(Instance, Timer, TimerHandle, DueMilliseconds, Period, out bool WasSignaled);
+            NtTimerHelpers.ArmTimer(Instance, Timer, DueMilliseconds, Period, out bool WasSignaled);
             return NtTimerHelpers.WritePreviousState(Instance, PreviousStatePtr, WasSignaled);
         }
     }

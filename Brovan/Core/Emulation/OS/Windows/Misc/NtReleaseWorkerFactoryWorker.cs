@@ -19,12 +19,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Factory.ReleasePending)
             {
                 Factory.ReleasePending = true;
-                if (!WorkerFactoryHelper.EnqueueReleaseCompletion(Instance, WorkerFactoryHandle))
-                {
-                    Factory.ReleasePending = false;
-                    Factory.PendingReleaseCount--;
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
-                }
+                WorkerFactoryHelper.EnqueueReleaseCompletion(Factory);
             }
 
             WorkerFactoryHelper.EnsureWorkerThreads(Instance, Factory);

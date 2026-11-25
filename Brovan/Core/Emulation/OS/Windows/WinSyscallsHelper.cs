@@ -388,7 +388,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             State.SyncIo = SyncIo;
 
             Thread.WaitActive = true;
-            Thread.WaitHandles = null;
+            ResetWaitSet(Thread, State);
             Thread.WaitAll = false;
             Thread.WaitDeadline = Deadline;
             State.WaitCompleted = false;
@@ -454,7 +454,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.WaitActive = true;
-            Thread.WaitHandles = null;
+            ResetWaitSet(Thread, State);
             Thread.WaitAll = false;
             Thread.WaitDeadline = Deadline;
             State.WaitCompleted = false;
@@ -471,12 +471,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator._emulator.StopEmulation();
         }
 
-        internal NTSTATUS ParkUntil(EmulatedThread Thread, long Deadline, bool Alertable, List<ulong>? Handles = null, bool WaitAll = false)
+        internal static void ResetWaitSet(EmulatedThread Thread, WindowsThreadState State, bool KeepObjects = false)
+        {
+            Thread.NewWaitGeneration();
+            if (!KeepObjects)
+                State.ClearWaitObjects();
+        }
+
+        internal NTSTATUS ParkUntil(EmulatedThread Thread, long Deadline, bool Alertable, bool OnObjects = false, bool WaitAll = false)
         {
             using RankedLock.Scope SchedulerScope = Emulator.SchedulerLock.EnterScope();
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            ResetWaitSet(Thread, State, KeepObjects: OnObjects);
             Thread.WaitActive = true;
-            Thread.WaitHandles = Handles;
             Thread.WaitAll = WaitAll;
             Thread.WaitDeadline = Deadline;
             State.WaitCompleted = false;
@@ -508,7 +515,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             Emulator.UnfileWait(Thread);
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.WaitActive = false;
-            Thread.WaitHandles = null;
+            ResetWaitSet(Thread, State);
             Thread.WaitAll = false;
             Thread.WaitDeadline = -1;
             Thread.WaitTimedOut = false;
@@ -658,11 +665,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             State.WaitCompleted = false;
             State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
-            State.WaitObjects = null;
+            State.ClearWaitObjects();
             State.DispatchException = false;
             State.ExceptionInformation = null;
             State.WorkerFactoryWaitActive = false;
-            State.WorkerFactoryHandle = 0;
+            State.WorkerFactory = null;
             State.WorkerFactoryMiniPackets = 0;
             State.WorkerFactoryPacketsReturned = 0;
             State.WorkerFactoryMaxPackets = 0;
@@ -693,7 +700,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Completion == null)
                 return;
 
-            PostCompletion(Instance, File.CompletionHandle, Completion, new WinIoCompletionEntry
+            PostCompletion(Instance, Completion, new WinIoCompletionEntry
             {
                 KeyContext = File.CompletionKey,
                 ApcContext = ApcContext,
@@ -702,11 +709,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             });
         }
 
-        public void PostCompletion(BinaryEmulator Instance, ulong CompletionHandle, WinIoCompletion Completion, WinIoCompletionEntry Entry)
+        public void PostCompletion(BinaryEmulator Instance, WinIoCompletion Completion, WinIoCompletionEntry Entry)
         {
             Completion.Post(Entry);
 
-            if (Instance.WakeWorkerFactoryWaitersForObject(CompletionHandle))
+            if (Instance.WakeWaitersForObject(Completion))
                 Instance._emulator.StopEmulation();
         }
 
@@ -4198,14 +4205,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread == null || !Thread.WaitActive)
                 return;
 
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             Thread.WaitActive = false;
-            Thread.WaitHandles = null;
+            ResetWaitSet(Thread, State);
             Thread.WaitDeadline = -1;
             Thread.WaitAll = false;
-            WinEmulatedThread.GetState(Thread).WaitAlertable = false;
-            WinEmulatedThread.GetState(Thread).ApcAlertable = false;
+            State.WaitAlertable = false;
+            State.ApcAlertable = false;
 
-            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             NTSTATUS InterruptStatus = NTSTATUS.STATUS_USER_APC;
             if (State.IoCompletionWaitActive && State.IoCompletionEntriesRemovedPtr != 0
                 && !Emulator._emulator.WriteMemory(State.IoCompletionEntriesRemovedPtr, 0u, 4))
@@ -11771,6 +11778,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 case WinSharedGpuMemory SharedGpuMemory:
                     SharedGpuMemory.Host.Dispose();
+                    break;
+
+                // NT: ExpCloseWorkerFactory shuts the factory down at its last handle, which ends the workers' waits.
+                case WinWorkerFactory Factory:
+                    WorkerFactoryHelper.Shutdown(Factory);
                     break;
 
                 case ReferencedNtObject Referenced:

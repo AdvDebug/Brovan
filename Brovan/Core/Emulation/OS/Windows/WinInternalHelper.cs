@@ -129,7 +129,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<string, List<ulong>> ObjectIdToHandles = new();
         private readonly WakeSignal Signal;
         internal readonly SignalledWaitables Signalled = new();
-        private readonly WinEvent SignalledPortObject = new WinEvent { Signaled = true };
+        private readonly WinEvent SignalledWaitObject = new WinEvent { Signaled = true };
         private readonly WinEvent UnsignalledPortObject = new WinEvent();
 
         public HandleManager(WakeSignal Signal)
@@ -249,11 +249,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             return null;
         }
 
-        public IHandleObject? GetWaitObjectByHandle(ulong Handle)
+        // Null for an object no wait object stands for, such as a console input file.
+        internal WaitableHandleObject? WaitObjectOf(IHandleObject? Object) => Object switch
         {
-            IHandleObject? Object = GetObjectByHandle(Handle);
-            return DefaultWaitObject(Object) ?? Object;
-        }
+            WinPort Port => (WaitableHandleObject?)DefaultWaitObject(Port),
+            EmulatedThread Thread => WinEmulatedThread.GetState(Thread).EndObject,
+            WinProcess Process => Process.Remote != null ? Process.Remote.EndObject : Process.EndObject,
+            WinRemoteThread RemoteThread => RemoteThread.Process != null ? RemoteThread.Process.EndObject : SignalledWaitObject,
+            WaitableHandleObject Waitable => Waitable,
+            _ => null,
+        };
 
         // NT: a wait on a port waits on its default object, which is always signalled when the port is not waitable.
         // A port that a handler serves never sends its clients a message, so a wait on it never ends.
@@ -265,7 +270,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Port.Handler != null)
                 return UnsignalledPortObject;
 
-            return (IHandleObject?)Port.WaitSemaphore ?? SignalledPortObject;
+            return (IHandleObject?)Port.WaitSemaphore ?? SignalledWaitObject;
         }
 
         public int CountHandlesByObjectId(string ObjectId)

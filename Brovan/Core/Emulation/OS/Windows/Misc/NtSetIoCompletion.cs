@@ -17,7 +17,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (HandleStatus != NTSTATUS.STATUS_SUCCESS)
                 return HandleStatus;
 
-            Instance.WinHelper.PostCompletion(Instance, IoCompletionHandle, Completion, new WinIoCompletionEntry
+            Instance.WinHelper.PostCompletion(Instance, Completion, new WinIoCompletionEntry
             {
                 KeyContext = KeyContext,
                 ApcContext = ApcContext,

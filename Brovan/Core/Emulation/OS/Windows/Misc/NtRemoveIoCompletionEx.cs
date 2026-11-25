@@ -51,12 +51,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 || !Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? Timeout))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            NTSTATUS HandleStatus = Instance.WinHelper.ReferenceObjectByHandle(IoCompletionHandle, AccessMask.None, out WinIoCompletion Completion);
-            if (HandleStatus != NTSTATUS.STATUS_SUCCESS)
-                return HandleStatus;
-
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
-            Instance.MaterializeSignaledWaitPackets(IoCompletionHandle);
+            WinIoCompletion Completion = Thread.WaitActive && State.IoCompletionWaitActive ? State.IoCompletion : null;
+            if (Completion == null)
+            {
+                NTSTATUS HandleStatus = Instance.WinHelper.ReferenceObjectByHandle(IoCompletionHandle, AccessMask.None, out Completion);
+                if (HandleStatus != NTSTATUS.STATUS_SUCCESS)
+                    return HandleStatus;
+            }
+
+            Instance.MaterializeSignaledWaitPackets(Completion);
 
             if (!Thread.WaitActive)
             {
@@ -97,12 +101,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 State.ResetIoCompletionWait();
                 State.IoCompletionWaitActive = true;
-                State.IoCompletionHandle = IoCompletionHandle;
+                State.IoCompletion = Completion;
                 State.IoCompletionInformationPtr = InformationPtr;
                 State.IoCompletionEntriesRemovedPtr = EntriesRemovedPtr;
                 State.IoCompletionMaxEntries = Count;
-                Thread.WaitOnSingleHandle(IoCompletionHandle);
-                return Instance.WinHelper.ParkUntil(Thread, Deadline, Alertable, Thread.WaitHandles, WaitAll: true);
+                return Instance.WinHelper.ParkUntil(Thread, Deadline, Alertable);
             }
 
             return Instance.WinHelper.ContinueParked(Thread);

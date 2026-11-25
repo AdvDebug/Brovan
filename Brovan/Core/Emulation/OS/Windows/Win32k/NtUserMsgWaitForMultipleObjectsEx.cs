@@ -9,53 +9,26 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         private const uint MWMO_ALERTABLE = 0x0002;
         private const uint MaximumWaitObjects = 64;
 
-        private static bool TryGetSatisfiedIndex(BinaryEmulator Instance, EmulatedThread Thread, List<ulong> Handles, bool WaitAll, uint WakeMask, out NTSTATUS WaitStatus)
+        private static bool TryGetSatisfiedIndex(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State, bool WaitAll, uint WakeMask, out NTSTATUS WaitStatus)
         {
             WaitStatus = NTSTATUS.STATUS_SUCCESS;
             bool MessageReady = Win32kHelper.HasQueuedInputEvent(Instance, WakeMask, Thread.ThreadId);
 
             if (WaitAll)
             {
-                for (int i = 0; i < Handles.Count; i++)
-                {
-                    if (!Instance.CanSatisfyWaitHandle(Handles[i], Thread))
-                        return false;
-                }
-
-                if (!MessageReady)
+                if (!Instance.AreWaitObjectsSignaled(Thread, State) || !MessageReady)
                     return false;
 
-                HashSet<ulong> AcquiredHandles = new HashSet<ulong>();
-                for (int i = 0; i < Handles.Count; i++)
-                {
-                    ulong Handle = Handles[i];
-                    if (!AcquiredHandles.Add(Handle))
-                        continue;
-
-                    if (!Instance.TryAcquireWaitHandle(Handle, Thread, out NTSTATUS AcquiredStatus))
-                        return false;
-
-                    if (AcquiredStatus == NTSTATUS.STATUS_ABANDONED_WAIT_0 && WaitStatus == NTSTATUS.STATUS_SUCCESS)
-                        WaitStatus = (NTSTATUS)((uint)NTSTATUS.STATUS_ABANDONED_WAIT_0 + (uint)i);
-                }
-
+                WaitStatus = Instance.TakeAllWaitObjects(Thread, State);
                 return true;
             }
 
-            for (int i = 0; i < Handles.Count; i++)
-            {
-                if (!Instance.TryAcquireWaitHandle(Handles[i], Thread, out NTSTATUS AcquiredStatus))
-                    continue;
-
-                WaitStatus = AcquiredStatus == NTSTATUS.STATUS_ABANDONED_WAIT_0
-                    ? (NTSTATUS)((uint)NTSTATUS.STATUS_ABANDONED_WAIT_0 + (uint)i)
-                    : (NTSTATUS)(uint)i;
+            if (Instance.TryTakeAnyWaitObject(Thread, State, out _, out WaitStatus))
                 return true;
-            }
 
-            if (MessageReady || Win32kQueuePort.TryEndMsgWait(Instance, Thread, WinEmulatedThread.GetState(Thread), WakeMask))
+            if (MessageReady || Win32kQueuePort.TryEndMsgWait(Instance, Thread, State, WakeMask))
             {
-                WaitStatus = (NTSTATUS)(uint)Handles.Count;
+                WaitStatus = (NTSTATUS)(uint)State.WaitObjectCount;
                 return true;
             }
 
@@ -64,13 +37,13 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
         private static NTSTATUS ContinueWait(BinaryEmulator Instance, EmulatedThread Thread, uint WakeMask)
         {
-            if (TryGetSatisfiedIndex(Instance, Thread, Thread.WaitHandles, Thread.WaitAll, WakeMask, out NTSTATUS WaitStatus))
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (TryGetSatisfiedIndex(Instance, Thread, State, Thread.WaitAll, WakeMask, out NTSTATUS WaitStatus))
             {
                 Instance.WinHelper.ClearWaitState(Thread);
                 return WaitStatus;
             }
 
-            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             if (Instance.IsEmulatedDeadlineExpired(State.MsgWaitTimeout))
             {
                 Instance.WinHelper.ClearWaitState(Thread);
@@ -119,12 +92,9 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (Count > 0 && !Instance.IsRegionMapped(HandlesPtr, Count * HandleSize))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            List<ulong> Handles = new List<ulong>((int)Count);
+            State.ClearWaitObjects();
             for (int i = 0; i < Count; i++)
-            {
-                ulong H = Instance.WinHelper.ReadPointer(HandlesPtr + (ulong)i * HandleSize);
-                Handles.Add(H);
-            }
+                Instance.AddWaitObject(State, Instance.WinHelper.HandleManager.GetObjectByHandle(Instance.WinHelper.ReadPointer(HandlesPtr + (ulong)i * HandleSize)));
 
             bool WaitAll = (Flags & MWMO_WAITALL) != 0;
             bool Alertable = (Flags & MWMO_ALERTABLE) != 0;
@@ -133,20 +103,29 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             bool MessageFirst = (!WaitAll || Count == 0) && Alertable && State.PendingUserApcs.Count > 0
                 && Win32kHelper.HasQueuedInputEvent(Instance, WakeMask, Thread.ThreadId);
             if (!MessageFirst && Instance.WinHelper.TryEndWaitWithUserApc(Thread, Alertable))
+            {
+                State.ClearWaitObjects();
                 return NTSTATUS.STATUS_USER_APC;
+            }
 
-            if (TryGetSatisfiedIndex(Instance, Thread, Handles, WaitAll, WakeMask, out NTSTATUS ImmediateStatus))
+            if (TryGetSatisfiedIndex(Instance, Thread, State, WaitAll, WakeMask, out NTSTATUS ImmediateStatus))
+            {
+                State.ClearWaitObjects();
                 return ImmediateStatus;
+            }
 
             long Deadline = MillisecondsTimeout == INFINITE ? -1 : Instance.CreateEmulatedDeadlineMilliseconds(MillisecondsTimeout);
             if (Deadline == Instance.EmulatedTickCount64)
+            {
+                State.ClearWaitObjects();
                 return NTSTATUS.STATUS_TIMEOUT;
+            }
 
             long WaitDeadline = Win32kHelper.GetMsgWaitDeadline(Instance, Thread.ThreadId, WakeMask, Deadline);
             State.MsgWaitActive = true;
             State.MsgWaitMask = WakeMask;
             State.MsgWaitTimeout = Deadline;
-            return Instance.WinHelper.ParkUntil(Thread, WaitDeadline, Alertable, Handles, WaitAll);
+            return Instance.WinHelper.ParkUntil(Thread, WaitDeadline, Alertable, OnObjects: true, WaitAll);
         }
     }
 }

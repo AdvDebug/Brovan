@@ -3293,6 +3293,33 @@ namespace Brovan.Core.Emulation
             return Changed;
         }
 
+        // A guest without Windows thread state decides its waits by handle value.
+        private bool TrySatisfyGuestHandles(EmulatedThread Thread, List<ulong> Handles)
+        {
+            if (Thread.WaitAll)
+            {
+                for (int i = 0; i < Handles.Count; i++)
+                {
+                    if (!Guest.IsHandleSignaled(this, Handles[i]))
+                        return false;
+                }
+
+                Thread.WaitSatisfiedIndex = 0;
+                return true;
+            }
+
+            for (int i = 0; i < Handles.Count; i++)
+            {
+                if (!Guest.IsHandleSignaled(this, Handles[i]))
+                    continue;
+
+                Thread.WaitSatisfiedIndex = i;
+                return true;
+            }
+
+            return false;
+        }
+
         private bool VisitWakeScanThread(EmulatedThread Thread, Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick, long Now, long ScanEpoch, ref long EarliestDeadline, out bool Keep)
         {
             bool Changed = false;

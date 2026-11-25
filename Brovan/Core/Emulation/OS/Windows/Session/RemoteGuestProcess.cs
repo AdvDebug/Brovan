@@ -28,6 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             this.PebAddress = PebAddress;
             this.ProcessParameters = ProcessParameters;
             HostStart = ReadStartTime(Host);
+            EndObject = new RemoteProcessEndObject(this);
         }
 
         private static DateTime? ReadStartTime(Process Host)
@@ -55,6 +56,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal uint ExitCode { get; private set; } = StillActive;
 
         internal bool HasExited => Exited || Refresh();
+
+        internal readonly RemoteProcessEndObject EndObject;
 
         // The exit code is stored before this flag, so a reader that sees the flag sees the code with it.
         private volatile bool Exited;

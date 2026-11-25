@@ -14,10 +14,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Factory == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            Factory.Shutdown = true;
-            Factory.PendingReleaseCount = 0;
-            Factory.ReleasePending = false;
-            Factory.WorkerThreads.Clear();
+            WorkerFactoryHelper.Shutdown(Factory);
 
             if (PendingWorkerCountPtr != 0)
             {

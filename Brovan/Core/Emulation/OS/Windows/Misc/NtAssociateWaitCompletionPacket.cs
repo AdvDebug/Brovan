@@ -17,23 +17,29 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             WinWaitCompletionPacket Packet = Instance.WinHelper.HandleManager.GetObjectByHandle<WinWaitCompletionPacket>(WaitCompletionPacketHandle);
             WinIoCompletion Completion = Instance.WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(IoCompletionHandle);
-            if (Packet == null || Completion == null || !Instance.WinHelper.HandleExists(TargetObjectHandle))
+            IHandleObject Target = Instance.WinHelper.HandleManager.GetObjectByHandle(TargetObjectHandle);
+            if (Packet == null || Completion == null || Target == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
+
+            // NT: the target's wait object may not be a mutant or a queue, and a worker factory has none.
+            WaitEntry TargetWait = Instance.ResolveWaitEntry(Target);
+            if (TargetWait.Waitable is WinMutex or WinIoCompletion or WinWorkerFactory)
+                return NTSTATUS.STATUS_INVALID_PARAMETER_3;
 
             // NT keeps a packet associated until its completion leaves the port.
             if (Packet.Associated)
                 return NTSTATUS.STATUS_INVALID_PARAMETER_1;
 
-            Packet.IoCompletionHandle = IoCompletionHandle;
-            Packet.TargetObjectHandle = TargetObjectHandle;
+            Packet.Completion = Completion;
+            Packet.Target = TargetWait;
             Packet.KeyContext = KeyContext;
             Packet.ApcContext = ApcContext;
             Packet.IoStatus = IoStatus;
             Packet.IoStatusInformation = IoStatusInformation;
             Packet.Associated = true;
-            if (Instance.WinHelper.HasPendingConnectReplies && Instance.WinHelper.HandleManager.GetObjectByHandle<WinPort>(TargetObjectHandle) is WinPort Port)
+            if (Instance.WinHelper.HasPendingConnectReplies && Target is WinPort Port)
                 AlpcMessaging.DeliverConnectReplyForRoute(Instance, Port, Completion);
-            Instance.MaterializeSignaledWaitPackets(IoCompletionHandle, Completion);
+            Instance.MaterializeSignaledWaitPackets(Completion);
 
             if (AlreadySignaledPtr != 0 && !Instance.WinHelper.WriteByte(AlreadySignaledPtr, Packet.QueuedCompletion ? (byte)1 : (byte)0))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;

@@ -1524,6 +1524,14 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public abstract HandleType ObjectType { get; }
 
+        internal virtual bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread) => false;
+
+        internal virtual bool TryAcquireFor(BinaryEmulator Instance, EmulatedThread Thread, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_SUCCESS;
+            return IsSignaledFor(Instance, Thread);
+        }
+
         protected void Signal()
         {
             if (WakeSignal == null)
@@ -1551,6 +1559,49 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // Index into the thread's FiledObjects.
         public int Slot;
+    }
+
+    internal struct WaitEntry
+    {
+        public IHandleObject Object;
+        public WaitableHandleObject Waitable;
+    }
+
+    // NT: a thread and a process are dispatcher objects signalled when they end.
+    internal sealed class ThreadEndObject : WaitableHandleObject
+    {
+        private readonly EmulatedThread Thread;
+
+        internal ThreadEndObject(EmulatedThread Thread) => this.Thread = Thread;
+
+        internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Waiter) => Thread.State == EmulatedThreadState.Terminated;
+
+        public override string ObjectId => Thread.ObjectId;
+        public override HandleType ObjectType => HandleType.ThreadHandle;
+    }
+
+    internal sealed class ProcessEndObject : WaitableHandleObject
+    {
+        private readonly WinProcess Process;
+
+        internal ProcessEndObject(WinProcess Process) => this.Process = Process;
+
+        internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Waiter) => !WinSysHelper.IsProcessAlive(Process);
+
+        public override string ObjectId => Process.ObjectId;
+        public override HandleType ObjectType => Process.ObjectType;
+    }
+
+    internal sealed class RemoteProcessEndObject : WaitableHandleObject
+    {
+        private readonly RemoteGuestProcess Process;
+
+        internal RemoteProcessEndObject(RemoteGuestProcess Process) => this.Process = Process;
+
+        internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Waiter) => Process.HasExited;
+
+        public override string ObjectId => $"REMOTEPROCESS_{Process.ProcessId}";
+        public override HandleType ObjectType => HandleType.ProcessHandle;
     }
 
     internal sealed class SignalledWaitables
@@ -1591,6 +1642,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool Critical;
         public long CreationTime;
         public long ExitTime;
+        internal readonly ProcessEndObject EndObject;
+
+        public WinProcess() => EndObject = new ProcessEndObject(this);
         public uint ExitStatus = (uint)NTSTATUS.STATUS_PENDING;
         // STATUS_PENDING is also a valid exit code.
         public bool Exiting;
@@ -1952,6 +2006,25 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public int SignalState => RecursionCount == 0 ? 1 : 1 - RecursionCount;
 
+        internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread)
+            => Signaled || (Thread != null && Owner == Thread.ThreadId);
+
+        internal override bool TryAcquireFor(BinaryEmulator Instance, EmulatedThread Thread, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_SUCCESS;
+            if (Thread == null || !IsSignaledFor(Instance, Thread))
+                return false;
+
+            bool WasAbandoned = Abandoned;
+            Signaled = false;
+            Abandoned = false;
+            OwnerThreadId = Thread.ThreadId;
+            RecursionCount++;
+            if (WasAbandoned)
+                Status = NTSTATUS.STATUS_ABANDONED_WAIT_0;
+            return true;
+        }
+
         public override string ObjectId => Name;
         public override HandleType ObjectType => HandleType.MutexHandle;
     }
@@ -1980,6 +2053,18 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (value)
                     Signal();
             }
+        }
+
+        internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread) => NotifySignaled;
+
+        internal override bool TryAcquireFor(BinaryEmulator Instance, EmulatedThread Thread, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_SUCCESS;
+            if (!NotifySignaled)
+                return false;
+
+            NotifySignaled = false;
+            return true;
         }
 
         public RegistryHiveReader.HiveKey ParsedKey;
@@ -2047,6 +2132,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread) => SignaledState;
+
+        internal override bool TryAcquireFor(BinaryEmulator Instance, EmulatedThread Thread, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_SUCCESS;
+            if (!SignaledState)
+                return false;
+
+            if (EventType == 1)
+                Signaled = false;
+            return true;
+        }
+
         public override string ObjectId => Name;
         public override HandleType ObjectType => HandleType.EventHandle;
     }
@@ -2071,6 +2169,18 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public void ReleaseUpToMaximum(int ReleaseCount) => CurrentCount = (int)Math.Min((long)Count + ReleaseCount, MaximumCount);
+
+        internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread) => Count > 0;
+
+        internal override bool TryAcquireFor(BinaryEmulator Instance, EmulatedThread Thread, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_SUCCESS;
+            if (Count <= 0)
+                return false;
+
+            CurrentCount--;
+            return true;
+        }
 
         public override string ObjectId => Name;
         public override HandleType ObjectType => HandleType.SemaphoreHandle;
@@ -2370,8 +2480,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong ApcContext;
         public NTSTATUS IoStatus;
         public ulong IoStatusInformation;
-        public ulong WaitCompletionPacketHandle;
-        public ulong WorkerFactoryHandle;
+        public WinWaitCompletionPacket Packet;
+        public WinWorkerFactory WorkerFactory;
         public bool WorkerFactoryRelease;
         internal WinReserveObject Reserve;
     }
@@ -2419,6 +2529,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Found;
         }
 
+        internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            Instance.MaterializeSignaledWaitPackets(this);
+            return Queued.Count > 0;
+        }
+
         public override string ObjectId => Name;
 
         public override HandleType ObjectType => HandleType.IoCompletionHandle;
@@ -2444,7 +2560,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public string Name;
         public uint FactoryId;
-        public ulong IoCompletionHandle;
+        public WinIoCompletion Completion;
         public ulong WorkerProcessHandle;
         public ulong StartRoutine;
         public ulong StartParameter;
@@ -2497,6 +2613,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            if (ShutdownState)
+                return true;
+
+            Instance.MaterializeSignaledWaitPackets(Completion);
+            return Completion.PendingCount > 0;
+        }
+
         public override string ObjectId => Name;
 
         public override HandleType ObjectType => HandleType.WorkerFactoryHandle;
@@ -2512,9 +2637,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Instance?.WinHelper?.HandleManager?.GetObjectByHandle<WinWorkerFactory>(Handle);
         }
 
-        internal static WinIoCompletion GetIoCompletion(BinaryEmulator Instance, ulong Handle)
+        // NT: ExpShutdownWorkerFactory, from NtShutdownWorkerFactory and from the factory's last handle close.
+        internal static void Shutdown(WinWorkerFactory Factory)
         {
-            return Instance?.WinHelper?.HandleManager?.GetObjectByHandle<WinIoCompletion>(Handle);
+            Factory.Shutdown = true;
+            Factory.PendingReleaseCount = 0;
+            Factory.ReleasePending = false;
+            Factory.WorkerThreads.Clear();
         }
 
         internal static uint GetThreadLimit(WinWorkerFactory Factory)
@@ -2564,21 +2693,15 @@ namespace Brovan.Core.Emulation.OS.Windows
                     continue;
 
                 WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-                if (State != null && State.WorkerFactoryWaitActive && GetFactory(Instance, State.WorkerFactoryHandle) == Factory)
+                if (State != null && State.WorkerFactoryWaitActive && State.WorkerFactory == Factory)
                     return true;
             }
 
             return false;
         }
 
-        private static bool HasUntakenWork(BinaryEmulator Instance, WinWorkerFactory Factory)
-        {
-            if (Factory.ReleasePending || Factory.PendingReleaseCount != 0)
-                return true;
-
-            WinIoCompletion Completion = GetIoCompletion(Instance, Factory.IoCompletionHandle);
-            return Completion != null && Completion.PendingCount != 0;
-        }
+        private static bool HasUntakenWork(WinWorkerFactory Factory)
+            => Factory.ReleasePending || Factory.PendingReleaseCount != 0 || Factory.Completion.PendingCount != 0;
 
         internal static NTSTATUS MarkWorkerReady(BinaryEmulator Instance, ulong WorkerFactoryHandle)
         {
@@ -2599,39 +2722,23 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        internal static bool EnqueueReleaseCompletion(BinaryEmulator Instance, ulong WorkerFactoryHandle)
+        internal static void EnqueueReleaseCompletion(WinWorkerFactory Factory)
         {
-            if (Instance == null || WorkerFactoryHandle == 0)
-                return false;
-
-            WinWorkerFactory Factory = GetFactory(Instance, WorkerFactoryHandle);
-            if (Factory == null)
-                return false;
-
-            WinIoCompletion Completion = GetIoCompletion(Instance, Factory.IoCompletionHandle);
-            if (Completion == null)
-                return false;
-
-            Completion.Post(new WinIoCompletionEntry
+            Factory.Completion.Post(new WinIoCompletionEntry
             {
                 IoStatus = NTSTATUS.STATUS_SUCCESS,
                 IoStatusInformation = 0,
-                WorkerFactoryHandle = WorkerFactoryHandle,
+                WorkerFactory = Factory,
                 WorkerFactoryRelease = true
             });
-
-            return true;
         }
 
-        internal static void OnIoCompletionEntryDequeued(BinaryEmulator Instance, WinIoCompletionEntry Entry)
+        internal static void OnIoCompletionEntryDequeued(WinIoCompletionEntry Entry)
         {
-            if (Instance == null || Entry == null || !Entry.WorkerFactoryRelease)
+            if (Entry == null || !Entry.WorkerFactoryRelease)
                 return;
 
-            WinWorkerFactory Factory = GetFactory(Instance, Entry.WorkerFactoryHandle);
-            if (Factory == null)
-                return;
-
+            WinWorkerFactory Factory = Entry.WorkerFactory;
             if (Factory.PendingReleaseCount > 0)
                 Factory.PendingReleaseCount--;
 
@@ -2641,7 +2748,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
             }
 
-            EnqueueReleaseCompletion(Instance, Entry.WorkerFactoryHandle);
+            EnqueueReleaseCompletion(Factory);
         }
 
         internal static void EnsureWorkerThreads(BinaryEmulator Instance, WinWorkerFactory Factory)
@@ -2662,7 +2769,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Factory.BindingCount > Desired)
                 Desired = Factory.BindingCount;
             // NT starts one more worker for work no worker waits for, and none while one has not reported ready.
-            if (Factory.StartingWorkers.Count == 0 && HasUntakenWork(Instance, Factory) && !HasWaitingWorker(Instance, Factory))
+            if (Factory.StartingWorkers.Count == 0 && HasUntakenWork(Factory) && !HasWaitingWorker(Instance, Factory))
                 Desired = Math.Max(Desired, (uint)Factory.WorkerThreads.Count + 1);
             if (Desired > Limit)
                 Desired = Limit;
@@ -2697,8 +2804,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     public sealed class WinWaitCompletionPacket : WaitableHandleObject
     {
         public string Name;
-        public ulong IoCompletionHandle;
-        public ulong TargetObjectHandle;
+        public WinIoCompletion Completion;
+        internal WaitEntry Target;
         public ulong KeyContext;
         public ulong ApcContext;
         public NTSTATUS IoStatus;
@@ -2724,6 +2831,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Associated = false;
             QueuedEntry = null;
+            Completion = null;
+            Target = default;
         }
 
         public override string ObjectId => Name;
@@ -2790,6 +2899,23 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (value)
                     Signal();
             }
+        }
+
+        internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            Instance.RefreshTimerState(this);
+            return SignaledState;
+        }
+
+        internal override bool TryAcquireFor(BinaryEmulator Instance, EmulatedThread Thread, out NTSTATUS Status)
+        {
+            Status = NTSTATUS.STATUS_SUCCESS;
+            if (!IsSignaledFor(Instance, Thread))
+                return false;
+
+            if (TimerType == TIMER_TYPE.SynchronizationTimer)
+                Signaled = false;
+            return true;
         }
 
         public override string ObjectId => Name;

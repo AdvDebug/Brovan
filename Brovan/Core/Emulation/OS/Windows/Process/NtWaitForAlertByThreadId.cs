@@ -99,7 +99,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ulong SyscallRip = Instance.WinHelper.GetSyscallRip();
             Thread.WaitActive = true;
-            Thread.WaitHandles = null;
+            WinSysHelper.ResetWaitSet(Thread, State);
             Thread.WaitAll = false;
             Thread.WaitDeadline = Timeout.Infinite ? -1 : Timeout.Deadline;
             Thread.WaitTimedOut = false;

@@ -30,11 +30,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Thread.WaitActive && !Instance.WinHelper.TryReadTimeout(TimeoutPtr, out Timeout))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            NTSTATUS HandleStatus = Instance.WinHelper.ReferenceObjectByHandle(IoCompletionHandle, AccessMask.None, out WinIoCompletion Completion);
-            if (HandleStatus != NTSTATUS.STATUS_SUCCESS)
-                return HandleStatus;
-
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            WinIoCompletion Completion = Thread.WaitActive && State.IoCompletionWaitActive ? State.IoCompletion : null;
+            if (Completion == null)
+            {
+                NTSTATUS HandleStatus = Instance.WinHelper.ReferenceObjectByHandle(IoCompletionHandle, AccessMask.None, out Completion);
+                if (HandleStatus != NTSTATUS.STATUS_SUCCESS)
+                    return HandleStatus;
+            }
+
             State.BoundIoCompletion = Completion;
             if (State.WaitCompleted)
             {
@@ -46,7 +50,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return Completed;
             }
 
-            Instance.MaterializeSignaledWaitPackets(IoCompletionHandle);
+            Instance.MaterializeSignaledWaitPackets(Completion);
 
             List<WinIoCompletionEntry> Taken = State.IoCompletionReservedEntries;
             Taken.Clear();
@@ -81,13 +85,12 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 State.ResetIoCompletionWait();
                 State.IoCompletionWaitActive = true;
-                State.IoCompletionHandle = IoCompletionHandle;
+                State.IoCompletion = Completion;
                 State.IoCompletionKeyContextPtr = KeyContextPtr;
                 State.IoCompletionApcContextPtr = ApcContextPtr;
                 State.IoCompletionIoStatusBlockPtr = IoStatusBlockPtr;
                 State.IoCompletionMaxEntries = 1;
-                Thread.WaitOnSingleHandle(IoCompletionHandle);
-                return Instance.WinHelper.ParkUntil(Thread, NewDeadline, false, Thread.WaitHandles, WaitAll: true);
+                return Instance.WinHelper.ParkUntil(Thread, NewDeadline, false);
             }
 
             return Instance.WinHelper.ContinueParked(Thread);

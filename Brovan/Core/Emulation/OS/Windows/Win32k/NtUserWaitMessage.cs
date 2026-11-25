@@ -30,7 +30,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!Thread.WaitActive)
             {
                 Thread.WaitActive = true;
-                Thread.WaitHandles = null;
+                WinSysHelper.ResetWaitSet(Thread, State);
                 Thread.WaitAll = false;
                 Thread.WaitDeadline = Win32kHelper.GetNextTimerDue(Instance, 0, Thread.ThreadId, 0, 0);
                 State.WaitCompleted = false;

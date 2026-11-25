@@ -56,13 +56,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         public ulong Win32ThreadInfo { get; set; }
         public ExceptionInformation ExceptionInformation { get; set; }
         public bool WorkerFactoryWaitActive { get; set; }
-        public ulong WorkerFactoryHandle { get; set; }
+        public WinWorkerFactory WorkerFactory { get; set; }
         public ulong WorkerFactoryMiniPackets { get; set; }
         public ulong WorkerFactoryPacketsReturned { get; set; }
         public uint WorkerFactoryMaxPackets { get; set; }
         public List<WinIoCompletionEntry> WorkerFactoryReservedEntries { get; set; } = new();
         public bool IoCompletionWaitActive { get; set; }
-        public ulong IoCompletionHandle { get; set; }
+        public WinIoCompletion IoCompletion { get; set; }
         public ulong IoCompletionKeyContextPtr { get; set; }
         public ulong IoCompletionApcContextPtr { get; set; }
         public ulong IoCompletionIoStatusBlockPtr { get; set; }
@@ -101,16 +101,37 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool WaitAlertable { get; set; }
         public bool WaitCompleted { get; set; }
         public NTSTATUS WaitStatus { get; set; }
-        public List<object> WaitObjects { get; set; }
+
+        // NT: a wait holds the objects its handles named at entry.
+        internal WaitEntry[] WaitObjects = Array.Empty<WaitEntry>();
+        internal int WaitObjectCount;
         public long WaitCheckedEpoch = -1;
         public long WaitCheckedGeneration = -1;
-        public WaitableHandleObject[] WaitCheckedObjects;
+        internal bool WaitCheckedFileable;
 
         // FiledSlots[i] is this thread's index in FiledObjects[i].FiledWaiters.
-        internal WaitableHandleObject[] FiledObjects;
+        internal WaitableHandleObject[] FiledObjects = Array.Empty<WaitableHandleObject>();
+        internal int FiledCount;
+        internal long FiledGeneration;
         internal int[] FiledSlots;
         internal int FiledDeadlineIndex = -1;
-        internal bool WaitFiled => FiledObjects != null;
+        internal bool WaitFiled => FiledCount != 0;
+
+        internal ThreadEndObject EndObject;
+
+        internal void AddWaitObject(IHandleObject Object, WaitableHandleObject Waitable)
+        {
+            if (WaitObjectCount == WaitObjects.Length)
+                Array.Resize(ref WaitObjects, Math.Max(4, WaitObjectCount * 2));
+
+            WaitObjects[WaitObjectCount++] = new WaitEntry { Object = Object, Waitable = Waitable };
+        }
+
+        internal void ClearWaitObjects()
+        {
+            Array.Clear(WaitObjects, 0, WaitObjectCount);
+            WaitObjectCount = 0;
+        }
         public bool AlertByThreadIdPending { get; set; }
         public bool AlertByThreadIdWaitActive { get; set; }
         public ulong AlertByThreadIdAddress { get; set; }
@@ -167,7 +188,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void ResetIoCompletionWait()
         {
             IoCompletionWaitActive = false;
-            IoCompletionHandle = 0;
+            IoCompletion = null;
             IoCompletionKeyContextPtr = 0;
             IoCompletionApcContextPtr = 0;
             IoCompletionIoStatusBlockPtr = 0;
@@ -387,6 +408,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             State.PendingUserApcs ??= new List<WinPendingUserApc>();
+            State.EndObject ??= new ThreadEndObject(Thread);
             return State;
         }
 

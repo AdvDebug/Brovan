@@ -28,7 +28,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
-            return NtTimerHelpers.SetTimer2(Instance, Timer, TimerHandle, unchecked((long)DueTime), unchecked((long)Period),
+            return NtTimerHelpers.SetTimer2(Instance, Timer, unchecked((long)DueTime), unchecked((long)Period),
                 ParametersPtr != 0 ? Parameters : ReadOnlySpan<byte>.Empty);
         }
     }

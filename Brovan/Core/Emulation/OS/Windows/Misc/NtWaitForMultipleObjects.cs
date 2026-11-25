@@ -4,71 +4,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtWaitForMultipleObjects : IWinSyscall
     {
-        private static bool TryGetSatisfiedIndex(BinaryEmulator Instance, EmulatedThread Thread, List<ulong> Handles, bool WaitAll, out int Index, out NTSTATUS WaitStatus)
-        {
-            Index = -1;
-            WaitStatus = NTSTATUS.STATUS_SUCCESS;
-            if (Handles == null || Handles.Count == 0)
-                return false;
-
-            if (WaitAll)
-            {
-                for (int i = 0; i < Handles.Count; i++)
-                {
-                    if (!Instance.CanSatisfyWaitHandle(Handles[i], Thread))
-                        return false;
-                }
-
-                HashSet<ulong> AcquiredHandles = new HashSet<ulong>();
-                for (int i = 0; i < Handles.Count; i++)
-                {
-                    ulong Handle = Handles[i];
-                    if (!AcquiredHandles.Add(Handle))
-                        continue;
-
-                    if (!Instance.TryAcquireWaitHandle(Handle, Thread, out NTSTATUS AcquiredStatus))
-                        return false;
-
-                    if (AcquiredStatus == NTSTATUS.STATUS_ABANDONED_WAIT_0 && WaitStatus == NTSTATUS.STATUS_SUCCESS)
-                        WaitStatus = (NTSTATUS)((uint)NTSTATUS.STATUS_ABANDONED_WAIT_0 + (uint)i);
-                }
-
-                Index = 0;
-                return true;
-            }
-
-            for (int i = 0; i < Handles.Count; i++)
-            {
-                if (!Instance.TryAcquireWaitHandle(Handles[i], Thread, out NTSTATUS AcquiredStatus))
-                    continue;
-
-                Index = i;
-                WaitStatus = AcquiredStatus == NTSTATUS.STATUS_ABANDONED_WAIT_0
-                    ? (NTSTATUS)((uint)NTSTATUS.STATUS_ABANDONED_WAIT_0 + (uint)i)
-                    : (NTSTATUS)(uint)i;
-                return true;
-            }
-
-            return false;
-        }
-
-        private static NTSTATUS ContinueWait(BinaryEmulator Instance, EmulatedThread Thread)
-        {
-            if (TryGetSatisfiedIndex(Instance, Thread, Thread.WaitHandles, Thread.WaitAll, out int Index, out NTSTATUS WaitStatus))
-            {
-                Instance.WinHelper.ClearWaitState(Thread);
-
-                return WaitStatus;
-            }
-
-            if (Instance.IsEmulatedDeadlineExpired(Thread.WaitDeadline))
-            {
-                Instance.WinHelper.ClearWaitState(Thread);
-                return NTSTATUS.STATUS_TIMEOUT;
-            }
-
-            return Instance.WinHelper.ContinueParked(Thread);
-        }
+        private const uint MaximumWaitObjects = 64;
+        private const uint WaitAny = 1;
 
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
@@ -83,53 +20,39 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            if (WinEmulatedThread.GetState(Thread).WaitCompleted)
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (State.WaitCompleted)
             {
-                NTSTATUS Status = WinEmulatedThread.GetState(Thread).WaitStatus;
-                WinEmulatedThread.GetState(Thread).WaitCompleted = false;
-                WinEmulatedThread.GetState(Thread).WaitStatus = NTSTATUS.STATUS_SUCCESS;
+                NTSTATUS Status = State.WaitStatus;
+                State.WaitCompleted = false;
+                State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
                 return Status;
             }
 
             if (Thread.WaitActive)
-                return ContinueWait(Instance, Thread);
+                return Instance.ContinueObjectWait(Thread, State);
 
-            if (Count == 0 || Count > 64)
-                return NTSTATUS.STATUS_INVALID_PARAMETER;
+            if (Count == 0 || Count > MaximumWaitObjects)
+                return NTSTATUS.STATUS_INVALID_PARAMETER_1;
+
+            if (WaitType > WaitAny)
+                return NTSTATUS.STATUS_INVALID_PARAMETER_3;
 
             if (!Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? Timeout))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            if (HandlesPtr == 0)
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
             uint HandleSize = (uint)Instance.WinHelper.PointerSize;
-
-            if (!Instance.IsRegionMapped(HandlesPtr, Count * HandleSize))
+            Span<byte> Handles = stackalloc byte[(int)(MaximumWaitObjects * 8)];
+            Handles = Handles.Slice(0, (int)(Count * HandleSize));
+            if (!Instance.ReadMemory(HandlesPtr, Handles))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            List<ulong> Handles = new List<ulong>((int)Count);
-            for (int i = 0; i < Count; i++)
-            {
-                ulong H = Instance.WinHelper.ReadPointer(HandlesPtr + (ulong)i * HandleSize);
-                if (Instance.WinHelper.HandleManager.GetObjectByHandle(H) == null)
-                    return NTSTATUS.STATUS_INVALID_HANDLE;
+            bool WaitAll = WaitType != WaitAny;
+            NTSTATUS Resolved = Instance.ResolveWaitHandles(State, Handles, HandleSize, WaitAll);
+            if (Resolved != NTSTATUS.STATUS_SUCCESS)
+                return Resolved;
 
-                Handles.Add(H);
-            }
-
-            if (Instance.WinHelper.TryEndWaitWithUserApc(Thread, Alertable))
-                return NTSTATUS.STATUS_USER_APC;
-
-            bool WaitAll = WaitType == 0;
-            if (TryGetSatisfiedIndex(Instance, Thread, Handles, WaitAll, out int Index, out NTSTATUS WaitStatus))
-                return WaitStatus;
-
-            long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(Timeout);
-            if (Deadline == Instance.EmulatedTickCount64)
-                return NTSTATUS.STATUS_TIMEOUT;
-
-            return Instance.WinHelper.ParkUntil(Thread, Deadline, Alertable, Handles, WaitAll);
+            return Instance.WaitForObjects(Thread, State, WaitAll, Alertable, Timeout);
         }
     }
 }

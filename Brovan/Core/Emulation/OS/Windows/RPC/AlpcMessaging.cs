@@ -2097,14 +2097,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return true;
             }
 
-            List<ulong> Handles = Thread.WaitHandles;
-            if (Handles != null)
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            for (int i = 0; i < State.WaitObjectCount; i++)
             {
-                for (int i = 0; i < Handles.Count; i++)
-                {
-                    if (Instance.WinHelper.HandleManager.GetObjectByHandle<WinPort>(Handles[i]) == Port)
-                        return true;
-                }
+                if (State.WaitObjects[i].Object == Port)
+                    return true;
             }
 
             WinIoCompletion Taken = Instance.CompletionTakenBy(Thread);

@@ -153,28 +153,21 @@ namespace Brovan.Core.Emulation
         public int SuspendCount;
         public bool WaitActive;
 
-        // Every assignment starts a new wait set, so the wait-check cache keys on the generation.
         public List<ulong> WaitHandles
         {
             get => _waitHandles;
             set
             {
                 _waitHandles = value;
-                WaitHandlesGeneration++;
+                NewWaitGeneration();
             }
         }
         private List<ulong> _waitHandles;
-        public long WaitHandlesGeneration { get; private set; }
 
-        private List<ulong> _singleWaitHandle;
+        // Every new wait set moves it, so the wait-check cache keys on it.
+        public long WaitGeneration { get; private set; }
 
-        public void WaitOnSingleHandle(ulong Handle)
-        {
-            List<ulong> Handles = _singleWaitHandle ??= new List<ulong>(1);
-            Handles.Clear();
-            Handles.Add(Handle);
-            WaitHandles = Handles;
-        }
+        public void NewWaitGeneration() => WaitGeneration++;
 
         public bool WaitAll;
         public long WaitDeadline;

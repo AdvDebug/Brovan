@@ -40,7 +40,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!HandleManager.Grants(Granted, AccessMask.TimerQueryState))
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
-            Instance.CanSatisfyWaitHandle(TimerHandle);
+            Instance.RefreshTimerState(Timer);
             if (!Helper.WriteUInt64(InformationPtr, unchecked((ulong)RemainingTime(Instance, Timer)))
                 || !Helper.WriteByte(InformationPtr + OffsetTimerState, Timer.Signaled ? (byte)1 : (byte)0)
                 || (ReturnLengthPtr != 0 && !Helper.WriteUInt32(ReturnLengthPtr, BasicInformationSize)))

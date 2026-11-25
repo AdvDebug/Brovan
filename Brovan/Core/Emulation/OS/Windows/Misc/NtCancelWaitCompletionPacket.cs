@@ -16,16 +16,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Packet.Associated)
                 return NTSTATUS.STATUS_CANCELLED;
 
-            WinIoCompletion Completion = Instance.WinHelper.HandleManager.GetObjectByHandle<WinIoCompletion>(Packet.IoCompletionHandle);
-            if (Completion != null)
-                Instance.MaterializeSignaledWaitPackets(Packet.IoCompletionHandle, Completion);
+            WinIoCompletion Completion = Packet.Completion;
+            Instance.MaterializeSignaledWaitPackets(Completion);
 
             if (Packet.QueuedCompletion)
             {
                 if (!RemoveSignaledPacket)
                     return NTSTATUS.STATUS_PENDING;
 
-                Completion?.Remove(Packet.QueuedEntry);
+                Completion.Remove(Packet.QueuedEntry);
             }
 
             Packet.Disassociate();

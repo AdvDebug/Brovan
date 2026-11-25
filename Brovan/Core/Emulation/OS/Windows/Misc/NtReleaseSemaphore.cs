@@ -47,7 +47,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            if (PreviousCount == 0 && Semaphore.CurrentCount > 0 && Instance.WakeWorkerFactoryWaitersForObject(SemaphoreHandle))
+            if (PreviousCount == 0 && Semaphore.CurrentCount > 0 && Instance.WakeWaitersForObject(Semaphore))
                 Instance._emulator.StopEmulation();
 
             return NTSTATUS.STATUS_SUCCESS;

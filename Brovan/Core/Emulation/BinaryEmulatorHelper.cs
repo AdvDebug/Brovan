@@ -160,7 +160,7 @@ namespace Brovan.Core.Emulation
         // Runs without KernelLock, and work that needs it takes BinaryEmulator.EnterKernelLockScope.
         void RefreshGuestClock(BinaryEmulator Instance) { }
 
-        bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle);
+        bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle) => false;
         bool ExecuteThreadSlice(BinaryEmulator Instance, EmulatedThread Thread, uint QuantumInstructions, out bool State);
         void OnThreadWaitSatisfied(BinaryEmulator Instance, EmulatedThread Thread);
     }

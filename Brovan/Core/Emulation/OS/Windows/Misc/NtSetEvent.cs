@@ -32,7 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return NTSTATUS.STATUS_ACCESS_VIOLATION;
             }
 
-            if (Signaled && Instance.WakeWorkerFactoryWaitersForObject(EventHandle))
+            if (Signaled && Instance.WakeWaitersForObject(Ev))
                 Instance._emulator.StopEmulation();
 
             return NTSTATUS.STATUS_SUCCESS;

@@ -215,11 +215,6 @@ namespace Brovan.Core.Emulation.Guests
             return false;
         }
 
-        public bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle)
-        {
-            return false;
-        }
-
         public bool ExecuteThreadSlice(BinaryEmulator Instance, EmulatedThread Thread, uint QuantumInstructions, out bool State)
         {
             State = false;

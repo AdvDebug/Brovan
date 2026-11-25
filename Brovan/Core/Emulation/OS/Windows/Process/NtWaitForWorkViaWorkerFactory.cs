@@ -99,13 +99,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Factory.Shutdown)
                 return NTSTATUS.STATUS_ABANDONED;
 
-            WinIoCompletion Completion = WorkerFactoryHelper.GetIoCompletion(Instance, Factory.IoCompletionHandle);
-            if (Completion == null)
-                return NTSTATUS.STATUS_INVALID_HANDLE;
-
+            WinIoCompletion Completion = Factory.Completion;
             WindowsThreadState State = WinEmulatedThread.GetState(Thread);
             State.BoundIoCompletion = Completion;
-            if (State.WaitCompleted && State.WorkerFactoryWaitActive == false && State.WorkerFactoryHandle == 0)
+            if (State.WaitCompleted && State.WorkerFactoryWaitActive == false && State.WorkerFactory == null)
             {
                 NTSTATUS Status = State.WaitStatus;
                 State.WaitCompleted = false;
@@ -116,7 +113,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (DeferredMessage != 0)
                 AlpcMessaging.SendDeferred(Instance, DeferredPort, DeferredFlags, DeferredMessage);
 
-            Instance.MaterializeSignaledWaitPackets(Factory.IoCompletionHandle);
+            Instance.MaterializeSignaledWaitPackets(Completion);
 
             List<WinIoCompletionEntry> Taken = State.WorkerFactoryReservedEntries;
             Taken.Clear();
@@ -142,12 +139,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             State.WorkerFactoryReservedEntries?.Clear();
             State.WorkerFactoryWaitActive = true;
-            State.WorkerFactoryHandle = WorkerFactoryHandle;
+            State.WorkerFactory = Factory;
             State.WorkerFactoryMiniPackets = MiniPackets;
             State.WorkerFactoryPacketsReturned = PacketsReturnedPtr;
             State.WorkerFactoryMaxPackets = Count;
-            Thread.WaitOnSingleHandle(WorkerFactoryHandle);
-            return Instance.WinHelper.ParkUntil(Thread, Deadline, false, Thread.WaitHandles, WaitAll: true);
+            return Instance.WinHelper.ParkUntil(Thread, Deadline, false);
         }
     }
 }

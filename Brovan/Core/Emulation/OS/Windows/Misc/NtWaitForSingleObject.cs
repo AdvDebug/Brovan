@@ -4,23 +4,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtWaitForSingleObject : IWinSyscall
     {
-        private static NTSTATUS ContinueWait(BinaryEmulator Instance, EmulatedThread Thread)
-        {
-            if (Thread.WaitHandles != null && Thread.WaitHandles.Count > 0 && Instance.TryAcquireWaitHandle(Thread.WaitHandles[0], Thread, out NTSTATUS AcquiredStatus))
-            {
-                Instance.WinHelper.ClearWaitState(Thread);
-                return AcquiredStatus;
-            }
-
-            if (Instance.IsEmulatedDeadlineExpired(Thread.WaitDeadline))
-            {
-                Instance.WinHelper.ClearWaitState(Thread);
-                return NTSTATUS.STATUS_TIMEOUT;
-            }
-
-            return Instance.WinHelper.ContinueParked(Thread);
-        }
-
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 
@@ -32,16 +15,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread == null)
                 return NTSTATUS.STATUS_UNSUCCESSFUL;
 
-            if (WinEmulatedThread.GetState(Thread).WaitCompleted)
+            WindowsThreadState State = WinEmulatedThread.GetState(Thread);
+            if (State.WaitCompleted)
             {
-                NTSTATUS Status = WinEmulatedThread.GetState(Thread).WaitStatus;
-                WinEmulatedThread.GetState(Thread).WaitCompleted = false;
-                WinEmulatedThread.GetState(Thread).WaitStatus = NTSTATUS.STATUS_SUCCESS;
+                NTSTATUS Status = State.WaitStatus;
+                State.WaitCompleted = false;
+                State.WaitStatus = NTSTATUS.STATUS_SUCCESS;
                 return Status;
             }
 
             if (Thread.WaitActive)
-                return ContinueWait(Instance, Thread);
+                return Instance.ContinueObjectWait(Thread, State);
 
             if (!Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? Timeout))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
@@ -50,18 +34,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Obj == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            if (Instance.WinHelper.TryEndWaitWithUserApc(Thread, Alertable))
-                return NTSTATUS.STATUS_USER_APC;
-
-            if (Instance.TryAcquireWaitHandle(Handle, Thread, out NTSTATUS AcquiredStatus))
-                return AcquiredStatus;
-
-            long Deadline = Instance.WinHelper.ParseRelativeDeadlineMs(Timeout);
-            if (Deadline == Instance.EmulatedTickCount64)
-                return NTSTATUS.STATUS_TIMEOUT;
-
-            Thread.WaitOnSingleHandle(Handle);
-            return Instance.WinHelper.ParkUntil(Thread, Deadline, Alertable, Thread.WaitHandles, WaitAll: true);
+            State.ClearWaitObjects();
+            Instance.AddWaitObject(State, Obj);
+            return Instance.WaitForObjects(Thread, State, WaitAll: true, Alertable, Timeout);
         }
     }
 }

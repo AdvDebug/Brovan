@@ -49,7 +49,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         public const long IntervalsPerMillisecond = 10000;
 
-        public static NTSTATUS SetTimer2(BinaryEmulator Instance, WinIRTimer Timer, ulong TimerHandle, long? DueTime, long Period, ReadOnlySpan<byte> Parameters)
+        public static NTSTATUS SetTimer2(BinaryEmulator Instance, WinIRTimer Timer, long? DueTime, long Period, ReadOnlySpan<byte> Parameters)
         {
             if (Period != 0 && (Timer.Attributes & WinIRTimer.IRTimerAttribute) != 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
@@ -66,7 +66,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Period != 0 && Period < NtQueryTimerResolution.FinestResolution)
                 Period = NtQueryTimerResolution.FinestResolution;
 
-            ArmTimer(Instance, Timer, TimerHandle, Instance.WinHelper.TimeoutToMilliseconds(Due), WinSysHelper.IntervalToMilliseconds(Period), out _);
+            ArmTimer(Instance, Timer, Instance.WinHelper.TimeoutToMilliseconds(Due), WinSysHelper.IntervalToMilliseconds(Period), out _);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -119,7 +119,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        public static void ArmTimer(BinaryEmulator Instance, WinTimer Timer, ulong TimerHandle, long DueMilliseconds, long PeriodMilliseconds, out bool WasSignaled)
+        public static void ArmTimer(BinaryEmulator Instance, WinTimer Timer, long DueMilliseconds, long PeriodMilliseconds, out bool WasSignaled)
         {
             WasSignaled = Timer.Signaled;
             Timer.Signaled = false;
@@ -137,7 +137,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 else
                     Timer.DueTick = Instance.CreateEmulatedDeadlineMilliseconds(Timer.PeriodMilliseconds);
 
-                if (Instance.WakeWorkerFactoryWaitersForObject(TimerHandle) || Instance.HasHandleWaiters(TimerHandle))
+                if (Instance.WakeWaitersForObject(Timer) || Instance.HasWaiters(Timer))
                     Instance._emulator.StopEmulation();
             }
         }

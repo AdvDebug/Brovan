@@ -29,7 +29,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_PARAMETER_2;
 
             Reserve.InUse = true;
-            Instance.WinHelper.PostCompletion(Instance, IoCompletionHandle, Completion, new WinIoCompletionEntry
+            Instance.WinHelper.PostCompletion(Instance, Completion, new WinIoCompletionEntry
             {
                 KeyContext = KeyContext,
                 ApcContext = ApcContext,

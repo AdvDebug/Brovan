@@ -22,7 +22,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 return CurrentStatePtr != 0
                     ? NTSTATUS.STATUS_INVALID_PARAMETER
-                    : NtTimerHelpers.SetTimer2(Instance, IRTimer, TimerHandle, null, 0, ReadOnlySpan<byte>.Empty);
+                    : NtTimerHelpers.SetTimer2(Instance, IRTimer, null, 0, ReadOnlySpan<byte>.Empty);
             }
 
             if (Object is not WinTimer Timer)

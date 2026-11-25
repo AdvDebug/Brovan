@@ -82,7 +82,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (State.QueuePort == null)
                 return false;
 
-            Instance.MaterializeSignaledWaitPackets(State.QueuePortHandle);
+            Instance.MaterializeSignaledWaitPackets(State.QueuePort);
             while (State.QueuePort.PendingCount > 0)
             {
                 WinIoCompletionEntry Entry = Instance.TakeIoCompletionEntry(State.QueuePort);
@@ -99,7 +99,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (State.QueuePort == null)
                 return;
 
-            Instance.MaterializeSignaledWaitPackets(State.QueuePortHandle);
+            Instance.MaterializeSignaledWaitPackets(State.QueuePort);
             while (State.QueuePort.PendingCount > 0)
                 HandlePacket(Instance, State, Instance.TakeIoCompletionEntry(State.QueuePort), InputContext);
         }
@@ -107,7 +107,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         // The skip and stop rules follow xxxDrainQueueCompletions.
         internal static void Drain(BinaryEmulator Instance, WindowsThreadState State, ulong DrainSlot)
         {
-            Instance.MaterializeSignaledWaitPackets(State.QueuePortHandle);
+            Instance.MaterializeSignaledWaitPackets(State.QueuePort);
             for (int Pending = State.QueuePort.PendingCount; Pending > 0; Pending--)
             {
                 WinIoCompletionEntry Entry = Instance.TakeIoCompletionEntry(State.QueuePort);

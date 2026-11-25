@@ -438,43 +438,6 @@ namespace Brovan.Core.Emulation.Guests
             return State == null || !BinaryEmulator.IsAlertWaitOnly(Thread, State);
         }
 
-        public bool IsHandleSignaled(BinaryEmulator Instance, ulong Handle)
-        {
-            if (WinHelper == null)
-                return false;
-
-            IHandleObject Obj = WinHelper.HandleManager.GetObjectByHandle(Handle);
-            if (Obj == null)
-                return false;
-
-            if (Obj is WinEvent Event)
-                return Event.Signaled;
-
-            if (Obj is WinMutex Mutex)
-                return Mutex.Signaled;
-
-            if (Obj is EmulatedThread Thread)
-                return Thread.State == EmulatedThreadState.Terminated;
-
-            if (Obj is WinTimer Timer)
-                return Timer.Signaled;
-
-            if (Obj is WinWorkerFactory Factory)
-                return IsWorkerFactoryReady(Instance, Factory);
-
-            if (Obj is WinIoCompletion Completion)
-            {
-                Instance.MaterializeSignaledWaitPackets(Handle);
-                return Completion.PendingCount > 0;
-            }
-
-            // NT: a console input object is signalled while its buffer holds any record.
-            if (Obj is WinFile File && File.ConsoleKind == ConsoleObjectKind.Input)
-                return WinHelper.ConsoleState.HasInput(Instance);
-
-            return false;
-        }
-
 
         public void OnThreadWaitSatisfied(BinaryEmulator Instance, EmulatedThread Thread)
         {
@@ -513,7 +476,7 @@ namespace Brovan.Core.Emulation.Guests
             if (Thread.WaitTimedOut)
             {
                 WaitStatus = NTSTATUS.STATUS_TIMEOUT;
-                if (!State.AlertByThreadIdWaitActive && Thread.WaitHandles == null)
+                if (!State.AlertByThreadIdWaitActive && !State.MsgWaitActive && State.WaitObjectCount == 0)
                     WaitStatus = NTSTATUS.STATUS_SUCCESS;
             }
             else if (State.AlertByThreadIdWaitActive)
@@ -528,7 +491,7 @@ namespace Brovan.Core.Emulation.Guests
             State.WaitResumeRIP = 0;
             State.WaitReturnRIP = 0;
             State.WaitAlertable = false;
-            State.WaitObjects = null;
+            State.ClearWaitObjects();
             State.ApcAlertable = false;
             State.AlertByThreadIdWaitActive = false;
             State.AlertByThreadIdAddress = 0;
@@ -583,7 +546,7 @@ namespace Brovan.Core.Emulation.Guests
             State.WaitResumeRIP = 0;
             State.WaitReturnRIP = 0;
             State.WaitAlertable = false;
-            State.WaitObjects = null;
+            State.ClearWaitObjects();
             State.ApcAlertable = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
@@ -605,7 +568,7 @@ namespace Brovan.Core.Emulation.Guests
             State.WaitResumeRIP = 0;
             State.WaitReturnRIP = 0;
             State.WaitAlertable = false;
-            State.WaitObjects = null;
+            State.ClearWaitObjects();
             State.ApcAlertable = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
@@ -640,32 +603,16 @@ namespace Brovan.Core.Emulation.Guests
             State.WaitResumeRIP = 0;
             State.WaitReturnRIP = 0;
             State.WaitAlertable = false;
-            State.WaitObjects = null;
+            State.ClearWaitObjects();
             State.ApcAlertable = false;
             Thread.WaitTimedOut = false;
             Thread.WaitSatisfiedIndex = -1;
         }
 
-        private bool IsWorkerFactoryReady(BinaryEmulator Instance, WinWorkerFactory Factory)
-        {
-            if (Factory == null)
-                return false;
-
-            if (Factory.Shutdown)
-                return true;
-
-            Instance.MaterializeSignaledWaitPackets(Factory.IoCompletionHandle);
-            WinIoCompletion Completion = WinHelper?.HandleManager.GetObjectByHandle<WinIoCompletion>(Factory.IoCompletionHandle);
-            if (Completion == null)
-                return false;
-
-            return Completion.PendingCount > 0;
-        }
-
         private void CompleteWorkerFactoryWait(BinaryEmulator Instance, EmulatedThread Thread, WindowsThreadState State)
         {
             NTSTATUS WaitStatus = NTSTATUS.STATUS_SUCCESS;
-            WinWorkerFactory Factory = WinHelper?.HandleManager.GetObjectByHandle<WinWorkerFactory>(State.WorkerFactoryHandle);
+            WinWorkerFactory Factory = State.WorkerFactory;
             bool HasEntries = State.WorkerFactoryReservedEntries != null && State.WorkerFactoryReservedEntries.Count > 0;
 
             // ntdll expects at least one packet on success.
@@ -706,7 +653,7 @@ namespace Brovan.Core.Emulation.Guests
             ReturnFromWait(Instance, Thread, State, WaitStatus);
 
             State.WorkerFactoryWaitActive = false;
-            State.WorkerFactoryHandle = 0;
+            State.WorkerFactory = null;
             State.WorkerFactoryMiniPackets = 0;
             State.WorkerFactoryPacketsReturned = 0;
             State.WorkerFactoryMaxPackets = 0;
@@ -716,7 +663,7 @@ namespace Brovan.Core.Emulation.Guests
             State.WaitResumeRIP = 0;
             State.WaitReturnRIP = 0;
             State.WaitAlertable = false;
-            State.WaitObjects = null;
+            State.ClearWaitObjects();
             State.ApcAlertable = false;
         }
 

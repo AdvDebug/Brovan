@@ -2556,14 +2556,14 @@ namespace Brovan
             }
             else if (Thread.GuestState is WindowsThreadState WindowsState)
             {
-                if (WindowsState.WaitObjects != null && WindowsState.WaitObjects.Count > 0)
-                    return $"objects={WindowsState.WaitObjects.Count}";
+                if (WindowsState.WaitObjectCount > 0)
+                    return $"objects={WindowsState.WaitObjectCount}";
 
                 if (WindowsState.WorkerFactoryWaitActive)
-                    return $"worker-factory 0x{WindowsState.WorkerFactoryHandle:X}";
+                    return $"worker-factory {WindowsState.WorkerFactory?.Name}";
 
                 if (WindowsState.IoCompletionWaitActive)
-                    return $"io-completion 0x{WindowsState.IoCompletionHandle:X}";
+                    return $"io-completion {WindowsState.IoCompletion?.Name}";
 
                 if (WindowsState.IoRequest != null)
                     return WindowsState.IoRequest.WaitLabel;
