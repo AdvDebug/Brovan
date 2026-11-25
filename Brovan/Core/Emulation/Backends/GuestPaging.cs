@@ -211,8 +211,8 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        // Present with the access and not trapped. The caller holds the mapping lock, which guards its trapped set.
-        public bool IsRangeAccessible(ulong address, ulong size, bool write, Dictionary<ulong, bool> trapped)
+        // Present with the access, page by page. A caller that passes its trapped set holds the mapping lock.
+        public bool IsRangeAccessible(ulong address, ulong size, bool write, Dictionary<ulong, bool>? trapped = null)
         {
             if (size == 0)
                 return true;
@@ -223,7 +223,7 @@ namespace Brovan.Core.Emulation
             ulong end = address + size;
             for (ulong pageBase = address & ~PageMask; pageBase < end; pageBase += PageSize)
             {
-                if (!TryLookupPage(pageBase, out GuestPage page) || trapped.ContainsKey(pageBase))
+                if (!TryLookupPage(pageBase, out GuestPage page) || (trapped != null && trapped.ContainsKey(pageBase)))
                     return false;
 
                 GuestPagePermission perm = page.Permissions;

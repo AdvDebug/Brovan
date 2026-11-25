@@ -1969,8 +1969,7 @@ namespace Brovan.Core.Emulation
         public bool IsRangeAccessible(ulong address, ulong size, bool write)
         {
             if (Volatile.Read(ref _disposing) != 0 || Volatile.Read(ref _disposed) != 0) return false;
-            using RankedLock.Scope mappingHold = _paging.LockMappings();
-            return _paging.IsRangeAccessible(address, size, write, _trappedPages);
+            return _paging.IsRangeAccessible(address, size, write);
         }
 
         public void Dispose()

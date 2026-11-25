@@ -1538,7 +1538,8 @@ namespace Brovan.Core.Emulation
 
         bool IsRangeMapped(ulong address, ulong size);
 
-        // Every page present with the access and not trapped, read with no KernelLock. False when unsure.
+        // Every page present with the access, read from the page records with no lock. A trapped page counts, since a
+        // host copy into it is the same write either way. False when unsure.
         bool IsRangeAccessible(ulong address, ulong size, bool write);
 
         /// <summary>
