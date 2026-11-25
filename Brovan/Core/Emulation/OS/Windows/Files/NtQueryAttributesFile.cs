@@ -14,7 +14,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         // FILE_NETWORK_OPEN_INFORMATION is 0x38 on both x64 and x86.
         private const uint FileNetworkOpenInformationSize = 0x38;
 
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) => ResolveQuery(Instance, NetworkOpen: false);
+
         public NTSTATUS Handle(BinaryEmulator Instance) => Query(Instance, NetworkOpen: false);
+
+        // A query by path reads no table KernelLock guards, so only its output's page probe decides.
+        internal static WinSyscallDomain ResolveQuery(BinaryEmulator Instance, bool NetworkOpen)
+        {
+            ulong FileInformationPtr = Instance.WinHelper.GetArg(1);
+            return FileInformationPtr != 0 &&
+                   Instance.WinHelper.IsAccessibleUserRange(FileInformationPtr, NetworkOpen ? FileNetworkOpenInformationSize : FileBasicInformationSize, Write: true)
+                ? WinSyscallDomain.Self
+                : WinSyscallDomain.KernelLock;
+        }
 
         internal static NTSTATUS Query(BinaryEmulator Instance, bool NetworkOpen)
         {

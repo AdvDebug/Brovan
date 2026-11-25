@@ -1471,6 +1471,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 FullName = string.IsNullOrEmpty(Name) ? RootPath : RootPath.TrimEnd('\\') + "\\" + Name.TrimStart('\\');
             }
 
+            // The object namespace is KernelLock state. A name outside its roots, such as a file path, never walks it.
+            if (!TryStripNamedObjectRoot(FullName, out _, out _))
+                return FullName;
+
+            using RankedLock.Scope KernelScope = Emulator.EnterKernelLockScope();
             return TryGetNamedObjectDirectory(FullName, out WinObjectDirectory Parent, out string LeafName, out _)
                 ? Parent.Path + "\\" + LeafName
                 : FullName;
