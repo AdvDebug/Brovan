@@ -127,14 +127,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         private ulong NextHandle = 0x40;
         private readonly Dictionary<ulong, HandleEntry> HandleTable = new();
         private readonly Dictionary<string, List<ulong>> ObjectIdToHandles = new();
-        private readonly WakeSignal Signal;
+        private readonly BinaryEmulator Emulator;
         internal readonly SignalledWaitables Signalled = new();
         private readonly WinEvent SignalledWaitObject = new WinEvent { Signaled = true };
         private readonly WinEvent UnsignalledPortObject = new WinEvent();
 
-        public HandleManager(WakeSignal Signal)
+        public HandleManager(BinaryEmulator Emulator)
         {
-            this.Signal = Signal;
+            this.Emulator = Emulator;
+        }
+
+        // The table has no lock of its own, so every member runs under KernelLock.
+        private void CheckLock()
+        {
+            if (RankedLock.OrderChecked)
+                Emulator.AssertKernelLockHeld(nameof(HandleManager));
         }
 
         public WinHandle AddHandle(IHandleObject obj, AccessMask Permissions, ObjectHandleFlags Flags = ObjectHandleFlags.None)
@@ -145,6 +152,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // NT gives an inherited handle the value it had in the creator. Null when the value is taken or invalid.
         public WinHandle AddHandleAt(ulong Handle, IHandleObject obj, AccessMask Permissions, ObjectHandleFlags Flags)
         {
+            CheckLock();
             if (Handle == 0 || (Handle & 3) != 0 || Handle > uint.MaxValue || HandleTable.ContainsKey(Handle) || IsReservedHandleValue(Handle))
                 return null;
 
@@ -153,14 +161,10 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private WinHandle Insert(ulong handle, IHandleObject obj, AccessMask Permissions, ObjectHandleFlags Flags)
         {
+            CheckLock();
             // Entering the table is the first moment a thread can wait on this object, so it is also the first
             // moment its state changes are worth reporting.
-            WaitableHandleObject Waitable = (DefaultWaitObject(obj) ?? obj) as WaitableHandleObject;
-            if (Waitable != null && Waitable.WakeSignal == null)
-            {
-                Waitable.Signalled = Signalled;
-                Volatile.Write(ref Waitable.WakeSignal, Signal);
-            }
+            Wire(WaitObjectOf(obj));
 
             WinHandle winHandle = new WinHandle
             {
@@ -170,7 +174,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
 
             HandleTable[handle] = new HandleEntry { Object = obj, Permissions = Permissions, Flags = Flags };
-            Version++;
 
             if (!ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
             {
@@ -181,6 +184,16 @@ namespace Brovan.Core.Emulation.OS.Windows
             Handles.Add(handle);
 
             return winHandle;
+        }
+
+        internal void Wire(WaitableHandleObject Waitable)
+        {
+            if (Waitable == null || Waitable.WakeSignal != null)
+                return;
+
+            Waitable.Signalled = Signalled;
+            Waitable.Owner = Emulator;
+            Volatile.Write(ref Waitable.WakeSignal, Emulator.WakeSignal);
         }
 
         private ulong AllocateHandleValue()
@@ -205,6 +218,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private bool TryGetEntry(ulong Handle, out ulong Key, out HandleEntry Entry)
         {
+            CheckLock();
             if (HandleTable.TryGetValue(Handle, out Entry))
             {
                 Key = Handle;
@@ -231,7 +245,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return false;
             Entry.Flags = Flags;
             HandleTable[Key] = Entry;
-            Version++;
             return true;
         }
 
@@ -275,11 +288,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public int CountHandlesByObjectId(string ObjectId)
         {
+            CheckLock();
             return ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles) ? Handles.Count : 0;
         }
 
         public bool HasHandleToObject(IHandleObject Object)
         {
+            CheckLock();
             if (Object == null || !ObjectIdToHandles.TryGetValue(Object.ObjectId, out List<ulong> Handles))
                 return false;
 
@@ -315,7 +330,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!TryGetEntry(Handle, out ulong Key, out Entry))
                 return false;
             HandleTable.Remove(Key);
-            Version++;
             IHandleObject obj = Entry.Object;
             if (ObjectIdToHandles.TryGetValue(obj.ObjectId, out List<ulong> Handles))
             {
@@ -328,27 +342,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public List<KeyValuePair<ulong, IHandleObject>> SnapshotHandles()
         {
+            CheckLock();
             var Result = new List<KeyValuePair<ulong, IHandleObject>>(HandleTable.Count);
             foreach (var kv in HandleTable) Result.Add(new KeyValuePair<ulong, IHandleObject>(kv.Key, kv.Value.Object));
             return Result;
         }
 
-        /// <summary>
-        /// Bumped whenever the table gains or loses an entry, so callers that keep a filtered view of the
-        /// handles can tell that their copy is still good without walking the table.
-        /// </summary>
-        public long Version { get; private set; }
-
         public int Count => HandleTable.Count;
-
-        public void SnapshotHandles(List<KeyValuePair<ulong, IHandleObject>> Destination)
-        {
-            if (Destination == null)
-                return;
-
-            Destination.Clear();
-            foreach (var kv in HandleTable) Destination.Add(new KeyValuePair<ulong, IHandleObject>(kv.Key, kv.Value.Object));
-        }
 
         public bool HandleExists(ulong Handle)
         {

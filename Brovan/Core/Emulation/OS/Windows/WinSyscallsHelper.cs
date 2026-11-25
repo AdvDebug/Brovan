@@ -699,8 +699,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IsPendingIoLive(in Io))
                 WriteIoStatusBlock(Emulator, Io.IoStatusBlock, Status, Information);
 
-            if (Io.Event != null)
-                Io.Event.Signaled = true;
+            Io.Event?.SetState(true);
 
             if (!QueueCompletion)
                 return;
@@ -758,9 +757,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (EventHandle == 0)
                 return;
 
-            WinEvent Ev = GetEventByHandle(EventHandle, AccessMask.GiveTemp);
-            if (Ev != null)
-                Ev.Signaled = false;
+            GetEventByHandle(EventHandle, AccessMask.GiveTemp)?.SetState(false);
         }
 
         // NT references and resets the event once per request, so a re-run skips it.
@@ -774,7 +771,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
-            Event.Signaled = false;
+            Event.SetState(false);
             return NTSTATUS.STATUS_SUCCESS;
         }
 
@@ -786,9 +783,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (EventHandle == 0 || Status == NTSTATUS.STATUS_PENDING)
                 return;
 
-            WinEvent Ev = GetEventByHandle(EventHandle, AccessMask.GiveTemp);
-            if (Ev != null)
-                Ev.Signaled = true;
+            GetEventByHandle(EventHandle, AccessMask.GiveTemp)?.SetState(true);
         }
 
         // NT write-probes only the ULONG Status at the start of the block.
@@ -2434,7 +2429,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             long Now = Emulator.GetEmulatedSystemTimeFileTimeUtc();
             long AgeTime = SaturatingMillisecondsToFileTimeDuration(AgeMilliseconds);
             Process.CreationTime = Now >= AgeTime ? Now - AgeTime : Now;
-            Process.ExitTime = 0;
+            Process.ClearExitTime();
 
             if (!GenerateCpuTimes || AgeMilliseconds <= 0)
                 return;
@@ -2643,8 +2638,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal readonly Dictionary<Guid, RPC.Ports.RpcssPortHandler.HostClass> HostClasses = new();
         internal readonly Dictionary<string, RPC.Ports.RpcssPortHandler.HostClass> HostActivatableClasses = new(StringComparer.OrdinalIgnoreCase);
         internal readonly Dictionary<(Guid Interface, ushort Major), RPC.Ports.EndpointMapper.Entry> HostEndpoints = new();
-        // NT keeps a timer with an APC alive, and firing, after its last handle closes.
-        internal readonly List<WinTimer> ApcTimers = new List<WinTimer>();
+        // Timers that are armed or carry an APC. The scan refreshes these and no other timer.
+        internal readonly List<WinTimer> ArmedTimers = new List<WinTimer>();
         internal RPC.Shell.ActivatableApplicationRegistrar ShellRegistrar { get; private set; }
         internal RPC.CoreUI.NavigationServer ShellNavigation { get; private set; }
         internal RPC.UserManager.UserManagerService UserManager { get; private set; }
@@ -3276,7 +3271,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             HostProcess = System.Diagnostics.Process.GetCurrentProcess();
             HostUserTimeAtBoot = HostProcess.UserProcessorTime;
             HostKernelTimeAtBoot = HostProcess.PrivilegedProcessorTime;
-            HandleManager = new HandleManager(Emulator.WakeSignal);
+            HandleManager = new HandleManager(Emulator);
             SyntheticVolumeGuid = Guid.NewGuid().ToString("D").ToLowerInvariant();
             SyntheticVolumeGuidSymbolicLink = $"\\??\\Volume{{{SyntheticVolumeGuid}}}";
             SyntheticVolumeWin32GuidPath = $"\\\\?\\Volume{{{SyntheticVolumeGuid}}}\\";
@@ -9605,6 +9600,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             foreach (WinMutex Mutex in WinMutexes)
             {
+                using RankedLock.Scope StateScope = Mutex.EnterStateScope();
                 if (Mutex.OwnerThreadId != ThreadId || Mutex.RecursionCount <= 0)
                     continue;
 
@@ -10906,9 +10902,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 if (Notification.EventHandle != 0)
                 {
-                    WinEvent Event = GetEventByHandle(Notification.EventHandle, AccessMask.GiveTemp);
-                    if (Event != null)
-                        Event.Signaled = true;
+                    GetEventByHandle(Notification.EventHandle, AccessMask.GiveTemp)?.SetState(true);
                 }
                 else if (Notification.KeyHandle != 0)
                 {
@@ -11751,6 +11745,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 // NT: ExpCloseWorkerFactory shuts the factory down at its last handle, which ends the workers' waits.
                 case WinWorkerFactory Factory:
                     WorkerFactoryHelper.Shutdown(Factory);
+                    break;
+
+                case WinTimer Timer:
+                    NtTimerHelpers.CloseLastTimerHandle(Emulator, Timer);
+                    break;
+
+                // NT: IopCloseWaitCompletionPacket cancels a packet that still waits. A queued completion stays queued.
+                case WinWaitCompletionPacket Packet:
+                    using (Packet.EnterStateScope())
+                    {
+                        if (Packet.Associated && !Packet.QueuedCompletion)
+                            Packet.Disassociate();
+                    }
                     break;
 
                 case ReferencedNtObject Referenced:

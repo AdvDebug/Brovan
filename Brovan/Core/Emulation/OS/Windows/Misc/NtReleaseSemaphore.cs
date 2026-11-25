@@ -35,11 +35,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Semaphore == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            if (Semaphore.CurrentCount > Semaphore.MaximumCount - ReleaseCount)
-                return NTSTATUS.STATUS_SEMAPHORE_LIMIT_EXCEEDED;
+            int PreviousCount;
+            using (Semaphore.EnterStateScope())
+            {
+                if (Semaphore.CurrentCount > Semaphore.MaximumCount - ReleaseCount)
+                    return NTSTATUS.STATUS_SEMAPHORE_LIMIT_EXCEEDED;
 
-            int PreviousCount = Semaphore.CurrentCount;
-            Semaphore.CurrentCount += ReleaseCount;
+                PreviousCount = Semaphore.CurrentCount;
+                Semaphore.CurrentCount += ReleaseCount;
+            }
 
             if (PreviousCountPtr != 0)
             {

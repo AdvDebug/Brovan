@@ -88,7 +88,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             Timer.ApcThread = Instance.CurrentThread;
             Timer.ApcRoutine = ApcRoutine;
             Timer.ApcContext = ApcContext;
-            Instance.WinHelper.ApcTimers.Add(Timer);
+            ListTimer(Instance, Timer);
+        }
+
+        private static void ListTimer(BinaryEmulator Instance, WinTimer Timer)
+        {
+            if (Timer.Listed)
+                return;
+
+            Timer.Listed = true;
+            Instance.WinHelper.ArmedTimers.Add(Timer);
+        }
+
+        public static void CloseLastTimerHandle(BinaryEmulator Instance, WinTimer Timer)
+        {
+            Timer.HandlesClosed = true;
+            Instance.InvalidateWindowsTimerDue();
         }
 
         public static void ClearTimerApc(BinaryEmulator Instance, WinTimer Timer)
@@ -102,7 +117,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Remove(Timer.QueuedApc);
             }
 
-            Instance.WinHelper.ApcTimers.Remove(Timer);
             Timer.ApcThread = null;
             Timer.ApcRoutine = 0;
             Timer.ApcContext = 0;
@@ -111,7 +125,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public static void RundownTimers(BinaryEmulator Instance, EmulatedThread Thread)
         {
-            List<WinTimer> Timers = Instance.WinHelper.ApcTimers;
+            List<WinTimer> Timers = Instance.WinHelper.ArmedTimers;
             for (int i = Timers.Count - 1; i >= 0; i--)
             {
                 if (Timers[i].ApcThread == Thread)
@@ -124,6 +138,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             WasSignaled = Timer.Signaled;
             Timer.Signaled = false;
             Timer.Active = true;
+            ListTimer(Instance, Timer);
             Timer.DueTick = Instance.CreateEmulatedDeadlineMilliseconds(DueMilliseconds);
             Timer.PeriodMilliseconds = PeriodMilliseconds;
             Instance.InvalidateWindowsTimerDue();

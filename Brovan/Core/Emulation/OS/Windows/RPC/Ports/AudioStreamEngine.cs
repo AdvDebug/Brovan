@@ -71,8 +71,7 @@ namespace Brovan.Core.Emulation.OS.Windows.RPC.Ports
         protected void SignalPeriod()
         {
             WinEvent Event = PeriodEvent;
-            if (Event != null)
-                Event.Signaled = true;
+            Event?.SetFromHostThread();
         }
 
         // The guest QPC runs at 10 MHz, so its counts are already the 100 ns units a position record holds.

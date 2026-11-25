@@ -248,7 +248,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             // NT sets a serialized event at every commit, and the other kind only when a built batch returns.
             if (CompletionEvent != null && (Built || CompletionSerialized))
-                CompletionEvent.Signaled = true;
+                CompletionEvent.SetState(true);
 
             BatchId = Committed;
             return NTSTATUS.STATUS_SUCCESS;
@@ -295,7 +295,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             Processed = Committed;
             if (CompletionEvent != null && !CompletionSerialized)
-                CompletionEvent.Signaled = true;
+                CompletionEvent.SetState(true);
         }
 
         internal void Confirm(uint Batch) => Confirmed = Math.Max(Confirmed, Math.Min(Batch, Processed));

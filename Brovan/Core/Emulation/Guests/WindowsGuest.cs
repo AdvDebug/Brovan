@@ -339,6 +339,17 @@ namespace Brovan.Core.Emulation.Guests
             Instance.WinHelper?.ReleaseThreadResources(Thread);
         }
 
+        public void OnThreadEnded(BinaryEmulator Instance, EmulatedThread Thread)
+        {
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State == null)
+                return;
+
+            if (Thread.WaitActive || State.WaitKind != WindowsWaitKind.None)
+                Instance.WinHelper?.ClearWaitState(Thread);
+            State.EndObject?.SignalEnded();
+        }
+
         public void OnThreadContextLoaded(BinaryEmulator Instance, EmulatedThread Thread)
         {
             if (Thread == null)

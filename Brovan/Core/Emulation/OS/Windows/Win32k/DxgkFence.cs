@@ -255,7 +255,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
         {
             Forget(Process);
             if (Event != null)
-                Event.Signaled = true;
+                Event.SetState(true);
             else if (Request.IsLive)
                 Request.Complete(Instance, NTSTATUS.STATUS_SUCCESS);
         }

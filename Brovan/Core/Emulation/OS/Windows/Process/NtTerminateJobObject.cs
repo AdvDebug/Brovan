@@ -65,7 +65,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Instance.WinHelper.UpdateProcessTimes(Process);
                 if (!Process.Threadless)
                     Process.ExitStatus = ExitStatus;
-                Process.ExitTime = ExitTime;
+                Process.MarkExited(ExitTime);
             }
 
             Instance.WakeSignal.Bump();

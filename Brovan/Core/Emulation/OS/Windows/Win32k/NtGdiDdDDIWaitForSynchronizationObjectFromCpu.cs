@@ -58,8 +58,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
                 bool WaitAny = (Flags & FlagWaitAny) != 0;
                 if (DxgkFenceWaiter.AreSatisfied(Fences, Values, WaitAny))
                 {
-                    if (Event != null)
-                        Event.Signaled = true;
+                    Event?.SetState(true);
                     return NTSTATUS.STATUS_SUCCESS;
                 }
 

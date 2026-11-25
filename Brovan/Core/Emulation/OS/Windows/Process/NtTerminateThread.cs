@@ -58,11 +58,13 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             Thread.ExitCode = unchecked((int)ExitStatus);
             Instance.WinHelper.ClearTerminationState(Thread);
-            using (Instance.SchedulerLock.EnterScope())
-                Thread.State = EmulatedThreadState.Terminated;
+            Instance.MarkThreadTerminated(Thread);
             if (ReleaseResources)
+            {
+                // Destroyed windows, ended sends and released ports can unblock other threads.
                 Instance.WinHelper.ReleaseThreadResources(Thread);
-            Instance.WakeSignal.Bump();
+                Instance.WakeSignal.Bump();
+            }
         }
 
         /// <summary>

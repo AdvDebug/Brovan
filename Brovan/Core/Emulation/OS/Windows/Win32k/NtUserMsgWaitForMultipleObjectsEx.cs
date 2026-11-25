@@ -16,6 +16,7 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
 
             if (WaitAll)
             {
+                using RankedLock.Scope SchedulerScope = Instance.SchedulerLock.EnterScope();
                 if (!Instance.AreWaitObjectsSignaled(Thread, State) || !MessageReady)
                     return false;
 

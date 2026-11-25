@@ -109,9 +109,6 @@ namespace Brovan.Core.Emulation
         private PortableBinarySection _lastSectionLookupResult;
         private WinModule _lastSectionLookupModule;
         private readonly byte[] _instructionDisasmBuffer = new byte[16];
-        private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsTimerHandleSnapshot = new();
-        private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsHandleScratch = new();
-        private readonly List<KeyValuePair<ulong, IHandleObject>> WindowsMaterializePacketSnapshot = new();
         private readonly List<EmulatedThread> WindowsWakeCandidates = new();
 
         public string LastFunc = string.Empty;
@@ -190,6 +187,7 @@ namespace Brovan.Core.Emulation
 
         internal bool AreWaitObjectsSignaled(EmulatedThread Thread, WindowsThreadState State)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             for (int i = 0; i < State.WaitObjectCount; i++)
             {
                 if (!IsWaitEntrySignaled(State.WaitObjects[i], Thread))
@@ -202,6 +200,7 @@ namespace Brovan.Core.Emulation
         // NT: an abandoned mutant in a satisfied WaitAll set makes the whole wait STATUS_ABANDONED_WAIT_0, with no index.
         internal NTSTATUS TakeAllWaitObjects(EmulatedThread Thread, WindowsThreadState State)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             bool Abandoned = false;
             for (int i = 0; i < State.WaitObjectCount; i++)
             {
@@ -233,6 +232,7 @@ namespace Brovan.Core.Emulation
 
         internal bool TryTakeAnyWaitObject(EmulatedThread Thread, WindowsThreadState State, out int Index, out NTSTATUS Status)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             for (int i = 0; i < State.WaitObjectCount; i++)
             {
                 if (!TryAcquireWaitEntry(State.WaitObjects[i], Thread, out NTSTATUS Acquired))
@@ -252,6 +252,7 @@ namespace Brovan.Core.Emulation
 
         internal bool TryTakeWaitObjects(EmulatedThread Thread, WindowsThreadState State, bool WaitAll, out int Index, out NTSTATUS Status)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             if (!WaitAll)
                 return TryTakeAnyWaitObject(Thread, State, out Index, out Status);
 
@@ -356,6 +357,7 @@ namespace Brovan.Core.Emulation
 
         internal bool HasWaiters(WaitableHandleObject Object)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             for (int i = 0; i < WakeScanList.Count; i++)
             {
                 if (IsWaitingOn(WakeScanList[i], Object))
@@ -439,72 +441,50 @@ namespace Brovan.Core.Emulation
         }
 
         // NT drops a one-shot timer's APC once it has run, which here is when the timer is idle and the APC is not queued.
-        private long RefreshApcTimers(long NextDue)
+        private long RefreshListedTimers(ref bool WokeThread)
         {
-            List<WinTimer> Timers = WinHelper.ApcTimers;
+            List<WinTimer> Timers = WinHelper.ArmedTimers;
+            long NextDue = long.MaxValue;
             for (int i = Timers.Count - 1; i >= 0; i--)
             {
                 WinTimer Timer = Timers[i];
-                RefreshTimerState(Timer);
+                if (RefreshTimerState(Timer))
+                    WokeThread |= WakeWaitersForObject(Timer);
+
+                // NT: a timer has no close procedure. It ends at its last reference, and a wait, a wait packet and an APC
+                // each hold one. A named timer can be opened again after its last handle closed.
+                if (Timer.HandlesClosed && Timer.Active && Timer.ApcThread == null && Timer.TargetedBy is not { Count: > 0 } && !HasWaiters(Timer))
+                {
+                    Timer.HandlesClosed = !WinHelper.HandleManager.HasHandleToObject(Timer);
+                    if (Timer.HandlesClosed)
+                        Timer.Active = false;
+                }
+
                 if (Timer.Active)
+                {
                     NextDue = Math.Min(NextDue, Timer.DueTick);
-                else if (Timer.QueuedApc == null || !WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Contains(Timer.QueuedApc))
+                    continue;
+                }
+
+                if (Timer.ApcThread != null && (Timer.QueuedApc == null || !WinEmulatedThread.GetState(Timer.ApcThread).PendingUserApcs.Contains(Timer.QueuedApc)))
                     NtTimerHelpers.ClearTimerApc(this, Timer);
+
+                if (Timer.ApcThread == null)
+                {
+                    Timer.Listed = false;
+                    Timers[i] = Timers[^1];
+                    Timers.RemoveAt(Timers.Count - 1);
+                }
             }
 
             return NextDue;
         }
 
-        private long WindowsTimerSnapshotVersion = -1;
-        private long WindowsMaterializePacketVersion = -1;
         private long EarliestWindowsTimerDue = -1;
 
         internal void InvalidateWindowsTimerDue()
         {
             EarliestWindowsTimerDue = -1;
-        }
-
-        // Rebuilt only when the handle table changes. Both views are read on every scheduler slice.
-        private List<KeyValuePair<ulong, IHandleObject>> GetWindowsTimerView()
-        {
-            long Version = WinHelper.HandleManager.Version;
-            if (Version != WindowsTimerSnapshotVersion)
-            {
-                WinHelper.HandleManager.SnapshotHandles(WindowsHandleScratch);
-                WindowsTimerHandleSnapshot.Clear();
-
-                for (int i = 0; i < WindowsHandleScratch.Count; i++)
-                {
-                    if (WindowsHandleScratch[i].Value is WinTimer)
-                        WindowsTimerHandleSnapshot.Add(WindowsHandleScratch[i]);
-                }
-
-                WindowsHandleScratch.Clear();
-                WindowsTimerSnapshotVersion = Version;
-            }
-
-            return WindowsTimerHandleSnapshot;
-        }
-
-        private List<KeyValuePair<ulong, IHandleObject>> GetWaitCompletionPacketView()
-        {
-            long Version = WinHelper.HandleManager.Version;
-            if (Version != WindowsMaterializePacketVersion)
-            {
-                WinHelper.HandleManager.SnapshotHandles(WindowsHandleScratch);
-                WindowsMaterializePacketSnapshot.Clear();
-
-                for (int i = 0; i < WindowsHandleScratch.Count; i++)
-                {
-                    if (WindowsHandleScratch[i].Value is WinWaitCompletionPacket)
-                        WindowsMaterializePacketSnapshot.Add(WindowsHandleScratch[i]);
-                }
-
-                WindowsHandleScratch.Clear();
-                WindowsMaterializePacketVersion = Version;
-            }
-
-            return WindowsMaterializePacketSnapshot;
         }
 
         internal bool RefreshWindowsTimersAndWakeWaiters()
@@ -524,28 +504,10 @@ namespace Brovan.Core.Emulation
                 WinHelper.Composition.Service(this);
 
             long Now = EmulatedTickCount64;
-
-            if (WinHelper.HandleManager.Version == WindowsTimerSnapshotVersion && EarliestWindowsTimerDue >= 0 && Now < EarliestWindowsTimerDue)
+            if (EarliestWindowsTimerDue >= 0 && Now < EarliestWindowsTimerDue)
                 return false;
 
-            List<KeyValuePair<ulong, IHandleObject>> Timers = GetWindowsTimerView();
-            long NextDue = long.MaxValue;
-
-            for (int i = 0; i < Timers.Count; i++)
-            {
-                KeyValuePair<ulong, IHandleObject> Pair = Timers[i];
-                if (Pair.Value is not WinTimer Timer)
-                    continue;
-
-                if (RefreshTimerState(Timer))
-                    WokeThread |= WakeWaitersForObject(Timer);
-
-                if (Timer.Active && Timer.DueTick < NextDue)
-                    NextDue = Timer.DueTick;
-            }
-
-            EarliestWindowsTimerDue = RefreshApcTimers(NextDue);
-
+            EarliestWindowsTimerDue = RefreshListedTimers(ref WokeThread);
             return WokeThread;
         }
 
@@ -575,56 +537,29 @@ namespace Brovan.Core.Emulation
                 }
             }
 
-            List<KeyValuePair<ulong, IHandleObject>> Timers = GetWindowsTimerView();
-            List<KeyValuePair<ulong, IHandleObject>> Packets = HasCompletionPacketWaiter ? GetWaitCompletionPacketView() : null;
-
+            List<WinTimer> Timers = WinHelper.ArmedTimers;
             for (int i = 0; i < Timers.Count; i++)
             {
-                KeyValuePair<ulong, IHandleObject> Pair = Timers[i];
-                if (Pair.Value is not WinTimer Timer)
-                    continue;
-
+                WinTimer Timer = Timers[i];
                 bool HasHandleWaiter = HasWaiters(Timer);
-
-                bool HasWorkerFactoryTimerWaiter = false;
-                if (Packets != null)
-                {
-                    for (int PacketIndex = 0; PacketIndex < Packets.Count; PacketIndex++)
-                    {
-                        KeyValuePair<ulong, IHandleObject> WaitPair = Packets[PacketIndex];
-                        if (WaitPair.Value is not WinWaitCompletionPacket Packet)
-                            continue;
-
-                        if (Packet.Associated && !Packet.QueuedCompletion && ReferenceEquals(Packet.Target.Waitable, Timer))
-                        {
-                            HasWorkerFactoryTimerWaiter = true;
-                            break;
-                        }
-                    }
-                }
-
+                bool HasWorkerFactoryTimerWaiter = HasCompletionPacketWaiter && HasWaitingPacket(Timer);
                 bool BecameSignaled = RefreshTimerState(Timer);
 
                 if ((BecameSignaled || Timer.Signaled) && HasWorkerFactoryTimerWaiter && WakeWaitersForObject(Timer))
                     return true;
 
-                if (!HasHandleWaiter && !HasWorkerFactoryTimerWaiter)
-                    continue;
-
                 if ((BecameSignaled || Timer.Signaled) && HasHandleWaiter)
                     return true;
 
-                if (!Timer.Active || Timer.Signaled)
+                if (!Timer.Active)
                     continue;
 
                 long Delta = Timer.DueTick - Now;
-                if (Delta > 0 && Delta < BestDelta)
+                if (Timer.ApcThread != null)
+                    BestDelta = Math.Min(BestDelta, Math.Max(Delta, 1));
+                else if ((HasHandleWaiter || HasWorkerFactoryTimerWaiter) && !Timer.Signaled && Delta > 0 && Delta < BestDelta)
                     BestDelta = Delta;
             }
-
-            long ApcDue = RefreshApcTimers(long.MaxValue);
-            if (ApcDue != long.MaxValue)
-                BestDelta = Math.Min(BestDelta, Math.Max(ApcDue - Now, 1));
 
             if (BestDelta == long.MaxValue)
                 return false;
@@ -644,17 +579,9 @@ namespace Brovan.Core.Emulation
             if (WinHelper == null)
                 return false;
 
-            List<KeyValuePair<ulong, IHandleObject>> Packets = GetWaitCompletionPacketView();
-            for (int i = 0; i < Packets.Count; i++)
-            {
-                if (Packets[i].Value is not WinWaitCompletionPacket Packet)
-                    continue;
-
-                if (!Packet.Associated || !ReferenceEquals(Packet.Target.Waitable, Target))
-                    continue;
-
-                MaterializeSignaledWaitPackets(Packet.Completion);
-            }
+            List<WinWaitCompletionPacket> Packets = Target.TargetedBy;
+            for (int i = 0; Packets != null && i < Packets.Count; i++)
+                MaterializeSignaledWaitPackets(Packets[i].Completion);
 
             using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
 
@@ -703,16 +630,15 @@ namespace Brovan.Core.Emulation
 
         internal void MaterializeSignaledWaitPackets(WinIoCompletion Completion)
         {
-            List<KeyValuePair<ulong, IHandleObject>> Packets = GetWaitCompletionPacketView();
+            if (Completion == null)
+                return;
+
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
+            List<WinWaitCompletionPacket> Packets = Completion.WaitPackets;
             for (int i = 0; i < Packets.Count; i++)
             {
-                if (Packets[i].Value is not WinWaitCompletionPacket Packet)
-                    continue;
-
-                if (!Packet.Associated || Packet.QueuedCompletion || Packet.Completion != Completion)
-                    continue;
-
-                if (!TryAcquireWaitEntry(Packet.Target, null, out _))
+                WinWaitCompletionPacket Packet = Packets[i];
+                if (Packet.QueuedCompletion || !TryAcquireWaitEntry(Packet.Target, null, out _))
                     continue;
 
                 WinIoCompletionEntry Entry = new WinIoCompletionEntry
@@ -743,6 +669,7 @@ namespace Brovan.Core.Emulation
 
         internal void TakeIoCompletionEntries(WinIoCompletion Completion, uint MaxEntries, List<WinIoCompletionEntry> Taken)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             int First = Taken.Count;
             while ((uint)Taken.Count < MaxEntries && Completion.PendingCount > 0)
             {
@@ -758,6 +685,7 @@ namespace Brovan.Core.Emulation
 
         internal WinIoCompletionEntry TakeIoCompletionEntry(WinIoCompletion Completion)
         {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
             WinIoCompletionEntry Entry = Completion.Take();
             Entry.Packet?.Disassociate();
             WorkerFactoryHelper.OnIoCompletionEntryDequeued(Entry);
@@ -833,7 +761,8 @@ namespace Brovan.Core.Emulation
             // A signal reaches a filed waiter only through an object that entered the handle table.
             for (int i = 0; i < State.WaitObjectCount; i++)
             {
-                if (State.WaitObjects[i].Waitable?.WakeSignal == null)
+                WaitableHandleObject Waitable = State.WaitObjects[i].Waitable;
+                if (Waitable?.WakeSignal == null || Waitable.IsPolled)
                     return;
             }
 
@@ -1104,13 +1033,22 @@ namespace Brovan.Core.Emulation
             if (WinHelper == null)
                 return false;
 
-            List<KeyValuePair<ulong, IHandleObject>> Packets = GetWaitCompletionPacketView();
-            for (int i = 0; i < Packets.Count; i++)
+            List<WinWaitCompletionPacket> Packets = Completion?.WaitPackets;
+            for (int i = 0; Packets != null && i < Packets.Count; i++)
             {
-                if (Packets[i].Value is not WinWaitCompletionPacket Packet || !Packet.Associated || Packet.QueuedCompletion)
-                    continue;
+                if (!Packets[i].QueuedCompletion && Packets[i].Target.Object == Target)
+                    return true;
+            }
 
-                if (Packet.Target.Object == Target && Packet.Completion == Completion)
+            return false;
+        }
+
+        private static bool HasWaitingPacket(WaitableHandleObject Target)
+        {
+            List<WinWaitCompletionPacket> Packets = Target.TargetedBy;
+            for (int i = 0; Packets != null && i < Packets.Count; i++)
+            {
+                if (!Packets[i].QueuedCompletion)
                     return true;
             }
 

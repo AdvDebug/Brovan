@@ -145,7 +145,10 @@ namespace Brovan.Core.Emulation
         EmulatedThread CreateEmulatedThread(BinaryEmulator Instance, ulong StartAddress, string Name = null!, ulong Parameter = 0, ulong? StackSizeOverride = null, int BasePriority = 8);
         // Runs without KernelLock on SMP: with thread residency it writes only the processor's registers.
         void OnThreadContextLoaded(BinaryEmulator Instance, EmulatedThread Thread);
+        // Runs under KernelLock after a thread ended its own slice.
         void OnThreadTerminated(BinaryEmulator Instance, EmulatedThread Thread);
+        // Runs under SchedulerLock alone, after the state is Terminated.
+        void OnThreadEnded(BinaryEmulator Instance, EmulatedThread Thread) { }
         // Runs under SchedulerLock and reads only scheduler state.
         bool HasPendingGuestWork(BinaryEmulator Instance, EmulatedThread Thread);
 

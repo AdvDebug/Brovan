@@ -1508,6 +1508,7 @@ namespace Brovan.Core.Emulation.OS.Windows
     {
         internal WakeSignal WakeSignal;
         internal SignalledWaitables Signalled;
+        internal BinaryEmulator Owner;
 
         // Epoch of the last signal, so a scan can skip a waiter whose objects have not signalled.
         // Poisoned across a bump, so either store leaves a value above any epoch a scan checked at.
@@ -1520,9 +1521,13 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal WaitableHandleObject NextSignalled;
         internal int SignalQueued;
 
+        internal List<WinWaitCompletionPacket> TargetedBy;
+
         public abstract string ObjectId { get; }
 
         public abstract HandleType ObjectType { get; }
+
+        internal virtual bool IsPolled => false;
 
         internal virtual bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread) => false;
 
@@ -1531,6 +1536,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             Status = NTSTATUS.STATUS_SUCCESS;
             return IsSignaledFor(Instance, Thread);
         }
+
+        // NT: a dispatcher object's state changes under the dispatcher lock, which is SchedulerLock here.
+        protected void CheckWrite()
+        {
+            if (RankedLock.OrderChecked)
+                Owner?.CheckObjectWrite(this);
+        }
+
+        internal RankedLock.Scope EnterStateScope() => Owner != null ? Owner.SchedulerLock.EnterScope() : default;
 
         protected void Signal()
         {
@@ -1574,6 +1588,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal ThreadEndObject(EmulatedThread Thread) => this.Thread = Thread;
 
+        internal void SignalEnded() => Signal();
+
         internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Waiter) => Thread.State == EmulatedThreadState.Terminated;
 
         public override string ObjectId => Thread.ObjectId;
@@ -1586,6 +1602,8 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         internal ProcessEndObject(WinProcess Process) => this.Process = Process;
 
+        internal void SignalEnded() => Signal();
+
         internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Waiter) => !WinSysHelper.IsProcessAlive(Process);
 
         public override string ObjectId => Process.ObjectId;
@@ -1597,6 +1615,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly RemoteGuestProcess Process;
 
         internal RemoteProcessEndObject(RemoteGuestProcess Process) => this.Process = Process;
+
+        // The end of another emulator's process is polled, so a wait on it is checked on every scan.
+        internal override bool IsPolled => true;
+
+        // Also called on the session watcher thread, which takes no lock.
+        internal void SignalEnded() => Signal();
 
         internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Waiter) => Process.HasExited;
 
@@ -1641,10 +1665,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool Critical;
         public long CreationTime;
-        public long ExitTime;
+        public long ExitTime { get; private set; }
         internal readonly ProcessEndObject EndObject;
 
         public WinProcess() => EndObject = new ProcessEndObject(this);
+
+        internal void ClearExitTime() => ExitTime = 0;
+
+        internal void MarkExited(long Time)
+        {
+            ExitTime = Time;
+            EndObject.SignalEnded();
+        }
         public uint ExitStatus = (uint)NTSTATUS.STATUS_PENDING;
         // STATUS_PENDING is also a valid exit code.
         public bool Exiting;
@@ -1978,13 +2010,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         public int RecursionCount;
 
         private bool SignaledState;
-        private uint Owner;
+        private uint OwnerThread;
 
         public bool Signaled
         {
             get => SignaledState;
             set
             {
+                CheckWrite();
                 SignaledState = value;
                 if (value)
                     Signal();
@@ -1994,11 +2027,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         // A wait can be satisfied by the mutex going unowned as well as by it being signalled.
         public uint OwnerThreadId
         {
-            get => Owner;
+            get => OwnerThread;
             set
             {
-                bool Released = Owner != 0 && value == 0;
-                Owner = value;
+                CheckWrite();
+                bool Released = OwnerThread != 0 && value == 0;
+                OwnerThread = value;
                 if (Released)
                     Signal();
             }
@@ -2007,7 +2041,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public int SignalState => RecursionCount == 0 ? 1 : 1 - RecursionCount;
 
         internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread)
-            => Signaled || (Thread != null && Owner == Thread.ThreadId);
+            => Signaled || (Thread != null && OwnerThread == Thread.ThreadId);
 
         internal override bool TryAcquireFor(BinaryEmulator Instance, EmulatedThread Thread, out NTSTATUS Status)
         {
@@ -2126,10 +2160,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             get => SignaledState;
             set
             {
+                CheckWrite();
                 SignaledState = value;
                 if (value)
                     Signal();
             }
+        }
+
+        internal void SetState(bool Value)
+        {
+            using RankedLock.Scope StateScope = EnterStateScope();
+            Signaled = Value;
+        }
+
+        // Safe from a host thread that holds no guest lock.
+        internal void SetFromHostThread()
+        {
+            SignaledState = true;
+            Signal();
         }
 
         internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread) => SignaledState;
@@ -2161,6 +2209,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             get => Count;
             set
             {
+                CheckWrite();
                 bool Released = value > Count;
                 Count = value;
                 if (Released)
@@ -2168,7 +2217,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        public void ReleaseUpToMaximum(int ReleaseCount) => CurrentCount = (int)Math.Min((long)Count + ReleaseCount, MaximumCount);
+        public void ReleaseUpToMaximum(int ReleaseCount)
+        {
+            using RankedLock.Scope StateScope = EnterStateScope();
+            CurrentCount = (int)Math.Min((long)Count + ReleaseCount, MaximumCount);
+        }
 
         internal override bool IsSignaledFor(BinaryEmulator Instance, EmulatedThread Thread) => Count > 0;
 
@@ -2493,16 +2546,20 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private readonly Queue<WinIoCompletionEntry> Queued = new Queue<WinIoCompletionEntry>();
 
+        internal readonly List<WinWaitCompletionPacket> WaitPackets = new List<WinWaitCompletionPacket>();
+
         public int PendingCount => Queued.Count;
 
         public void Post(WinIoCompletionEntry Entry)
         {
+            using RankedLock.Scope StateScope = EnterStateScope();
             Queued.Enqueue(Entry);
             Signal();
         }
 
         public WinIoCompletionEntry Take()
         {
+            CheckWrite();
             WinIoCompletionEntry Entry = Queued.Dequeue();
             if (Entry.Reserve != null)
                 Entry.Reserve.InUse = false;
@@ -2511,6 +2568,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool Remove(WinIoCompletionEntry Entry)
         {
+            CheckWrite();
             bool Found = false;
             for (int Remaining = Queued.Count; Remaining > 0; Remaining--)
             {
@@ -2595,6 +2653,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             get => ShutdownState;
             set
             {
+                CheckWrite();
                 ShutdownState = value;
                 if (value)
                     Signal();
@@ -2606,6 +2665,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             get => PendingReleases;
             set
             {
+                CheckWrite();
                 bool Released = value > PendingReleases;
                 PendingReleases = value;
                 if (Released)
@@ -2640,6 +2700,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         // NT: ExpShutdownWorkerFactory, from NtShutdownWorkerFactory and from the factory's last handle close.
         internal static void Shutdown(WinWorkerFactory Factory)
         {
+            using RankedLock.Scope StateScope = Factory.EnterStateScope();
             Factory.Shutdown = true;
             Factory.PendingReleaseCount = 0;
             Factory.ReleasePending = false;
@@ -2739,6 +2800,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             WinWorkerFactory Factory = Entry.WorkerFactory;
+            using RankedLock.Scope StateScope = Factory.EnterStateScope();
             if (Factory.PendingReleaseCount > 0)
                 Factory.PendingReleaseCount--;
 
@@ -2819,6 +2881,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             get => QueuedEntryState;
             set
             {
+                CheckWrite();
                 QueuedEntryState = value;
                 if (value != null)
                     Signal();
@@ -2827,8 +2890,30 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool QueuedCompletion => QueuedEntryState != null;
 
+        internal void Associate(WinIoCompletion Port, WaitEntry TargetWait, ulong Key, ulong Apc, NTSTATUS Status, ulong Information)
+        {
+            CheckWrite();
+            Completion = Port;
+            Target = TargetWait;
+            KeyContext = Key;
+            ApcContext = Apc;
+            IoStatus = Status;
+            IoStatusInformation = Information;
+            Associated = true;
+            Port.WaitPackets.Add(this);
+            if (TargetWait.Waitable != null)
+                (TargetWait.Waitable.TargetedBy ??= new List<WinWaitCompletionPacket>()).Add(this);
+        }
+
         public void Disassociate()
         {
+            CheckWrite();
+            if (Associated)
+            {
+                Completion.WaitPackets.Remove(this);
+                Target.Waitable?.TargetedBy.Remove(this);
+            }
+
             Associated = false;
             QueuedEntry = null;
             Completion = null;
@@ -2882,6 +2967,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool Active;
         public long DueTick;
         public long PeriodMilliseconds;
+
+        // On WinSysHelper.ArmedTimers.
+        internal bool Listed;
+        internal bool HandlesClosed;
 
         public EmulatedThread ApcThread;
         public ulong ApcRoutine;

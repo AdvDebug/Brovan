@@ -26,17 +26,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (TargetWait.Waitable is WinMutex or WinIoCompletion or WinWorkerFactory)
                 return NTSTATUS.STATUS_INVALID_PARAMETER_3;
 
-            // NT keeps a packet associated until its completion leaves the port.
-            if (Packet.Associated)
-                return NTSTATUS.STATUS_INVALID_PARAMETER_1;
+            using (Packet.EnterStateScope())
+            {
+                // NT keeps a packet associated until its completion leaves the port.
+                if (Packet.Associated)
+                    return NTSTATUS.STATUS_INVALID_PARAMETER_1;
 
-            Packet.Completion = Completion;
-            Packet.Target = TargetWait;
-            Packet.KeyContext = KeyContext;
-            Packet.ApcContext = ApcContext;
-            Packet.IoStatus = IoStatus;
-            Packet.IoStatusInformation = IoStatusInformation;
-            Packet.Associated = true;
+                Packet.Associate(Completion, TargetWait, KeyContext, ApcContext, IoStatus, IoStatusInformation);
+            }
+
             if (Instance.WinHelper.HasPendingConnectReplies && Target is WinPort Port)
                 AlpcMessaging.DeliverConnectReplyForRoute(Instance, Port, Completion);
             Instance.MaterializeSignaledWaitPackets(Completion);

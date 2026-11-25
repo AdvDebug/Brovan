@@ -1027,12 +1027,14 @@ namespace Brovan.Core.Emulation
             }
         }
 
+        private bool ChecksSchedulerWrites => SmpEnabled && _splitCapable;
+
         // A thread's State changes under SchedulerLock, except before InsertThread, on one processor, on a guest that
         // keeps KernelLock for the whole pass, and on the writer's own dispatched thread when it does not start a wait.
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         internal void CheckStateWrite(EmulatedThread Thread, EmulatedThreadState Value)
         {
-            if (!SmpEnabled || !_splitCapable || SchedulerLock.IsHeld)
+            if (!ChecksSchedulerWrites || SchedulerLock.IsHeld)
                 return;
             if (OwnsThread(Thread) && KernelLock.IsHeld && Value != EmulatedThreadState.Waiting)
                 return;
@@ -1040,7 +1042,15 @@ namespace Brovan.Core.Emulation
             SchedulerLock.AssertHeld($"Setting thread {Thread.ThreadId} to {Value}");
         }
 
-        private void AssertKernelLockHeld(string Where)
+        internal void CheckObjectWrite(object Object)
+        {
+            if (!ChecksSchedulerWrites || SchedulerLock.IsHeld)
+                return;
+
+            SchedulerLock.AssertHeld($"Writing the state of a {Object.GetType().Name}");
+        }
+
+        internal void AssertKernelLockHeld(string Where)
         {
             if (RankedLock.OrderChecked && SmpEnabled)
                 KernelLock.AssertHeld(Where);
@@ -2964,15 +2974,23 @@ namespace Brovan.Core.Emulation
 
             using (SchedulerLock.EnterScope())
             {
-                UnfileWait(Thread);
                 Thread.ExitCode = ExitCode;
-                Thread.WaitActive = false;
-                Thread.WaitHandles = null;
-                Thread.WaitDeadline = -1;
-                Thread.State = EmulatedThreadState.Terminated;
+                MarkThreadTerminated(Thread);
             }
             SchedulerRefreshRequested = true;
             return true;
+        }
+
+        // Every thread end goes through here, so waiters see it and the wake epoch moves.
+        internal void MarkThreadTerminated(EmulatedThread Thread)
+        {
+            using RankedLock.Scope SchedulerScope = SchedulerLock.EnterScope();
+            Thread.State = EmulatedThreadState.Terminated;
+            Guest.OnThreadEnded(this, Thread);
+            Thread.WaitActive = false;
+            Thread.WaitHandles = null;
+            Thread.WaitDeadline = -1;
+            WakeSignal.Bump();
         }
 
         private static int ClampInt(int Value, int Min, int Max)
@@ -4049,9 +4067,11 @@ namespace Brovan.Core.Emulation
                     Utils.LogError($"[Scheduler] Thread {ImmaBeEmulatedOOO.ThreadId} terminated by an unhandled {ex.GetType().Name}: {ex.Message}");
 
                     if (ImmaBeEmulatedOOO.State != EmulatedThreadState.Terminated)
+                    {
                         ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context.RAX);
+                        MarkThreadTerminated(ImmaBeEmulatedOOO);
+                    }
 
-                    ImmaBeEmulatedOOO.State = EmulatedThreadState.Terminated;
                     SchedulerRefreshRequested = true;
                 }
                 finally
@@ -4131,9 +4151,8 @@ namespace Brovan.Core.Emulation
                             {
                                 ImmaBeEmulatedOOO.ExitCode = unchecked((int)(uint)ImmaBeEmulatedOOO.Context!.RAX);
                                 NullCall = WinHelper != null;
+                                MarkThreadTerminated(ImmaBeEmulatedOOO);
                             }
-
-                            ImmaBeEmulatedOOO.State = EmulatedThreadState.Terminated;
                         }
                         else if (ImmaBeEmulatedOOO.State == EmulatedThreadState.Running)
                         {
@@ -4547,6 +4566,7 @@ namespace Brovan.Core.Emulation
                 TriggerDebugMessage($"emu: stop requested threads={Threads.Count}");
             using (SchedulerLock.EnterScope())
             {
+                // A stop is not a thread end. A debugger pause restores these states, waits included.
                 foreach (EmulatedThread EmuThread in Threads.Values)
                     EmuThread.State = EmulatedThreadState.Terminated;
             }

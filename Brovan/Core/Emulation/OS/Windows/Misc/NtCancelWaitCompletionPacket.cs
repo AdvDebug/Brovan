@@ -13,6 +13,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Packet == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
+            using RankedLock.Scope StateScope = Packet.EnterStateScope();
             if (!Packet.Associated)
                 return NTSTATUS.STATUS_CANCELLED;
 

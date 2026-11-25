@@ -118,6 +118,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             ExitCode = Code;
             Exited = true;
+            EndObject.SignalEnded();
             Owner?.WakeSignal.Bump();
 
             lock (Live)

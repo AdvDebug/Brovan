@@ -41,11 +41,14 @@ namespace Brovan.Core.Emulation.OS.Windows.Win32k
             if (!Started)
             {
                 Started = true;
-                if (Start != null)
-                    Start.Signaled = true;
+                Start?.SetState(true);
             }
 
-            return Finish == null || Finish.TryAcquireFor(Instance, null, out _);
+            if (Finish == null)
+                return true;
+
+            using RankedLock.Scope StateScope = Finish.EnterStateScope();
+            return Finish.TryAcquireFor(Instance, null, out _);
         }
     }
 

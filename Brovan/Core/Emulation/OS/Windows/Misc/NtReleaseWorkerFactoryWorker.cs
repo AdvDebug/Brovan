@@ -12,14 +12,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Factory == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            if (Factory.PendingReleaseCount == uint.MaxValue)
-                return NTSTATUS.STATUS_UNSUCCESSFUL;
-
-            Factory.PendingReleaseCount++;
-            if (!Factory.ReleasePending)
+            using (Factory.EnterStateScope())
             {
-                Factory.ReleasePending = true;
-                WorkerFactoryHelper.EnqueueReleaseCompletion(Factory);
+                if (Factory.PendingReleaseCount == uint.MaxValue)
+                    return NTSTATUS.STATUS_UNSUCCESSFUL;
+
+                Factory.PendingReleaseCount++;
+                if (!Factory.ReleasePending)
+                {
+                    Factory.ReleasePending = true;
+                    WorkerFactoryHelper.EnqueueReleaseCompletion(Factory);
+                }
             }
 
             WorkerFactoryHelper.EnsureWorkerThreads(Instance, Factory);

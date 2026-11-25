@@ -54,6 +54,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Mutex == null || Instance.CurrentThread == null)
                 return;
 
+            using RankedLock.Scope StateScope = Mutex.EnterStateScope();
             Mutex.Signaled = false;
             Mutex.Abandoned = false;
             Mutex.OwnerThreadId = Instance.CurrentThread.ThreadId;

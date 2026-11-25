@@ -24,8 +24,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Ev == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            int Prev = Ev.Signaled ? 1 : 0;
-            Ev.Signaled = Signaled;
+            int Prev;
+            using (Ev.EnterStateScope())
+            {
+                Prev = Ev.Signaled ? 1 : 0;
+                Ev.Signaled = Signaled;
+            }
             if (PreviousStatePtr != 0)
             {
                 if (!Instance._emulator.WriteMemory(PreviousStatePtr, (uint)Prev))

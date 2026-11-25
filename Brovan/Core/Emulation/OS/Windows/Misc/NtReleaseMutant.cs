@@ -31,16 +31,20 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
             uint CurrentThreadId = (uint)Instance.CurrentThreadId;
-            if (Mutex.OwnerThreadId != CurrentThreadId || Mutex.RecursionCount <= 0)
-                return NTSTATUS.STATUS_MUTANT_NOT_OWNED;
-
-            int PreviousCount = Mutex.SignalState;
-            Mutex.RecursionCount--;
-            if (Mutex.RecursionCount == 0)
+            int PreviousCount;
+            using (Mutex.EnterStateScope())
             {
-                Mutex.OwnerThreadId = 0;
-                Mutex.Signaled = true;
-                Mutex.Abandoned = false;
+                if (Mutex.OwnerThreadId != CurrentThreadId || Mutex.RecursionCount <= 0)
+                    return NTSTATUS.STATUS_MUTANT_NOT_OWNED;
+
+                PreviousCount = Mutex.SignalState;
+                Mutex.RecursionCount--;
+                if (Mutex.RecursionCount == 0)
+                {
+                    Mutex.OwnerThreadId = 0;
+                    Mutex.Signaled = true;
+                    Mutex.Abandoned = false;
+                }
             }
 
             if (PreviousCountPtr != 0)

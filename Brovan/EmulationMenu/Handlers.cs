@@ -2737,7 +2737,8 @@ namespace Brovan
                     }
                     if (Object is WinSemaphore Semaphore)
                     {
-                        Semaphore.CurrentCount = Math.Clamp(CurrentCount, 0, Semaphore.MaximumCount);
+                        using (Semaphore.EnterStateScope())
+                            Semaphore.CurrentCount = Math.Clamp(CurrentCount, 0, Semaphore.MaximumCount);
                         PrintHighlight($"[+] Semaphore handle 0x{Handle:X} current count set to {Semaphore.CurrentCount}.", true);
                         return;
                     }
@@ -2752,9 +2753,12 @@ namespace Brovan
                     }
                     if (Object is WinSemaphore Sem)
                     {
-                        Sem.MaximumCount = MaximumCount;
-                        if (Sem.CurrentCount > Sem.MaximumCount)
-                            Sem.CurrentCount = Sem.MaximumCount;
+                        using (Sem.EnterStateScope())
+                        {
+                            Sem.MaximumCount = MaximumCount;
+                            if (Sem.CurrentCount > Sem.MaximumCount)
+                                Sem.CurrentCount = Sem.MaximumCount;
+                        }
                         PrintHighlight($"[+] Semaphore handle 0x{Handle:X} maximum count set to {Sem.MaximumCount}.", true);
                         return;
                     }
@@ -2808,6 +2812,7 @@ namespace Brovan
 
         private static bool SetWindowsSignalState(IHandleObject Object, bool Signaled)
         {
+            using RankedLock.Scope StateScope = Object is WaitableHandleObject Waitable ? Waitable.EnterStateScope() : default;
             switch (Object)
             {
                 case WinEvent Event:
