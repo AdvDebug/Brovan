@@ -6,6 +6,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtFreeVirtualMemory : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) =>
+            Instance.WinHelper.ResolveAddressSpaceCall(Instance.WinHelper.GetArg(0), AccessMask.ProcessVMOperation);
+
         private const ulong PageSize = 0x1000;
         private const uint MemCoalescePlaceholders = 0x1;
         private const uint MemPreservePlaceholder = 0x2;
@@ -38,7 +43,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (PlaceholderFlags == (MemCoalescePlaceholders | MemPreservePlaceholder))
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
+            NTSTATUS Status = Instance.WinHelper.TakeOrResolveProcess(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
@@ -105,6 +110,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Instance.TriggerEventMessage($"[!!] Double-Free detected for the allocated memory that have the base address 0x{BaseAddress:X}.", LogFlags.Issues);
                 return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;
             }
+
+            if ((Region.Flags & AllocationType.Image) != 0)
+                return NTSTATUS.STATUS_UNABLE_TO_DELETE_SECTION;
 
             if (!Release && Region.IsPlaceholder)
                 return NTSTATUS.STATUS_MEMORY_NOT_ALLOCATED;

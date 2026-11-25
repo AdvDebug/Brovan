@@ -8,6 +8,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtAllocateVirtualMemory : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) =>
+            Instance.WinHelper.ResolveAddressSpaceCall(Instance.WinHelper.GetArg(0), AccessMask.ProcessVMOperation);
+
         private const ulong PageSize = 0x1000;
         internal const uint MemCommit = 0x00001000;
         internal const uint MemReserve = 0x00002000;
@@ -188,7 +193,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             ulong BaseAddress = Instance.WinHelper.ReadPointer(BaseAddressPtr, OutputWidth);
             ulong RegionSize = Instance.WinHelper.ReadPointer(RegionSizePtr, OutputWidth);
 
-            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
+            NTSTATUS Status = Instance.WinHelper.TakeOrResolveProcess(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 

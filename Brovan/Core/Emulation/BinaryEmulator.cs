@@ -4542,6 +4542,7 @@ namespace Brovan.Core.Emulation
             foreach (RankedLock Lock in _rankedLocks)
                 Lock.Report();
             AddressSpace.Lock.Report();
+            AddressSpace.ReportStats();
         }
 
         public ulong AlignToPageSize(ulong Size)

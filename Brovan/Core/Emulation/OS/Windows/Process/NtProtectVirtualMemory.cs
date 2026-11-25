@@ -5,6 +5,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtProtectVirtualMemory : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) =>
+            Instance.WinHelper.ResolveAddressSpaceCall(Instance.WinHelper.GetArg(0), AccessMask.ProcessVMOperation);
+
         private const ulong PageSize = 0x1000;
         private const uint PageNoAccess = 0x01;
         private const uint PageGuard = 0x100;
@@ -27,7 +32,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (OldProtectionPtr != 0 && !Instance.IsRegionMapped(OldProtectionPtr, sizeof(uint)))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
+            NTSTATUS Status = Instance.WinHelper.TakeOrResolveProcess(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 

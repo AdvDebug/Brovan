@@ -4,6 +4,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtUnlockVirtualMemory : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) =>
+            Instance.WinHelper.ResolveAddressSpaceCall(Instance.WinHelper.GetArg(0), AccessMask.ProcessVMOperation);
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             return NtLockVirtualMemory.Change(Instance, Instance.WinHelper.GetArg(0), Instance.WinHelper.GetArg(1), Instance.WinHelper.GetArg(2), (uint)Instance.WinHelper.GetArg(3), false);

@@ -1,5 +1,7 @@
 using System.Collections;
 using System.Runtime.CompilerServices;
+using System.Text;
+using Brovan.Core.Helpers;
 
 namespace Brovan.Core.Emulation
 {
@@ -76,6 +78,7 @@ namespace Brovan.Core.Emulation
             if ((Sequence & 1) == 0 || Lock.IsHeld)
                 return Sequence;
 
+            Count(Waited);
             SpinWait Spin = default;
             while (((Sequence = Volatile.Read(ref _sequence)) & 1) != 0)
                 Spin.SpinOnce();
@@ -86,7 +89,37 @@ namespace Brovan.Core.Emulation
         internal bool EndRead(long Sequence)
         {
             Volatile.ReadBarrier();
-            return Volatile.Read(ref _sequence) == Sequence;
+            if (Volatile.Read(ref _sequence) == Sequence)
+                return true;
+
+            Count(Retried);
+            return false;
+        }
+
+        private const int Waited = 0;
+        private const int Retried = 1;
+        private const int Ticks = 2;
+        private static readonly PeriodicStats Stats = new("BROVAN_ADDRESS_SPACE_STATS", "Address space reads:", DescribeStats);
+        private static readonly StatsSlots Slots = new(Ticks + 1);
+
+        // Only the slow paths count: a read that met an open window, and one that read again.
+        private static void Count(int Index)
+        {
+            if (!Stats.Enabled)
+                return;
+
+            long[] S = Slots.Current.Values;
+            S[Index]++;
+            Stats.TickSlot(ref S[Ticks]);
+        }
+
+        private static void DescribeStats(StringBuilder Text) =>
+            Text.Append(" waited=").Append(Slots.Sum(Waited)).Append(" retried=").Append(Slots.Sum(Retried));
+
+        internal void ReportStats()
+        {
+            if (Stats.Enabled)
+                Stats.Report();
         }
 
         internal void Clear()

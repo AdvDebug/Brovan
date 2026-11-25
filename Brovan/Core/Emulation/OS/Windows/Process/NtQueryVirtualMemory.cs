@@ -8,6 +8,22 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtQueryVirtualMemory : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        // The classes that read only the address space run without KernelLock on this process.
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance)
+        {
+            ulong ProcessHandle = Instance.WinHelper.GetArg(0);
+            MEMORY_INFORMATION_CLASS MemoryInformationClass = (MEMORY_INFORMATION_CLASS)Instance.WinHelper.GetArg(2);
+            if (MemoryInformationClass is not (MEMORY_INFORMATION_CLASS.MemoryBasicInformation or MEMORY_INFORMATION_CLASS.MemoryPrivilegedBasicInformation
+                    or MEMORY_INFORMATION_CLASS.MemoryRegionInformation or MEMORY_INFORMATION_CLASS.MemoryWorkingSetExInformation)
+                || !IsCurrentProcess(Instance, ProcessHandle))
+                return WinSyscallDomain.KernelLock;
+
+            Instance.WinHelper.KeepResolvedProcess(ProcessHandle, Instance.WinHelper.OwnProcess);
+            return WinSyscallDomain.Self;
+        }
+
         private const ulong MemCommit = 0x00001000UL;
         private const ulong MemReserve = 0x00002000UL;
         private const ulong MemFree = 0x00010000UL;
@@ -48,7 +64,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 ulong MemoryInformationLength = Instance.WinHelper.GetArg(4);
                 ulong ReturnLength = Instance.WinHelper.GetArg(5);
 
-                if (!IsCurrentProcess(Instance, ProcessHandle))
+                if (Instance.WinHelper.TakeResolvedProcess(ProcessHandle) == null && !IsCurrentProcess(Instance, ProcessHandle))
                     return QueryRemote(Instance, ProcessHandle, Address, MemoryInformationClass, MemoryInformation, MemoryInformationLength, ReturnLength);
 
                 if (MemoryInformation == 0)

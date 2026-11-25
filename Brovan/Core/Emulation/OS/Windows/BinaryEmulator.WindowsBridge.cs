@@ -2032,12 +2032,9 @@ namespace Brovan.Core.Emulation
             return true;
         }
 
-        private bool MapPeImageFromLayoutCache(BinaryFile Library, ulong BaseAddress, ulong ImageSize, WinModule Module, List<PeImageExtent> Extents)
+        // The mapping adopts View, or View is disposed.
+        private bool MapPeImageFromLayoutCache(WinImageLayoutCache.View View, ulong BaseAddress, ulong ImageSize, WinModule Module, List<PeImageExtent> Extents)
         {
-            WinImageLayoutCache.View View = WinImageLayoutCache.TryOpen(Library, ImageSize, Extents);
-            if (View == null)
-                return false;
-
             IntPtr Storage = _emulator.AdoptSharedStorage(View.Pointer, ImageSize, View);
             if (Storage == IntPtr.Zero)
             {
@@ -2160,16 +2157,15 @@ namespace Brovan.Core.Emulation
 
             bool IsFree(ulong Base) => Base != 0 && Base < UserEnd && ImageSize <= UserEnd - Base && !IsRegionMapped(Base, ImageSize);
 
+            List<PeImageExtent> Extents = GetPeImageExtents(Library, ImageSize);
+            WinImageLayoutCache.View Layout = MapBySections ? null : WinImageLayoutCache.TryOpen(Library, ImageSize, Extents);
+
             WinModule Module = new WinModule();
+            bool Fill = false;
             using (AddressSpace.Hold())
             {
                 if (RequestedBase != 0)
-                {
-                    if (!IsFree(RequestedBase))
-                        return null;
-
-                    BaseAddress = RequestedBase;
-                }
+                    BaseAddress = IsFree(RequestedBase) ? RequestedBase : 0;
                 else if (IsFree(ImageBase))
                     BaseAddress = ImageBase;
                 else if (IsFree(PreferredBase))
@@ -2178,27 +2174,28 @@ namespace Brovan.Core.Emulation
                     BaseAddress = GetSuitableBaseAddress(ImageSize, WinSysHelper.AllocationGranularity);
 
                 if (BaseAddress == 0)
+                {
+                    Layout?.Dispose();
                     return null;
+                }
 
                 if (MapBySections)
-                {
                     BaseAddress = MapPeImageBySections(Library, BaseAddress, Module);
-                    if (BaseAddress == 0)
-                        return null;
-                }
-                else
+                else if (Layout == null || !MapPeImageFromLayoutCache(Layout, BaseAddress, ImageSize, Module, Extents))
                 {
-                    List<PeImageExtent> Extents = GetPeImageExtents(Library, ImageSize);
-                    if (!MapPeImageFromLayoutCache(Library, BaseAddress, ImageSize, Module, Extents))
-                    {
-                        BaseAddress = MapWinMemoryRegion(BaseAddress, ImageSize, MemoryProtection.ReadWrite, SpecialProtections.None, AllocationType.Image, BaseAddress);
-                        if (BaseAddress == 0)
-                            return null;
-
-                        if (!WritePeImageHeadersAndSections(Library, BaseAddress, ImageSize, Module, Extents))
-                            return null;
-                    }
+                    BaseAddress = MapWinMemoryRegion(BaseAddress, ImageSize, MemoryProtection.ReadWrite, SpecialProtections.None, AllocationType.Image, BaseAddress);
+                    Fill = BaseAddress != 0;
                 }
+            }
+
+            if (BaseAddress == 0)
+                return null;
+
+            // The claimed range is this image's, so the fill reads the file with no address space lock held.
+            if (Fill && !WritePeImageHeadersAndSections(Library, BaseAddress, ImageSize, Module, Extents))
+            {
+                UnmapMemoryRuns(BaseAddress, ImageSize, UnmapImage: true);
+                return null;
             }
 
             if (!string.IsNullOrEmpty(Library.Location))
@@ -2224,7 +2221,10 @@ namespace Brovan.Core.Emulation
 
             ApplyPERelocations(Module, Library, ImageBase);
             if (!MapBySections && !ApplyPeImageProtections(Library, Module))
+            {
+                UnmapMemoryRuns(BaseAddress, ImageSize, UnmapImage: true);
                 return null;
+            }
 
             WinHelper.RegisterMappedImageView(Module, !AddToModuleList);
 
@@ -2717,7 +2717,7 @@ namespace Brovan.Core.Emulation
             }
         }
 
-        public bool UnmapMemoryRuns(ulong BaseAddress, ulong Size)
+        public bool UnmapMemoryRuns(ulong BaseAddress, ulong Size, bool UnmapImage = false)
         {
             using RankedLock.Scope AddressHold = AddressSpace.Hold();
             bool UnmappedAny = false;
@@ -2732,7 +2732,7 @@ namespace Brovan.Core.Emulation
                 }
 
                 ulong RunSize = AlignUp(Run.Size, PageSize);
-                if (UnmapMemoryRegion(Address))
+                if (UnmapMemoryRegion(Address, UnmapImage))
                     UnmappedAny = true;
 
                 Offset += RunSize;

@@ -2868,6 +2868,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             public readonly WindowsSharedBuffer Shared = new WindowsSharedBuffer();
             public ulong ResolvedHandle;
             public IHandleObject? Resolved;
+            public ulong ResolvedProcessHandle;
+            public WinProcess? ResolvedProcess;
             public bool WaitResolved;
             public AccessMask ResolvedAccess;
             public ulong ResolvedEventHandle;
@@ -2952,6 +2954,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private void DropResolved(CallState State)
         {
             State.Resolved = null;
+            State.ResolvedProcess = null;
             State.ResolvedAccess = 0;
             State.ResolvedEventHandle = 0;
             State.ResolvedEvent = null;
@@ -11511,6 +11514,42 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_ACCESS_DENIED;
 
             Process = Target;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        // A call on this process's address space runs without KernelLock, on the process resolved here.
+        internal WinSyscallDomain ResolveAddressSpaceCall(ulong ProcessHandle, AccessMask RequiredAccess)
+        {
+            if (ResolveProcessHandle(ProcessHandle, RequiredAccess, out WinProcess Process) != NTSTATUS.STATUS_SUCCESS || Process.PID != PID)
+                return WinSyscallDomain.KernelLock;
+
+            KeepResolvedProcess(ProcessHandle, Process);
+            return WinSyscallDomain.Self;
+        }
+
+        // The process slot is apart from the object slot, so a call can resolve a process and an object.
+        internal void KeepResolvedProcess(ulong ProcessHandle, WinProcess Process)
+        {
+            CallState State = Call;
+            State.ResolvedProcessHandle = ProcessHandle;
+            State.ResolvedProcess = Process;
+        }
+
+        internal WinProcess? TakeResolvedProcess(ulong ProcessHandle)
+        {
+            CallState State = Call;
+            WinProcess? Process = State.ResolvedProcess;
+            State.ResolvedProcess = null;
+            return State.ResolvedProcessHandle == ProcessHandle ? Process : null;
+        }
+
+        internal NTSTATUS TakeOrResolveProcess(ulong ProcessHandle, AccessMask RequiredAccess, out WinProcess Process)
+        {
+            WinProcess? Resolved = TakeResolvedProcess(ProcessHandle);
+            if (Resolved == null)
+                return ResolveProcessHandle(ProcessHandle, RequiredAccess, out Process);
+
+            Process = Resolved;
             return NTSTATUS.STATUS_SUCCESS;
         }
 

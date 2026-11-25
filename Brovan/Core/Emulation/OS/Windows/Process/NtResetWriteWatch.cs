@@ -4,6 +4,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtResetWriteWatch : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) =>
+            Instance.WinHelper.ResolveAddressSpaceCall(Instance.WinHelper.GetArg(0), AccessMask.ProcessVMOperation);
+
         private const ulong PageSize = 0x1000;
         private const ulong HighestUserAddress = NtWow64GetNativeSystemInformation.NativeMaximumUserModeAddress;
         private const ulong UserProbeAddress = NtWow64GetNativeSystemInformation.NativeUserProbeAddress;
@@ -20,7 +25,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (UserProbeAddress - BaseAddress < RegionSize || RegionSize == 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER_3;
 
-            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
+            NTSTATUS Status = Instance.WinHelper.TakeOrResolveProcess(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 

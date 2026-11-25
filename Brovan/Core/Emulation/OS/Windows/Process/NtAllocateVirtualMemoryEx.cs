@@ -6,6 +6,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtAllocateVirtualMemoryEx : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) =>
+            Instance.WinHelper.ResolveAddressSpaceCall(Instance.WinHelper.GetArg(0), AccessMask.ProcessVMOperation);
+
         private const uint MaxExtendedParameters = 16;
         private const int ExtendedParameterSize = 0x10;
 

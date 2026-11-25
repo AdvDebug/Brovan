@@ -4,6 +4,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal sealed class NtLockVirtualMemory : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) =>
+            Instance.WinHelper.ResolveAddressSpaceCall(Instance.WinHelper.GetArg(0), AccessMask.ProcessVMOperation);
+
         private const uint MapProcess = 1;
         private const uint MapSystem = 2;
         private const ulong PageSize = 0x1000;
@@ -24,7 +29,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if ((MapType & MapSystem) != 0)
                 return NTSTATUS.STATUS_PRIVILEGE_NOT_HELD;
 
-            NTSTATUS Status = Instance.WinHelper.ResolveProcessHandle(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
+            NTSTATUS Status = Instance.WinHelper.TakeOrResolveProcess(ProcessHandle, AccessMask.ProcessVMOperation, out WinProcess Process);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
