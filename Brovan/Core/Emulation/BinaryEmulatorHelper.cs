@@ -28,6 +28,9 @@ namespace Brovan.Core.Emulation
         public NTSTATUS Handle(BinaryEmulator Instance);
 
         public WinSyscallDomain Domain => WinSyscallDomain.KernelLock;
+
+        // For a Resolved call: KernelLock or Scheduler, answered before the dispatch takes a lock.
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) => WinSyscallDomain.KernelLock;
     }
 
     public enum WinSyscallDomain : byte
@@ -37,6 +40,9 @@ namespace Brovan.Core.Emulation
         // The handler touches only scheduler state and guest memory. It runs under SchedulerLock, and under KernelLock
         // instead when the work around it needs that lock.
         Scheduler,
+
+        // The objects the call names decide, through IWinSyscall.ResolveDomain.
+        Resolved,
     }
 
     public enum SyscallAbi

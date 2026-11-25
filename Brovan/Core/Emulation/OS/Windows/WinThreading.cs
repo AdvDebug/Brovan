@@ -171,10 +171,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             WaitKind = Kind;
         }
 
-        // Set while an Objects wait holds an object checked only under KernelLock.
         internal bool ObjectsNeedKernelLock { get; private set; }
 
-        private bool HasObjectCheckedUnderKernelLock()
+        internal bool WaitNeedsKernelLock => WaitKind.NeedsKernelLock() || ObjectsNeedKernelLock;
+
+        // An object with no wait object, or a port or worker factory whose packets can target one.
+        internal bool HasObjectCheckedUnderKernelLock()
         {
             for (int i = 0; i < WaitObjectCount; i++)
             {

@@ -7,6 +7,34 @@ namespace Brovan.Core.Emulation.OS.Windows
         private const uint MaximumWaitObjects = 64;
         private const uint WaitAny = 1;
 
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance)
+        {
+            EmulatedThread Thread = Instance.CurrentThread;
+            WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
+            if (State == null)
+                return WinSyscallDomain.KernelLock;
+
+            if (Thread.WaitActive)
+                return State.WaitNeedsKernelLock ? WinSyscallDomain.KernelLock : WinSyscallDomain.Scheduler;
+
+            uint Count = (uint)Instance.WinHelper.GetArg(0);
+            ulong HandlesPtr = Instance.WinHelper.GetArg(1);
+            uint WaitType = (uint)Instance.WinHelper.GetArg(2);
+            if (Count == 0 || Count > MaximumWaitObjects || WaitType > WaitAny)
+                return WinSyscallDomain.KernelLock;
+
+            uint HandleSize = (uint)Instance.WinHelper.PointerSize;
+            Span<byte> Handles = stackalloc byte[(int)(MaximumWaitObjects * 8)];
+            Handles = Handles.Slice(0, (int)(Count * HandleSize));
+            if (!Instance.ReadMemory(HandlesPtr, Handles)
+                || Instance.ResolveWaitHandles(State, Handles, HandleSize, WaitType != WaitAny) != NTSTATUS.STATUS_SUCCESS)
+                return WinSyscallDomain.KernelLock;
+
+            return Instance.KeepResolvedWait(State);
+        }
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
 
@@ -41,16 +69,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (!Instance.WinHelper.TryReadTimeout(TimeoutPtr, out long? Timeout))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            uint HandleSize = (uint)Instance.WinHelper.PointerSize;
-            Span<byte> Handles = stackalloc byte[(int)(MaximumWaitObjects * 8)];
-            Handles = Handles.Slice(0, (int)(Count * HandleSize));
-            if (!Instance.ReadMemory(HandlesPtr, Handles))
-                return NTSTATUS.STATUS_ACCESS_VIOLATION;
-
             bool WaitAll = WaitType != WaitAny;
-            NTSTATUS Resolved = Instance.ResolveWaitHandles(State, Handles, HandleSize, WaitAll);
-            if (Resolved != NTSTATUS.STATUS_SUCCESS)
-                return Resolved;
+            if (!Instance.WinHelper.TakeResolvedWait())
+            {
+                uint HandleSize = (uint)Instance.WinHelper.PointerSize;
+                Span<byte> Handles = stackalloc byte[(int)(MaximumWaitObjects * 8)];
+                Handles = Handles.Slice(0, (int)(Count * HandleSize));
+                if (!Instance.ReadMemory(HandlesPtr, Handles))
+                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
+
+                NTSTATUS Resolved = Instance.ResolveWaitHandles(State, Handles, HandleSize, WaitAll);
+                if (Resolved != NTSTATUS.STATUS_SUCCESS)
+                    return Resolved;
+            }
 
             return Instance.WaitForObjects(Thread, State, WaitAll, Alertable, Timeout);
         }

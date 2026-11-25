@@ -2755,6 +2755,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             public SyscallArgCache Args;
             public readonly ulong[] X64ArgValues = new ulong[5];
             public readonly WindowsSharedBuffer Shared = new WindowsSharedBuffer();
+            public ulong ResolvedHandle;
+            public IHandleObject? Resolved;
+            public bool WaitResolved;
         }
 
         private CallState Call => Emulator.WorkerCallState as CallState ?? CreateCallState();
@@ -2783,6 +2786,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         public void BeginSyscall()
         {
             CallState State = Call;
+            DropResolved(State);
             ref SyscallArgCache Args = ref State.Args;
             if (Emulator._binary.Architecture != BinaryArchitecture.x64)
             {
@@ -2823,7 +2827,46 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public void EndSyscall()
         {
-            Call.Args.Valid = false;
+            CallState State = Call;
+            State.Args.Valid = false;
+            DropResolved(State);
+        }
+
+        private void DropResolved(CallState State)
+        {
+            State.Resolved = null;
+            if (!State.WaitResolved)
+                return;
+
+            State.WaitResolved = false;
+            WinEmulatedThread.TryGetState(Emulator.CurrentThread)?.ClearWaitObjects();
+        }
+
+        // The object ResolveDomain looked up, so the handler neither looks it up again nor sees a close in between.
+        internal void SetResolvedObject(ulong Handle, IHandleObject Object)
+        {
+            CallState State = Call;
+            State.ResolvedHandle = Handle;
+            State.Resolved = Object;
+        }
+
+        internal T? TakeResolvedObject<T>(ulong Handle) where T : class, IHandleObject
+        {
+            CallState State = Call;
+            IHandleObject? Object = State.Resolved;
+            State.Resolved = null;
+            return State.ResolvedHandle == Handle ? Object as T : null;
+        }
+
+        // ResolveDomain filled the current thread's WaitObjects. A set the handler does not take is dropped.
+        internal void SetResolvedWait() => Call.WaitResolved = true;
+
+        internal bool TakeResolvedWait()
+        {
+            CallState State = Call;
+            bool Resolved = State.WaitResolved;
+            State.WaitResolved = false;
+            return Resolved;
         }
 
         // The host work inside the using block must read no handle, object, guest memory or helper state.
@@ -5475,13 +5518,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinProcess? GetProcessByHandle(ulong Handle, AccessMask Purpose)
         {
-            if (!HandleManager.HandleExists(Handle, HandleType.ProcessHandle))
-                return null;
-
-            if (!HandleManager.CheckAccess(Handle, Purpose))
-                return null;
-
-            return HandleManager.GetObjectByHandle<WinProcess>(Handle);
+            return HandleManager.GetObjectByHandle<WinProcess>(Handle, HandleType.ProcessHandle, Purpose);
         }
 
         public bool ValidProcessHandle(ulong Handle)
@@ -9584,13 +9621,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinMutex? GetMutexByHandle(ulong Handle, AccessMask Purpose)
         {
-            if (!HandleManager.HandleExists(Handle, HandleType.MutexHandle))
-                return null;
-
-            if (!HandleManager.CheckAccess(Handle, Purpose))
-                return null;
-
-            return HandleManager.GetObjectByHandle<WinMutex>(Handle);
+            return HandleManager.GetObjectByHandle<WinMutex>(Handle, HandleType.MutexHandle, Purpose);
         }
 
         public void AbandonMutexesOwnedByThread(uint ThreadId)
@@ -11150,13 +11181,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinTimer? GetTimerByHandle(ulong Handle, AccessMask Purpose)
         {
-            if (!HandleManager.HandleExists(Handle, HandleType.TimerHandle))
-                return null;
-
-            if (!HandleManager.CheckAccess(Handle, Purpose))
-                return null;
-
-            return HandleManager.GetObjectByHandle<WinTimer>(Handle);
+            return HandleManager.GetObjectByHandle<WinTimer>(Handle, HandleType.TimerHandle, Purpose);
         }
 
         public WinEvent? GetEventByHandle(ulong Handle, AccessMask Purpose)
@@ -11175,13 +11200,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinJob? GetJobByHandle(ulong Handle, AccessMask Purpose)
         {
-            if (!HandleManager.HandleExists(Handle, HandleType.JobHandle))
-                return null;
-
-            if (!HandleManager.CheckAccess(Handle, Purpose))
-                return null;
-
-            return HandleManager.GetObjectByHandle<WinJob>(Handle);
+            return HandleManager.GetObjectByHandle<WinJob>(Handle, HandleType.JobHandle, Purpose);
         }
 
         public NTSTATUS QueryProcessInJob(ulong ProcessHandle, ulong JobHandle)
@@ -11340,13 +11359,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinSemaphore? GetSemaphoreByHandle(ulong Handle, AccessMask Purpose)
         {
-            if (!HandleManager.HandleExists(Handle, HandleType.SemaphoreHandle))
-                return null;
-
-            if (!HandleManager.CheckAccess(Handle, Purpose))
-                return null;
-
-            return HandleManager.GetObjectByHandle<WinSemaphore>(Handle);
+            return HandleManager.GetObjectByHandle<WinSemaphore>(Handle, HandleType.SemaphoreHandle, Purpose);
         }
 
         public WinHandle CreateSectionHandle(string? Name, ulong Size, uint Protection, uint Attributes, string Path, ulong BackingAddress, AccessMask Permissions, IntPtr Storage = default, string SharedMemoryPath = null)
@@ -11634,13 +11647,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public WinSection? GetSectionByHandle(ulong Handle, AccessMask Purpose)
         {
-            if (!HandleManager.HandleExists(Handle, HandleType.SectionHandle))
-                return null;
-
-            if (!HandleManager.CheckAccess(Handle, Purpose))
-                return null;
-
-            return HandleManager.GetObjectByHandle<WinSection>(Handle);
+            return HandleManager.GetObjectByHandle<WinSection>(Handle, HandleType.SectionHandle, Purpose);
         }
 
         public void CloseHandle(ulong Handle)
@@ -11676,12 +11683,13 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            if (HandleManager.TryRemoveHandle(Handle, out _))
+            bool LastHandle = false;
+            if (HandleManager.TryRemoveHandle(Handle, out _, out LastHandle))
             {
                 RemoveWinHandle(Handle);
             }
 
-            if (Entry.Object != null && !HandleManager.HasHandleToObject(Entry.Object))
+            if (Entry.Object != null && LastHandle)
             {
                 RemoveNamedObject(Entry.Object);
                 if (Entry.Object is WinFile ClosedFile)
@@ -11693,7 +11701,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (ClosingSyncObject is WinJob ClosingJob && (ClosingJob.LimitFlags & NtTerminateJobObject.JobLimitKillOnJobClose) != 0 && !HandleManager.HasHandleToObject(ClosingJob))
                 NtTerminateJobObject.TerminateMembers(Emulator, ClosingJob, 0, true);
 
-            ForgetNamedSyncObjectIfUnreferenced(ClosingSyncObject);
+            if (LastHandle)
+                ForgetLastHandleObject(ClosingSyncObject);
 
             if (ClosingSection != null)
                 ReleaseSectionIfUnreferenced(ClosingSection);
@@ -11712,9 +11721,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             Closing.ReleaseSharedPosition();
         }
 
-        private void ForgetNamedSyncObjectIfUnreferenced(IHandleObject? Object)
+        private void ForgetLastHandleObject(IHandleObject? Object)
         {
-            if (Object == null || HandleManager.CountHandlesByObjectId(Object.ObjectId) != 0)
+            if (Object == null)
                 return;
 
             switch (Object)

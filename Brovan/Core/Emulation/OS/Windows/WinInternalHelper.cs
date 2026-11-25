@@ -128,6 +128,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<ulong, HandleEntry> HandleTable = new();
         private readonly Dictionary<string, List<ulong>> ObjectIdToHandles = new();
         private readonly BinaryEmulator Emulator;
+        private readonly RankedLock TableLock;
         internal readonly SignalledWaitables Signalled = new();
         private readonly WinEvent SignalledWaitObject = new WinEvent { Signaled = true };
         private readonly WinEvent UnsignalledPortObject = new WinEvent();
@@ -135,24 +136,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         public HandleManager(BinaryEmulator Emulator)
         {
             this.Emulator = Emulator;
-        }
-
-        // The table has no lock of its own, so every member runs under KernelLock.
-        private void CheckLock()
-        {
-            if (RankedLock.OrderChecked)
-                Emulator.AssertKernelLockHeld(nameof(HandleManager));
+            TableLock = new RankedLock("HandleTable", RankedLock.LeafRank, Emulator);
+            Emulator.AddRankedLock(TableLock);
         }
 
         public WinHandle AddHandle(IHandleObject obj, AccessMask Permissions, ObjectHandleFlags Flags = ObjectHandleFlags.None)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             return Insert(AllocateHandleValue(), obj, Permissions, Flags);
         }
 
         // NT gives an inherited handle the value it had in the creator. Null when the value is taken or invalid.
         public WinHandle AddHandleAt(ulong Handle, IHandleObject obj, AccessMask Permissions, ObjectHandleFlags Flags)
         {
-            CheckLock();
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             if (Handle == 0 || (Handle & 3) != 0 || Handle > uint.MaxValue || HandleTable.ContainsKey(Handle) || IsReservedHandleValue(Handle))
                 return null;
 
@@ -161,7 +158,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private WinHandle Insert(ulong handle, IHandleObject obj, AccessMask Permissions, ObjectHandleFlags Flags)
         {
-            CheckLock();
             // Entering the table is the first moment a thread can wait on this object, so it is also the first
             // moment its state changes are worth reporting.
             Wire(WaitObjectOf(obj));
@@ -218,7 +214,6 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         private bool TryGetEntry(ulong Handle, out ulong Key, out HandleEntry Entry)
         {
-            CheckLock();
             if (HandleTable.TryGetValue(Handle, out Entry))
             {
                 Key = Handle;
@@ -234,6 +229,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public ObjectHandleFlags GetHandleFlags(ulong Handle)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             if (TryGetEntry(Handle, out _, out HandleEntry Entry))
                 return Entry.Flags;
             return ObjectHandleFlags.None;
@@ -241,6 +237,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool SetHandleFlags(ulong Handle, ObjectHandleFlags Flags)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             if (!TryGetEntry(Handle, out ulong Key, out HandleEntry Entry))
                 return false;
             Entry.Flags = Flags;
@@ -250,13 +247,24 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public T? GetObjectByHandle<T>(ulong Handle) where T : class, IHandleObject
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             if (TryGetEntry(Handle, out _, out HandleEntry Entry) && Entry.Object is T typedObj)
                 return typedObj;
             return null;
         }
 
+        // One take: the type, the granted access and the object come from the same entry.
+        public T? GetObjectByHandle<T>(ulong Handle, HandleType Type, AccessMask Purpose) where T : class, IHandleObject
+        {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
+            if (!TryGetEntry(Handle, out _, out HandleEntry Entry) || Entry.Object == null || Entry.Object.ObjectType != Type || !Grants(Entry.Permissions, Purpose))
+                return null;
+            return Entry.Object as T;
+        }
+
         public IHandleObject? GetObjectByHandle(ulong Handle)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             if (TryGetEntry(Handle, out _, out HandleEntry Entry))
                 return Entry.Object;
             return null;
@@ -288,13 +296,18 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public int CountHandlesByObjectId(string ObjectId)
         {
-            CheckLock();
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             return ObjectIdToHandles.TryGetValue(ObjectId, out List<ulong> Handles) ? Handles.Count : 0;
         }
 
         public bool HasHandleToObject(IHandleObject Object)
         {
-            CheckLock();
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
+            return HasHandleToObjectLocked(Object);
+        }
+
+        private bool HasHandleToObjectLocked(IHandleObject Object)
+        {
             if (Object == null || !ObjectIdToHandles.TryGetValue(Object.ObjectId, out List<ulong> Handles))
                 return false;
 
@@ -309,6 +322,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public AccessMask GetPermissionsByHandle(ulong Handle)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             if (TryGetEntry(Handle, out _, out HandleEntry Entry))
                 return Entry.Permissions;
             return AccessMask.None;
@@ -316,17 +330,24 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool TryGetHandle(ulong Handle, out HandleEntry Entry)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             return TryGetEntry(Handle, out _, out Entry);
         }
 
         // Every tag-bit form of a handle gives the same Key.
         public bool TryGetHandle(ulong Handle, out ulong Key, out HandleEntry Entry)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             return TryGetEntry(Handle, out Key, out Entry);
         }
 
-        public bool TryRemoveHandle(ulong Handle, out HandleEntry Entry)
+        public bool TryRemoveHandle(ulong Handle, out HandleEntry Entry) => TryRemoveHandle(Handle, out Entry, out _);
+
+        // LastHandle: no other handle names the same object, decided in the same take as the removal.
+        public bool TryRemoveHandle(ulong Handle, out HandleEntry Entry, out bool LastHandle)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
+            LastHandle = false;
             if (!TryGetEntry(Handle, out ulong Key, out Entry))
                 return false;
             HandleTable.Remove(Key);
@@ -337,26 +358,37 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (Handles.Count == 0)
                     ObjectIdToHandles.Remove(obj.ObjectId);
             }
+
+            LastHandle = !HasHandleToObjectLocked(obj);
             return true;
         }
 
         public List<KeyValuePair<ulong, IHandleObject>> SnapshotHandles()
         {
-            CheckLock();
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             var Result = new List<KeyValuePair<ulong, IHandleObject>>(HandleTable.Count);
             foreach (var kv in HandleTable) Result.Add(new KeyValuePair<ulong, IHandleObject>(kv.Key, kv.Value.Object));
             return Result;
         }
 
-        public int Count => HandleTable.Count;
+        public int Count
+        {
+            get
+            {
+                using RankedLock.Scope TableScope = TableLock.EnterScope();
+                return HandleTable.Count;
+            }
+        }
 
         public bool HandleExists(ulong Handle)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             return TryGetEntry(Handle, out _, out _);
         }
 
         public bool HandleExists(ulong Handle, HandleType type)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             if (!TryGetEntry(Handle, out _, out HandleEntry Entry))
                 return false;
             return Entry.Object != null && Entry.Object.ObjectType == type;
@@ -364,6 +396,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public bool CheckAccess(ulong Handle, AccessMask RequiredAccess)
         {
+            using RankedLock.Scope TableScope = TableLock.EnterScope();
             return TryGetEntry(Handle, out _, out HandleEntry Entry) && Grants(Entry.Permissions, RequiredAccess);
         }
 

@@ -4,6 +4,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtReleaseSemaphore : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance)
+        {
+            ulong SemaphoreHandle = Instance.WinHelper.GetArg(0);
+            WinSemaphore? Semaphore = LookUpSemaphore(Instance, SemaphoreHandle);
+            if (Semaphore == null)
+                return WinSyscallDomain.KernelLock;
+
+            Instance.WinHelper.SetResolvedObject(SemaphoreHandle, Semaphore);
+            return WinSyscallDomain.Scheduler;
+        }
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
@@ -23,15 +36,18 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HandleReleaseSemaphore(Instance, SemaphoreHandle32, ReleaseCount32, PreviousCountPtr32);
         }
 
+        private static WinSemaphore? LookUpSemaphore(BinaryEmulator Instance, ulong SemaphoreHandle) =>
+            Instance.WinHelper.GetSemaphoreByHandle(SemaphoreHandle, AccessMask.SemaphoreModifyState);
+
         private static NTSTATUS HandleReleaseSemaphore(BinaryEmulator Instance, ulong SemaphoreHandle, int ReleaseCount, ulong PreviousCountPtr)
         {
-            if (PreviousCountPtr != 0 && !Instance.IsRegionMapped(PreviousCountPtr, 4))
+            if (PreviousCountPtr != 0 && !Instance._emulator.IsRangeMapped(PreviousCountPtr, 4))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
             if (ReleaseCount <= 0)
                 return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-            WinSemaphore Semaphore = Instance.WinHelper.GetSemaphoreByHandle(SemaphoreHandle, AccessMask.SemaphoreModifyState);
+            WinSemaphore? Semaphore = Instance.WinHelper.TakeResolvedObject<WinSemaphore>(SemaphoreHandle) ?? LookUpSemaphore(Instance, SemaphoreHandle);
             if (Semaphore == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
@@ -45,11 +61,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 Semaphore.CurrentCount += ReleaseCount;
             }
 
+            // NT ignores a fault on this write once the count has changed.
             if (PreviousCountPtr != 0)
-            {
-                if (!Instance._emulator.WriteMemory(PreviousCountPtr, PreviousCount))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            }
+                Instance._emulator.WriteMemory(PreviousCountPtr, PreviousCount);
 
             if (PreviousCount == 0 && Semaphore.CurrentCount > 0 && Instance.WakeWaitersForObject(Semaphore))
                 Instance._emulator.StopEmulation();

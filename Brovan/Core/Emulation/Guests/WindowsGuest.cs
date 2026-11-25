@@ -457,7 +457,7 @@ namespace Brovan.Core.Emulation.Guests
         public bool WaitNeedsKernelLock(BinaryEmulator Instance, EmulatedThread Thread)
         {
             WindowsThreadState State = WinEmulatedThread.TryGetState(Thread);
-            return State == null || State.WaitKind.NeedsKernelLock() || State.ObjectsNeedKernelLock;
+            return State == null || State.WaitNeedsKernelLock;
         }
 
         // A check without KernelLock skips a packet that targets an object with no wait object.
@@ -866,9 +866,14 @@ namespace Brovan.Core.Emulation.Guests
                 ? (uint)Instance.ReadRegister(Registers.UC_X86_REG_RAX)
                 : Instance.ReadRegister32(Registers.UC_X86_REG_EAX);
             WinSyscallEntry Entry = WinSyscallTable.Lookup(Syscall);
+            WinSyscallDomain Domain = Entry.Domain;
+            bool Begun = false;
+            if (Domain == WinSyscallDomain.Resolved)
+                Domain = ResolveDomain(Instance, Entry, ref Begun);
+
             // A scheduler-domain call that falls back to KernelLock runs its handler under KernelLock alone, as every other
             // call does.
-            bool WithoutKernelLock = Entry.Domain == WinSyscallDomain.Scheduler && !Instance.KernelLockCovered && !NeedsKernelLockAroundCall(Instance);
+            bool WithoutKernelLock = Domain == WinSyscallDomain.Scheduler && !Instance.KernelLockCovered && !NeedsKernelLockAroundCall(Instance);
 
             using RankedLock.Scope KernelScope = WithoutKernelLock ? default : Instance.EnterKernelLockScope();
             if (!WithoutKernelLock)
@@ -943,7 +948,8 @@ namespace Brovan.Core.Emulation.Guests
                     long HeldBefore = CountHold ? HeldLock.HeldTicks() : 0;
                     using (WithoutKernelLock ? HeldLock.EnterScope() : default)
                     {
-                        Instance.WinHelper.BeginSyscall();
+                        if (!Begun)
+                            Instance.WinHelper.BeginSyscall();
                         try
                         {
                             Status = Entry.Handler.Handle(Instance);
@@ -1010,6 +1016,11 @@ namespace Brovan.Core.Emulation.Guests
                 Instance.SuppressSyscallStatusWrite = false;
                 SetLastWinErrorRegister(Instance, NTSTATUS.STATUS_UNSUCCESSFUL);
                 return true;
+            }
+            finally
+            {
+                if (Begun)
+                    Instance.WinHelper.EndSyscall();
             }
         }
 
@@ -1173,6 +1184,34 @@ namespace Brovan.Core.Emulation.Guests
             });
         }
 
+        // On Split only, with no lock held. A resolve that throws leaves the call to KernelLock.
+        private static WinSyscallDomain ResolveDomain(BinaryEmulator Instance, WinSyscallEntry Entry, ref bool Begun)
+        {
+            if (Instance.KernelLockCovered || Instance.WinHelper == null)
+                return WinSyscallDomain.KernelLock;
+
+            Instance.WinHelper.BeginSyscall();
+            Begun = true;
+            WinSyscallDomain Domain;
+            try
+            {
+                Domain = Entry.Handler.ResolveDomain(Instance);
+            }
+            catch (Exception Ex)
+            {
+                Utils.LogError($"[TryHandleWinSyscall] {Entry.Name} could not resolve its domain and runs under KernelLock: {Ex.Message}");
+                Instance.WinHelper.EndSyscall();
+                Begun = false;
+                Domain = WinSyscallDomain.KernelLock;
+            }
+
+            if (Domain == WinSyscallDomain.Scheduler)
+                return Domain;
+
+            SyscallDomainStats.FellBack(SyscallDomainStats.Reason.ObjectNeedsKernelLock);
+            return WinSyscallDomain.KernelLock;
+        }
+
         private bool NeedsKernelLockAroundCall(BinaryEmulator Instance)
         {
             if (WinHelper == null)
@@ -1195,6 +1234,7 @@ namespace Brovan.Core.Emulation.Guests
                 LoaderSync,
                 SyncIoRetry,
                 ConnectReplies,
+                ObjectNeedsKernelLock,
             }
 
             private static readonly PeriodicStats Log = new PeriodicStats("BROVAN_SYSCALL_DOMAIN_STATS", "Syscalls off KernelLock:", Describe);

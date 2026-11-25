@@ -12,11 +12,14 @@ namespace Brovan.Core.Emulation
         internal const int SchedulerRank = 12;
         internal const int BackendMappingRank = 13;
 
+        // A lock of this rank takes no other ranked lock while held.
+        internal const int LeafRank = 14;
+
         internal static readonly bool OrderChecked = Environment.GetEnvironmentVariable("BROVAN_LOCK_ORDER") == "1";
 
         private static readonly bool RecordsHeld = OrderChecked || Environment.GetEnvironmentVariable("BROVAN_LOCK_STATS") == "1";
 
-        private const int MaxHeld = BackendMappingRank;
+        private const int MaxHeld = LeafRank;
 
         private sealed class HeldRecord
         {

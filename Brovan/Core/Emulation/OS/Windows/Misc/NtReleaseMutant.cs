@@ -4,6 +4,19 @@ namespace Brovan.Core.Emulation.OS.Windows
 {
     internal class NtReleaseMutant : IWinSyscall
     {
+        public WinSyscallDomain Domain => WinSyscallDomain.Resolved;
+
+        public WinSyscallDomain ResolveDomain(BinaryEmulator Instance)
+        {
+            ulong MutantHandle = Instance.WinHelper.GetArg(0);
+            WinMutex? Mutex = LookUpMutant(Instance, MutantHandle);
+            if (Mutex == null)
+                return WinSyscallDomain.KernelLock;
+
+            Instance.WinHelper.SetResolvedObject(MutantHandle, Mutex);
+            return WinSyscallDomain.Scheduler;
+        }
+
         public NTSTATUS Handle(BinaryEmulator Instance)
         {
             if (Instance._binary.Architecture == BinaryArchitecture.x64)
@@ -21,12 +34,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             return HandleReleaseMutant(Instance, MutantHandle32, PreviousCountPtr32);
         }
 
+        private static WinMutex? LookUpMutant(BinaryEmulator Instance, ulong MutantHandle) =>
+            Instance.WinHelper.HandleManager.GetObjectByHandle<WinMutex>(MutantHandle);
+
         private static NTSTATUS HandleReleaseMutant(BinaryEmulator Instance, ulong MutantHandle, ulong PreviousCountPtr)
         {
-            if (PreviousCountPtr != 0 && !Instance.IsRegionMapped(PreviousCountPtr, 4))
+            if (PreviousCountPtr != 0 && !Instance._emulator.IsRangeMapped(PreviousCountPtr, 4))
                 return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-            WinMutex Mutex = Instance.WinHelper.HandleManager.GetObjectByHandle<WinMutex>(MutantHandle);
+            WinMutex? Mutex = Instance.WinHelper.TakeResolvedObject<WinMutex>(MutantHandle) ?? LookUpMutant(Instance, MutantHandle);
             if (Mutex == null)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
@@ -47,11 +63,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
+            // NT ignores a fault on this write once the mutant has changed.
             if (PreviousCountPtr != 0)
-            {
-                if (!Instance._emulator.WriteMemory(PreviousCountPtr, PreviousCount))
-                    return NTSTATUS.STATUS_ACCESS_VIOLATION;
-            }
+                Instance._emulator.WriteMemory(PreviousCountPtr, PreviousCount);
 
             return NTSTATUS.STATUS_SUCCESS;
         }

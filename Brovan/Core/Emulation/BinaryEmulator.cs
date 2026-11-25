@@ -1054,7 +1054,7 @@ namespace Brovan.Core.Emulation
             SchedulerLock.AssertHeld($"Writing the state of a {Object.GetType().Name}");
         }
 
-        internal void AssertKernelLockHeld(string Where)
+        private void AssertKernelLockHeld(string Where)
         {
             if (RankedLock.OrderChecked && SmpEnabled)
                 KernelLock.AssertHeld(Where);
@@ -1273,6 +1273,15 @@ namespace Brovan.Core.Emulation
             MappingLock = new RankedLock("BackendMapping", RankedLock.BackendMappingRank, this);
             _rankedLocks = new[] { KernelLock, SchedulerLock, MappingLock };
             _emulator.UseHost(this);
+        }
+
+        // A guest lock ranks after Core's locks, and is added before any worker runs.
+        internal void AddRankedLock(RankedLock Lock)
+        {
+            RankedLock[] Locks = new RankedLock[_rankedLocks.Length + 1];
+            _rankedLocks.CopyTo(Locks, 0);
+            Locks[^1] = Lock;
+            _rankedLocks = Locks;
         }
 
         RankedLock IBackendHost.RunLock => KernelLock;
@@ -3133,8 +3142,12 @@ namespace Brovan.Core.Emulation
             Thread.State = EmulatedThreadState.Ready;
         }
 
+        // A waker without KernelLock leaves a wait that needs it to the scan that its signal's bump starts.
         internal bool TryWakeWaiter(EmulatedThread Thread)
         {
+            if (WaitCheckNeedsKernelLock(Thread))
+                return false;
+
             if (Thread.HostWorker != -1 && Thread != CurrentThread)
             {
                 TryClaimWait(Thread, EmulatedTickCount64);
@@ -3220,13 +3233,15 @@ namespace Brovan.Core.Emulation
 
         private bool DeferWaitCheck(EmulatedThread Thread)
         {
-            if (KernelLockCovered || !Thread.WaitActive
-                || !(Guest.WaitNeedsKernelLock(this, Thread) || Guest.WaitPrefersKernelLock(this, Thread)))
+            if (!WaitCheckNeedsKernelLock(Thread))
                 return false;
 
             Worker.DeferredWaits.Add((Thread, Thread.WaitGeneration));
             return true;
         }
+
+        private bool WaitCheckNeedsKernelLock(EmulatedThread Thread) =>
+            !KernelLockCovered && Thread.WaitActive && (Guest.WaitNeedsKernelLock(this, Thread) || Guest.WaitPrefersKernelLock(this, Thread));
 
         // Runs with no lock held. A wait that ended or started again since the scan is skipped.
         private void CheckDeferredWaits(Queue<int>[] ReadyQueues, HashSet<int> InQueue, int Levels, long SchedulerTick)
@@ -4813,11 +4828,10 @@ namespace Brovan.Core.Emulation
 
                 // Release retained driver pointers only after all processors stop.
                 WinHelper?.ReleaseHostResources();
-                KernelLock.Dispose();
-                SchedulerLock?.Dispose();
+                foreach (RankedLock Lock in _rankedLocks)
+                    Lock.Dispose();
                 _workersStopped.Dispose();
                 _deferredFreesPassed.Dispose();
-                MappingLock?.Dispose();
 
                 _memory.Clear();
                 _freedmemory.Clear();

@@ -300,6 +300,13 @@ namespace Brovan.Core.Emulation
             return NTSTATUS.STATUS_SUCCESS;
         }
 
+        // A set ResolveDomain resolved runs in the scheduler domain unless one of its objects needs KernelLock.
+        internal WinSyscallDomain KeepResolvedWait(WindowsThreadState State)
+        {
+            WinHelper.SetResolvedWait();
+            return State.HasObjectCheckedUnderKernelLock() ? WinSyscallDomain.KernelLock : WinSyscallDomain.Scheduler;
+        }
+
         private static bool NamesObjectTwice(WindowsThreadState State)
         {
             for (int i = 1; i < State.WaitObjectCount; i++)
