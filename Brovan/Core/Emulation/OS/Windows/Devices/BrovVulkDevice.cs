@@ -33,7 +33,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return GenState.TryDispose();
         }
 
-        internal void ReportLock() => Lock.Report();
+        internal void Report()
+        {
+            Lock.Report();
+            BrovVulkParks.ReportStats();
+        }
 
         public NTSTATUS Create(BinaryEmulator Instance, string DevicePath, byte[] EaBuffer, out string InternalPath, out WinDeviceDelegate Handler)
         {
@@ -47,24 +51,77 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Ioctl != IOCTL_BROVVULK_GEN)
                 return HandleIoctl(Ioctl, ref Data, (IGuestMemory)Instance);
 
-            Task Rerun = Instance.WinHelper.TakeRetriedHostWork<Task<BrovVulkWaits.Call>>();
-            bool CanPark = Instance.CurrentThread != null && Data.File != null && Data.File.Synchronous && !BrovVulkWaits.Disabled;
+            Task Rerun = Instance.WinHelper.TakeRetriedHostWork<Task<BrovVulkParks.Call>>();
+            // NT captures a buffered request once, so a parked host call ends with its own command, whatever the guest
+            // wrote into its buffers since.
+            if (Rerun is Task<BrovVulkParks.Call> { IsCompletedSuccessfully: true, Result: BrovVulkParks.HostCall Host })
+                return FinishHostCall(Host, ref Data, Instance);
 
-            NTSTATUS Status = HandleGenIoctl(ref Data, Instance, CanPark, Rerun, out BrovVulkWaits.Call Parked);
+            bool CanPark = Instance.CurrentThread != null && Data.File != null && Data.File.Synchronous;
+
+            NTSTATUS Status = HandleGenIoctl(ref Data, Instance, CanPark, Rerun, out BrovVulkParks.Call Parked);
             if (Parked == null)
                 return Status;
 
-            WinPendingIo Io = Instance.WinHelper.SynchronousIo(Data.File, Data.EventHandle, Data.ApcRoutine, Data.ApcContext, Data.IoStatusBlock);
+            WinPendingIo Io = Instance.WinHelper.SynchronousIo(Data.File, Data.EventHandle, Data.ApcRoutine, Data.ApcContext, Data.IoStatusBlock,
+                NotCancellable: Parked is BrovVulkParks.HostCall);
             if (!Instance.WinHelper.TryRetrySyscallWhenDone(Parked.Done.Task, Io))
             {
-                GenState.Waits.Release(Parked);
-                return Status;
+                GenState.Parks.Release(Parked);
+                return Parked is BrovVulkParks.HostCall ? Answer(ref Data, VK_ERROR_INITIALIZATION_FAILED) : Status;
             }
 
-            GenState.Waits.Start(Parked, Instance.WakeSignal);
+            GenState.Parks.Start(Parked, Instance.WakeSignal);
             Data.OutputBuffer = null;
             Data.Information = 0;
             return NTSTATUS.STATUS_PENDING;
+        }
+
+        private NTSTATUS FinishHostCall(BrovVulkParks.HostCall Host, ref DeviceData Data, IGuestMemory Instance)
+        {
+            byte[] OutBytes;
+            using (Lock.EnterScope())
+            {
+                Writer.Reset();
+                long HeldBefore = Lock.CountsHolds ? Lock.HeldTicks() : 0;
+                int Result;
+                try
+                {
+                    Result = GenState.Parks.TakeHostCall(Host, GenState, Writer, Instance);
+                }
+                catch (Exception Ex)
+                {
+                    LogFailure(Host.Command, Ex.Message, Instance);
+                    Writer.Reset();
+                    Result = VK_ERROR_INITIALIZATION_FAILED;
+                }
+                finally
+                {
+                    GenState.FreeCallAllocs();
+                }
+
+                if (Lock.CountsHolds)
+                    Lock.NoteCall(Host.Command, CommandName(Host.Command), HeldBefore);
+                OutBytes = Writer.Finish(Result);
+            }
+
+            Data.OutputBuffer = OutBytes;
+            Data.Information = (ulong)OutBytes.Length;
+            return NTSTATUS.STATUS_SUCCESS;
+        }
+
+        private NTSTATUS Answer(ref DeviceData Data, int Result)
+        {
+            byte[] OutBytes;
+            using (Lock.EnterScope())
+            {
+                Writer.Reset();
+                OutBytes = Writer.Finish(Result);
+            }
+
+            Data.OutputBuffer = OutBytes;
+            Data.Information = (ulong)OutBytes.Length;
+            return NTSTATUS.STATUS_SUCCESS;
         }
 
         internal NTSTATUS HandleIoctl(uint Ioctl, ref DeviceData Data, IGuestMemory Instance)
@@ -78,7 +135,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_INVALID_DEVICE_REQUEST;
         }
 
-        private NTSTATUS HandleGenIoctl(ref DeviceData Data, IGuestMemory Instance, bool CanPark, Task Rerun, out BrovVulkWaits.Call Parked)
+        private NTSTATUS HandleGenIoctl(ref DeviceData Data, IGuestMemory Instance, bool CanPark, Task Rerun, out BrovVulkParks.Call Parked)
         {
             Parked = null;
             byte[] Input = Data.InputBuffer;
@@ -127,11 +184,11 @@ namespace Brovan.Core.Emulation.OS.Windows
                     {
                         if (BrovVulkGenDispatch.CreatesGuestIds.Contains(Id))
                             PostStats.SentNow();
-                        GenState.Waits.BeginCommand(CanPark, Rerun);
+                        GenState.Parks.BeginCommand(CanPark, Rerun);
                         try { Result = Dispatch(Id, Reader, Instance); }
                         catch { GenState.FailCall(); throw; }
                         finally { GenState.FreeCallAllocs(); }
-                        Parked = GenState.Waits.TakeParked();
+                        Parked = GenState.Parks.TakeParked();
                     }
                 }
                 catch (Exception Ex)
@@ -142,7 +199,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
                 finally
                 {
-                    GenState.Waits.EndCommand();
+                    GenState.Parks.EndCommand();
                     HostDisplayMetrics.LeaveWindowDpiContext(PreviousDpiContext);
                 }
 

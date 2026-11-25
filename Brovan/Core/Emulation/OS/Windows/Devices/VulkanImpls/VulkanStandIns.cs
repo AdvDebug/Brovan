@@ -1274,15 +1274,35 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
+        private static bool CreatesLibrary(IntPtr info) =>
+            (PipelineCreateFlags(info, VkOffsets.PipelineFlags) & BrovVulkConstants.VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) != 0;
+
         // VkPipelineCreateFlags2CreateInfo replaces the flags member when it is in the chain.
-        private static bool CreatesLibrary(IntPtr info)
+        private static ulong PipelineCreateFlags(IntPtr info, int flagsOffset)
         {
             for (IntPtr node = *(IntPtr*)(info + VkOffsets.NodePNext); node != IntPtr.Zero; node = *(IntPtr*)(node + VkOffsets.NodePNext))
             {
                 if (*(int*)node == BrovVulkConstants.VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO)
-                    return (*(ulong*)(node + VkOffsets.CreateFlags2) & BrovVulkConstants.VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) != 0;
+                    return *(ulong*)(node + VkOffsets.CreateFlags2);
             }
-            return (*(uint*)(info + VkOffsets.PipelineFlags) & BrovVulkConstants.VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) != 0;
+            return *(uint*)(info + flagsOffset);
+        }
+
+        // An abandoned call can still use its cache after the guest thread is gone, which an externally synchronized
+        // cache does not allow.
+        internal static bool CanParkPipelines(GenState st, IntPtr cache, IntPtr createInfos, uint count, int stride, int flagsOffset)
+        {
+            if (st.StandIns.Plans.Count != 0 || st.IsExternallySynchronizedCache(cache) || createInfos == IntPtr.Zero || stride <= 0)
+                return false;
+
+            for (uint i = 0; i < count; i++)
+            {
+                ulong flags = PipelineCreateFlags(createInfos + (int)(i * (uint)stride), flagsOffset);
+                if ((flags & BrovVulkConstants.VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) == 0)
+                    return true;
+            }
+
+            return false;
         }
 
         internal static void FinishPipelines(GenState st, IntPtr device, IntPtr cache, IntPtr pipelines, int result)

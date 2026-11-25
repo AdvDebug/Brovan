@@ -17,6 +17,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool IsSpecial => (Flags & SpecialUserApc) != 0;
     }
 
+    // Abandon can run under the scheduler lock, so it only marks what it holds.
+    internal interface IAbandonableWork
+    {
+        void Abandon();
+    }
+
     internal enum WindowsWaitKind : byte
     {
         None,
@@ -116,6 +122,15 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         // HostWork outlives the wait. The re-run consumes it.
         internal Task HostWork { get; set; }
+
+        // Work the re-run never took. Its owner, the task's AsyncState, lets go of what it holds.
+        internal void DropHostWork()
+        {
+            Task Work = HostWork;
+            HostWork = null;
+            if (Work?.AsyncState is IAbandonableWork Owner)
+                Owner.Abandon();
+        }
 
         // Kept across the retries of one syscall, which NT sees as one wait.
         internal WinPendingIo? SyncIo { get; set; }

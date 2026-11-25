@@ -829,7 +829,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             switch (entry.Kind)
             {
                 case Kind.Destroy:
-                    if (!st.Waits.TryDeferDestroy(entry.Command, entry.Type, entry.Parent, entry.Handle))
+                    if (!st.Parks.TryDeferDestroy(entry.Command, entry.Type, entry.Parent, entry.Handle))
                         BrovVulkGenDispatch.RunDeferredDestroy(entry.Command, entry.Parent, entry.Handle);
                     break;
                 case Kind.DestroyDevice:
@@ -839,7 +839,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                         _queues.Remove(queue);
                     DestroyTimelines(entry.Device!);
                     _devices.Remove(device);
-                    if (!st.Waits.TryDeferDestroy(entry.Command, entry.Type, IntPtr.Zero, device))
+                    if (!st.Parks.TryDeferDestroy(entry.Command, entry.Type, IntPtr.Zero, device))
                         BrovVulkGenDispatch.RunDeferredDestroy(entry.Command, IntPtr.Zero, device);
                     entry.Device!.Addresses?.Dispose();
                     break;
@@ -850,7 +850,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     RunParkedChildren(st, entry.Handle);
                     foreach (IntPtr made in entry.Handles!)
                         VulkanStandIns.ReleaseHostDevice(st, made);
-                    if (!st.Waits.TryDeferDestroy(entry.Command, entry.Type, IntPtr.Zero, entry.Handle))
+                    if (!st.Parks.TryDeferDestroy(entry.Command, entry.Type, IntPtr.Zero, entry.Handle))
                         BrovVulkGenDispatch.RunDeferredDestroy(entry.Command, IntPtr.Zero, entry.Handle);
                     break;
                 case Kind.FreeMemory:

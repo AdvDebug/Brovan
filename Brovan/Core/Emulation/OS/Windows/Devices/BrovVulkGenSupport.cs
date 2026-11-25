@@ -715,6 +715,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         private static readonly int VertexAttributeSize = BrovVulkLayout.StructSize["VkVertexInputAttributeDescription2EXT"];
         private static readonly int VertexAttributeLocation = BrovVulkLayout.MemberOffset["VkVertexInputAttributeDescription2EXT.location"];
         private static readonly int VertexAttributeBinding = BrovVulkLayout.MemberOffset["VkVertexInputAttributeDescription2EXT.binding"];
+        private static readonly int PipelineCacheFlags = BrovVulkLayout.MemberOffset["VkPipelineCacheCreateInfo.flags"];
         private readonly Dictionary<IntPtr, ImageExtent> _images = new Dictionary<IntPtr, ImageExtent>();
         private readonly Dictionary<IntPtr, ImageExtent> _swapchainExtents = new Dictionary<IntPtr, ImageExtent>();
         private readonly Dictionary<IntPtr, uint> _swapchainImageCounts = new Dictionary<IntPtr, uint>();
@@ -784,10 +785,16 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public readonly BrovVulkWsi Wsi = new BrovVulkWsi();
         public readonly VulkanStandInState StandIns = new VulkanStandInState();
-        public readonly BrovVulkWaits Waits = new BrovVulkWaits();
+        public readonly BrovVulkParks Parks = new BrovVulkParks();
         public readonly BrovVulkRetire Retire = new BrovVulkRetire();
 
         private readonly GenArena _arena = new GenArena();
+        private GenArena? _hostCallArena;
+        private List<(IntPtr Ptr, string Type)>? _callPins;
+        private readonly List<(IntPtr Ptr, string Type)> _callPinList = new List<(IntPtr, string)>();
+        private readonly HashSet<IntPtr> _externallySynchronizedCaches = new HashSet<IntPtr>();
+
+        private GenArena CallArena => _hostCallArena ?? _arena;
 
         // Generated callers check this before the driver call, so the driver makes no object that cannot get an id.
         public bool HasHostIds(uint count) => (ulong)_next + count <= BrovVulkGenDispatch.GuestIdBase;
@@ -953,6 +960,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 IntPtr ptr = e.Ptr;
                 if (_callRecording != null)
                     NoteHandle(id, ptr, e.Type, e.Serial);
+                _callPins?.Add((ptr, type));
                 return ptr;
             }
             throw new InvalidOperationException($"BrovVulk generic: bad handle id {id} (expected {type}).");
@@ -1038,6 +1046,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                         case "VkPipeline":
                             _pipelines.Remove(e.Ptr);
                             _shaderGroupCounts.Remove(e.Ptr);
+                            break;
+                        case "VkPipelineCache":
+                            _externallySynchronizedCaches.Remove(e.Ptr);
                             break;
                         case "VkDescriptorSetLayout":
                             _setLayouts.Remove(e.Ptr);
@@ -3980,7 +3991,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
         public Dictionary<uint, MapEntry>.ValueCollection Mappings => _mappings.Values;
 
-        public IntPtr Alloc(int size) => _arena.Alloc(size);
+        public IntPtr Alloc(int size) => CallArena.Alloc(size);
 
         public void FreeCallAllocs()
         {
@@ -3989,8 +4000,69 @@ namespace Brovan.Core.Emulation.OS.Windows
             _callRecording = null;
             _callCommand = null;
             _callOwner = 0;
+            _callPins = null;
+            _callPinList.Clear();
+            _pendingPipelines.Clear();
+            if (_hostCallArena != null)
+            {
+                Parks.ReturnArena(_hostCallArena);
+                _hostCallArena = null;
+            }
             _arena.FreeCallAllocs();
         }
+
+        // A command in ParkedHostCalls decodes into a pooled arena, which a parked call keeps.
+        public void BeginParkableCall()
+        {
+            _hostCallArena = Parks.TryBorrowArena();
+            if (_hostCallArena != null)
+                _callPins = _callPinList;
+        }
+
+        public bool HasBorrowedArena => _hostCallArena != null;
+
+        // A driver can reuse a destroyed module's value, so the call keeps its temporary modules' host handles.
+        internal void DetachHostCallContext(BrovVulkParks.HostCall call)
+        {
+            call.Arena = _hostCallArena;
+            _hostCallArena = null;
+            call.Pins.AddRange(_callPinList);
+            _callPins = null;
+            _callPinList.Clear();
+
+            List<IntPtr> modules = StandIns.TemporaryModules;
+            if (modules.Count != 0)
+            {
+                foreach (IntPtr module in modules)
+                    StandIns.Modules.Remove(module);
+                call.TemporaryModules = new List<IntPtr>(modules);
+                modules.Clear();
+            }
+
+            if (_pendingPipelines.Count != 0)
+            {
+                call.PendingPipelines = new List<PendingPipeline?>(_pendingPipelines);
+                _pendingPipelines.Clear();
+            }
+        }
+
+        internal void RestoreHostCallContext(BrovVulkParks.HostCall call)
+        {
+            _callDevice = call.Device;
+            _callOwner = call.DeviceId;
+            _pendingPipelines.Clear();
+            if (call.PendingPipelines is List<PendingPipeline?> pending)
+                _pendingPipelines.AddRange(pending);
+        }
+
+        public unsafe void NotePipelineCache(IntPtr cache, IntPtr info)
+        {
+            if (cache != IntPtr.Zero && info != IntPtr.Zero
+                && (*(uint*)(info + PipelineCacheFlags) & BrovVulkConstants.VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT) != 0)
+                _externallySynchronizedCaches.Add(cache);
+        }
+
+        public bool IsExternallySynchronizedCache(IntPtr cache) => cache != IntPtr.Zero && _externallySynchronizedCaches.Contains(cache);
 
         public void FailCall()
         {
@@ -4072,25 +4144,25 @@ namespace Brovan.Core.Emulation.OS.Windows
                 throw new InvalidOperationException($"BrovVulk generic: {what} {first}+{count} of {limit}.");
         }
 
-        public void RetainChains() => _arena.ArmRetain();
+        public void RetainChains() => CallArena.ArmRetain();
 
         public void EnterChain()
         {
             if (++_chainDepth > MaxChainDepth)
                 throw new InvalidOperationException("BrovVulk generic: pNext chain deeper than the structures it may hold.");
 
-            _arena.EnterChain();
+            CallArena.EnterChain();
         }
 
         public void LeaveChain()
         {
             _chainDepth--;
-            _arena.LeaveChain();
+            CallArena.LeaveChain();
         }
 
         public bool RetainFits()
         {
-            if (_retainedBytes + _arena.PendingRetainedBytes <= MemoryBudget.VulkanRetainedBytes)
+            if (_retainedBytes + CallArena.PendingRetainedBytes <= MemoryBudget.VulkanRetainedBytes)
                 return true;
 
             if (!_retainRefusalLogged)
@@ -4106,7 +4178,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (id == 0)
                 return;
 
-            IntPtr[]? blocks = _arena.TakeRetained(out long bytes);
+            IntPtr[]? blocks = CallArena.TakeRetained(out long bytes);
             if (blocks == null)
                 return;
 
@@ -4167,6 +4239,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         // False when the driver may still use what it was given, which then stays.
         public bool TryDispose()
         {
+            if (Parks.HasActiveHostCalls)
+                return false;
             foreach (IntPtr ownerKey in _ownerKeys.Values)
                 BrovVulkProc.RemoveOwner(ownerKey);
             _ownerKeys.Clear();
@@ -4177,6 +4251,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             _retained.Clear();
             _retainedBytes = 0;
             _arena.FreeAll();
+            Parks.FreeArenas();
             foreach (SurfaceHold hold in _surfaceHolds.Values)
                 ReleaseSurfaceHold(hold);
             foreach (SurfaceHold hold in _swapchainHolds.Values)

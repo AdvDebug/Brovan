@@ -4178,6 +4178,11 @@ namespace Brovan.Core.Emulation
                 run.DirtyRegs |= KvmConstants.SyncSpecialRegisters;
             vp.SyscallScratchWritten = false;
 
+            // The flushing stub zeroes R10 as NT's syscall exit does. A syscall that runs again from its own instruction,
+            // or a context a handler set, keeps R10 and takes the flush on a full entry.
+            if (flushTlb && run.Regs.R10 != 0)
+                run.DirtyRegs |= KvmConstants.SyncSpecialRegisters;
+
             if ((run.DirtyRegs & KvmConstants.SyncSpecialRegisters) != 0)
             {
                 vp.InSyscallStub = false;

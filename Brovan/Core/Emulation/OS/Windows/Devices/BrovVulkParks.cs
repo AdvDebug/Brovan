@@ -10,8 +10,9 @@ using Brovan.Core.Settings;
 
 namespace Brovan.Core.Emulation.OS.Windows
 {
-    // A wait with a timeout runs on a host thread in chunks, and the parked guest reruns the syscall after each one.
-    internal sealed unsafe class BrovVulkWaits
+    // Vulkan host calls run on host threads while the guest thread is parked. A wait runs in chunks, a HostCall
+    // once.
+    internal sealed unsafe class BrovVulkParks
     {
         internal const int MaxWaitObjects = 64;
 
@@ -22,17 +23,17 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal static readonly bool Disabled =
             string.Equals(Environment.GetEnvironmentVariable("BROVVULK_NO_PARKED_WAIT"), "1", StringComparison.Ordinal);
 
-        internal abstract class Call
+        internal static readonly bool HostCallsDisabled =
+            string.Equals(Environment.GetEnvironmentVariable("BROVVULK_NO_PARKED_HOST_CALLS"), "1", StringComparison.Ordinal);
+
+        internal abstract class Call : IAbandonableWork
         {
             internal IntPtr Device;
             internal uint DeviceId;
-            internal ulong Timeout;
-            internal long Deadline;
             internal int Result;
             internal bool Finished;
             internal WakeSignal Wake;
             internal TaskCompletionSource<Call> Done;
-            internal WaitThread Thread;
             internal readonly List<(IntPtr Handle, string Type)> Pins = new List<(IntPtr, string)>();
 
             protected Call(GenState st, IntPtr device)
@@ -41,15 +42,80 @@ namespace Brovan.Core.Emulation.OS.Windows
                 DeviceId = st.IdOf(device, "VkDevice");
             }
 
+            public abstract void Abandon();
+        }
+
+        internal abstract class WaitCall : Call
+        {
+            internal ulong Timeout;
+            internal long Deadline;
+            internal WaitThread Thread;
+
+            protected WaitCall(GenState st, IntPtr device) : base(st, device)
+            {
+            }
+
             internal abstract int ScratchBytes { get; }
 
             // Runs on a waiter thread without BrovVulkDevice.Lock, so it reads only the call's own copies.
             internal abstract int Run(IntPtr scratch, ulong timeoutNs);
 
             internal abstract void AddWaitedHandles(List<(IntPtr Handle, string Type)> pins);
+
+            // A wait holds nothing past its waiter's end.
+            public override void Abandon()
+            {
+            }
         }
 
-        private sealed class FenceCall : Call
+        internal enum HostCallState : byte
+        {
+            Armed,
+            Queued,
+            Running,
+            Finished,
+            Taken,
+            Abandoned,
+        }
+
+        // Generated for each command in ParkedHostCalls. Owns the command's arena, temporary shader modules and pending
+        // pipeline records until the re-run takes them or the call is abandoned.
+        internal abstract class HostCall : Call
+        {
+            internal BrovVulkParks Owner;
+            internal uint Command;
+            internal GenArena Arena;
+            internal List<IntPtr> TemporaryModules;
+            internal object PendingPipelines;
+            internal HostCallState State;
+            internal bool DeviceGone;
+
+            protected HostCall(GenState st, IntPtr device) : base(st, device)
+            {
+            }
+
+            internal abstract uint ResultCount { get; }
+
+            internal abstract int RunHost();
+
+            internal abstract void DestroyResults();
+
+            internal abstract int Finish(GenBuf w, GenState st, IGuestMemory inst);
+
+            internal void DestroyTemporaryModules()
+            {
+                if (TemporaryModules == null)
+                    return;
+
+                foreach (IntPtr module in TemporaryModules)
+                    BrovVulkApi.vkDestroyShaderModule(Device, module, IntPtr.Zero);
+                TemporaryModules = null;
+            }
+
+            public override void Abandon() => Owner?.AbandonHostCall(this);
+        }
+
+        private sealed class FenceCall : WaitCall
         {
             private readonly IntPtr[] _fences;
             private readonly uint[] _fenceIds;
@@ -99,7 +165,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private sealed class SemaphoreCall : Call
+        private sealed class SemaphoreCall : WaitCall
         {
             private static readonly int InfoBytes = (BrovVulkLayout.StructSize["VkSemaphoreWaitInfo"] + 7) & ~7;
             private static readonly int NextOffset = BrovVulkLayout.MemberOffset["VkSemaphoreWaitInfo.pNext"];
@@ -199,7 +265,7 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal sealed class WaitThread
         {
             internal readonly SemaphoreSlim Go = new SemaphoreSlim(0);
-            internal Call Call;
+            internal WaitCall Call;
             internal bool Running;
         }
 
@@ -226,7 +292,14 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Stack<WaitThread> _idle = new Stack<WaitThread>();
         private int _pinnedHandles;
 
-        // These fields hold the state of the current command and are used only under BrovVulkDevice.Lock.
+        private readonly Queue<HostCall> _hostQueue = new Queue<HostCall>();
+        private readonly Stack<GenArena> _freeArenas = new Stack<GenArena>();
+        private int _hostThreads;
+        private int _hostIdle;
+        private int _lentArenas;
+        private bool _closed;
+
+        // Used only under BrovVulkDevice.Lock.
         private bool _canPark;
         private Task _rerun;
         private Call _parked;
@@ -251,17 +324,20 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal void EndCommand()
         {
             Call left = _parked;
+            Task untaken = _rerun;
             _canPark = false;
             _rerun = null;
             _parked = null;
             Waited = false;
             if (left != null)
                 Release(left);
+            if (untaken?.AsyncState is IAbandonableWork owner)
+                owner.Abandon();
         }
 
         internal static int WaitForFences(GenState st, IGuestMemory inst, IntPtr device, uint fenceCount, IntPtr pFences, uint waitAll, ulong timeout)
         {
-            BrovVulkWaits waits = st.Waits;
+            BrovVulkParks waits = st.Parks;
             if (waits.TakeRerun() is FenceCall resumed && resumed.Matches(st, device, fenceCount, pFences, waitAll, timeout))
                 return waits.Resume(st, resumed);
 
@@ -278,7 +354,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return BrovVulkConstants.VK_ERROR_INITIALIZATION_FAILED;
             SemaphoreCall.CheckTimelines(st, pWaitInfo);
 
-            BrovVulkWaits waits = st.Waits;
+            BrovVulkParks waits = st.Parks;
             if (waits.TakeRerun() is SemaphoreCall resumed && resumed.Matches(st, device, pWaitInfo, timeout))
                 return waits.Resume(st, resumed);
 
@@ -298,16 +374,19 @@ namespace Brovan.Core.Emulation.OS.Windows
             return waits.Park(st, new SemaphoreCall(st, device, pWaitInfo), timeout, rr);
         }
 
-        internal Call TakeRerun()
+        internal WaitCall TakeRerun()
         {
             Task rerun = _rerun;
+            if (rerun?.AsyncState is not WaitCall)
+                return null;
+
             _rerun = null;
-            return rerun is Task<Call> { IsCompletedSuccessfully: true } done ? done.Result : null;
+            return rerun is Task<Call> { IsCompletedSuccessfully: true, Result: WaitCall done } ? done : null;
         }
 
         internal bool CanWait(uint count)
         {
-            if (!_canPark)
+            if (Disabled || !_canPark)
             {
                 Stats.Fallback(Disabled ? FallbackReason.Off : FallbackReason.NoPark);
                 return false;
@@ -322,14 +401,14 @@ namespace Brovan.Core.Emulation.OS.Windows
             return true;
         }
 
-        internal int Park(GenState st, Call call, ulong timeout, int poll)
+        internal int Park(GenState st, WaitCall call, ulong timeout, int poll)
         {
             call.Timeout = timeout;
             call.Deadline = DeadlineAfter(timeout);
             return Arm(st, call, poll);
         }
 
-        internal int Resume(GenState st, Call call)
+        internal int Resume(GenState st, WaitCall call)
         {
             if (call.Finished)
             {
@@ -345,7 +424,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return BrovVulkConstants.VK_TIMEOUT;
             }
 
-            if (!_canPark)
+            if (Disabled || !_canPark)
             {
                 Stats.Fallback(Disabled ? FallbackReason.Off : FallbackReason.NoPark);
                 return BrovVulkConstants.VK_TIMEOUT;
@@ -355,7 +434,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Arm(st, call, BrovVulkConstants.VK_TIMEOUT);
         }
 
-        private int Arm(GenState st, Call call, int poll)
+        private int Arm(GenState st, WaitCall call, int poll)
         {
             if (call.Pins.Count == 0)
             {
@@ -377,7 +456,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
                 call.Finished = false;
                 call.Result = 0;
-                call.Done = new TaskCompletionSource<Call>();
+                call.Done = new TaskCompletionSource<Call>(call);
                 call.Thread = thread;
                 thread.Call = call;
                 Pin(call);
@@ -391,23 +470,37 @@ namespace Brovan.Core.Emulation.OS.Windows
         internal void Start(Call call, WakeSignal wake)
         {
             call.Wake = wake;
+            if (call is HostCall host)
+            {
+                StartHostCall(host);
+                return;
+            }
+
+            WaitCall wait = (WaitCall)call;
             lock (_lock)
-                call.Thread.Running = true;
-            call.Thread.Go.Release();
+                wait.Thread.Running = true;
+            wait.Thread.Go.Release();
         }
 
         internal void Release(Call call)
         {
+            if (call is HostCall host)
+            {
+                ReleaseArmed(host);
+                return;
+            }
+
+            WaitCall wait = (WaitCall)call;
             List<DeferredDestroy> due;
             lock (_lock)
             {
-                WaitThread thread = call.Thread;
+                WaitThread thread = wait.Thread;
                 if (thread == null || thread.Running)
                     return;
 
-                due = Unpin(call);
+                due = Unpin(wait);
                 thread.Call = null;
-                call.Thread = null;
+                wait.Thread = null;
                 _idle.Push(thread);
             }
 
@@ -441,7 +534,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             while (true)
             {
                 self.Go.Wait();
-                Call call = self.Call;
+                WaitCall call = self.Call;
                 int rr;
                 try
                 {
@@ -479,7 +572,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        private static ulong ChunkFor(Call call)
+        private static ulong ChunkFor(WaitCall call)
         {
             if (call.Deadline == long.MaxValue)
                 return ChunkNanoseconds;
@@ -543,7 +636,16 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return;
 
             foreach (DeferredDestroy destroy in due)
-                BrovVulkGenDispatch.RunDeferredDestroy(destroy.Command, destroy.Parent, destroy.Handle);
+            {
+                try
+                {
+                    BrovVulkGenDispatch.RunDeferredDestroy(destroy.Command, destroy.Parent, destroy.Handle);
+                }
+                catch (Exception ex)
+                {
+                    Utils.LogError($"[BrovVulk] the deferred destroy of a {destroy.Type} failed: {ex.Message}");
+                }
+            }
         }
 
         // A parked wait still reads the handle, so its destroy runs when the wait lets go of it.
@@ -558,23 +660,369 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return false;
 
                 _deferred.Add(new DeferredDestroy(command, type, parent, handle));
+                if (type == "VkDevice")
+                {
+                    foreach (HostCall queued in _hostQueue)
+                    {
+                        if (queued.Device == handle)
+                            queued.DeviceGone = true;
+                    }
+                }
             }
 
             Stats.Defer();
             return true;
         }
 
+        internal GenArena TryBorrowArena()
+        {
+            if (HostCallsDisabled || !_canPark)
+            {
+                Stats.Fallback(HostCallsDisabled ? FallbackReason.HostCallsOff : FallbackReason.HostNoPark);
+                return null;
+            }
+
+            lock (_lock)
+            {
+                if (_closed || _lentArenas >= MemoryBudget.VulkanHostCallThreads + MemoryBudget.VulkanHostCallQueue)
+                {
+                    Stats.Fallback(_closed ? FallbackReason.Closed : FallbackReason.NoArena);
+                    return null;
+                }
+
+                _lentArenas++;
+                return _freeArenas.Count != 0 ? _freeArenas.Pop() : new GenArena();
+            }
+        }
+
+        internal void ReturnArena(GenArena arena)
+        {
+            arena.FreeCallAllocs();
+            lock (_lock)
+                ReturnArenaLocked(arena);
+        }
+
+        private void ReturnArenaLocked(GenArena arena)
+        {
+            _lentArenas--;
+            if (_freeArenas.Count < MemoryBudget.VulkanHostCallThreads)
+                _freeArenas.Push(arena);
+            else
+                arena.FreeAll();
+        }
+
+        internal void FreeArenas()
+        {
+            lock (_lock)
+            {
+                while (_freeArenas.Count != 0)
+                    _freeArenas.Pop().FreeAll();
+            }
+        }
+
+        // A queued or running call still reads its arena and may still create host objects.
+        internal bool HasActiveHostCalls
+        {
+            get
+            {
+                lock (_lock)
+                    return _hostQueue.Count != 0 || _hostIdle != _hostThreads;
+            }
+        }
+
+        // The prepare of a command in ParkedHostCalls has run in a borrowed arena. False runs the command in place.
+        internal bool TryParkHostCall(GenState st, HostCall call, uint command)
+        {
+            if (!st.HasBorrowedArena)
+                return false;
+
+            lock (_lock)
+            {
+                if (_closed)
+                {
+                    Stats.Fallback(FallbackReason.Closed);
+                    return false;
+                }
+
+                call.Owner = this;
+                call.Command = command;
+                st.DetachHostCallContext(call);
+                call.Pins.Add((call.Device, "VkDevice"));
+                IntPtr instance = st.InstanceOfDevice(call.Device);
+                if (instance != IntPtr.Zero)
+                    call.Pins.Add((instance, "VkInstance"));
+                call.Finished = false;
+                call.Result = 0;
+                call.Done = new TaskCompletionSource<Call>(call);
+                call.State = HostCallState.Armed;
+                Pin(call);
+            }
+
+            _parked = call;
+            Stats.HostPark();
+            return true;
+        }
+
+        private void StartHostCall(HostCall call)
+        {
+            lock (_lock)
+            {
+                if (call.State != HostCallState.Armed)
+                    return;
+
+                call.State = HostCallState.Queued;
+                EnqueueLocked(call, startThread: true);
+            }
+        }
+
+        // A woken thread counts as idle until it takes the lock again, so a thread starts while the queue outnumbers them.
+        private void EnqueueLocked(HostCall call, bool startThread)
+        {
+            _hostQueue.Enqueue(call);
+            if (startThread && _hostQueue.Count > _hostIdle && _hostThreads < MemoryBudget.VulkanHostCallThreads)
+            {
+                _hostThreads++;
+                Thread host = new Thread(HostCallLoop, BinaryEmulator.SchedulerThreadStackSize) { IsBackground = true, Name = "BrovVulk host call" };
+                host.Start();
+            }
+
+            Monitor.PulseAll(_lock);
+        }
+
+        private void HostCallLoop()
+        {
+            while (true)
+            {
+                HostCall call;
+                bool drop;
+                bool deviceGone;
+                lock (_lock)
+                {
+                    while (_hostQueue.Count == 0)
+                    {
+                        if (_closed)
+                        {
+                            _hostThreads--;
+                            Monitor.PulseAll(_lock);
+                            return;
+                        }
+
+                        _hostIdle++;
+                        Monitor.Wait(_lock);
+                        _hostIdle--;
+                    }
+
+                    call = _hostQueue.Dequeue();
+                    drop = call.State == HostCallState.Abandoned;
+                    if (!drop)
+                        call.State = HostCallState.Running;
+                    deviceGone = call.DeviceGone;
+                }
+
+                if (drop)
+                {
+                    RunDestroys(DropAbandoned(call));
+                    continue;
+                }
+
+                int rr = BrovVulkConstants.VK_ERROR_DEVICE_LOST;
+                try
+                {
+                    if (!deviceGone)
+                        rr = call.RunHost();
+                }
+                catch (Exception ex)
+                {
+                    Utils.LogError($"[BrovVulk] parked host call failed: {ex.Message}");
+                    rr = BrovVulkConstants.VK_ERROR_INITIALIZATION_FAILED;
+                }
+
+                DestroyTemporaryModules(call);
+                GenArena arena = call.Arena;
+                call.Arena = null;
+                arena?.FreeCallAllocs();
+
+                bool abandoned;
+                lock (_lock)
+                {
+                    if (arena != null)
+                        ReturnArenaLocked(arena);
+                    call.Result = rr;
+                    call.Finished = true;
+                    abandoned = call.State == HostCallState.Abandoned;
+                    if (!abandoned)
+                        call.State = HostCallState.Finished;
+                    Monitor.PulseAll(_lock);
+                }
+
+                if (abandoned)
+                    RunDestroys(DropAbandoned(call));
+
+                call.Done.TrySetResult(call);
+                call.Wake?.Bump();
+            }
+        }
+
+        private static void DestroyTemporaryModules(HostCall call)
+        {
+            try
+            {
+                call.DestroyTemporaryModules();
+            }
+            catch (Exception ex)
+            {
+                Utils.LogError($"[BrovVulk] a parked host call could not destroy its temporary modules: {ex.Message}");
+            }
+        }
+
+        // Can run under the scheduler lock, so it only marks and queues the call.
+        internal void AbandonHostCall(HostCall call)
+        {
+            lock (_lock)
+            {
+                switch (call.State)
+                {
+                    case HostCallState.Queued:
+                    case HostCallState.Running:
+                        call.State = HostCallState.Abandoned;
+                        break;
+                    case HostCallState.Armed:
+                    case HostCallState.Finished:
+                        call.State = HostCallState.Abandoned;
+                        EnqueueLocked(call, startThread: false);
+                        break;
+                    default:
+                        return;
+                }
+            }
+
+            Stats.Abandon();
+        }
+
+        // The guest thread could not be parked, so the call never runs.
+        private void ReleaseArmed(HostCall call)
+        {
+            lock (_lock)
+            {
+                if (call.State != HostCallState.Armed)
+                    return;
+
+                call.State = HostCallState.Abandoned;
+            }
+
+            Utils.LogError("[BrovVulk] a parked host call could not park its thread.");
+            RunDestroys(DropAbandoned(call));
+        }
+
+        // The results go before the pins, so due destroys still run child before parent.
+        private List<DeferredDestroy> DropAbandoned(HostCall call)
+        {
+            DestroyTemporaryModules(call);
+            if (call.Finished)
+            {
+                try
+                {
+                    call.DestroyResults();
+                }
+                catch (Exception ex)
+                {
+                    Utils.LogError($"[BrovVulk] an abandoned host call could not destroy its results: {ex.Message}");
+                }
+            }
+
+            GenArena arena = call.Arena;
+            call.Arena = null;
+            arena?.FreeCallAllocs();
+            lock (_lock)
+            {
+                if (arena != null)
+                    ReturnArenaLocked(arena);
+                return UnpinHostCall(call);
+            }
+        }
+
+        private List<DeferredDestroy> UnpinHostCall(HostCall call)
+        {
+            List<DeferredDestroy> due = Unpin(call);
+            call.Pins.Clear();
+            Monitor.PulseAll(_lock);
+            return due;
+        }
+
+        // The re-run of the parked syscall, under BrovVulkDevice.Lock.
+        internal int TakeHostCall(HostCall call, GenState st, GenBuf w, IGuestMemory inst)
+        {
+            lock (_lock)
+            {
+                if (call.State != HostCallState.Finished)
+                    return BrovVulkConstants.VK_ERROR_INITIALIZATION_FAILED;
+                call.State = HostCallState.Taken;
+            }
+
+            try
+            {
+                if (st.IdOf(call.Device, "VkDevice") != call.DeviceId)
+                {
+                    call.DestroyResults();
+                    return BrovVulkConstants.VK_ERROR_DEVICE_LOST;
+                }
+
+                if (call.Result >= 0 && !st.HasHostIds(call.ResultCount))
+                {
+                    call.DestroyResults();
+                    return BrovVulkConstants.VK_ERROR_OUT_OF_HOST_MEMORY;
+                }
+
+                st.RestoreHostCallContext(call);
+                return call.Finish(w, st, inst);
+            }
+            finally
+            {
+                List<DeferredDestroy> due;
+                lock (_lock)
+                    due = UnpinHostCall(call);
+                RunDestroys(due);
+                Stats.HostTake();
+            }
+        }
+
+        internal static void ReportStats() => Stats.Report();
+
         internal void EndCalls()
         {
             long limit = Environment.TickCount64 + 2 * ChunkMilliseconds;
+            List<HostCall> orphans = null;
             lock (_lock)
             {
+                _closed = true;
+                foreach (HostCall queued in _hostQueue)
+                {
+                    if (queued.State == HostCallState.Queued)
+                        queued.State = HostCallState.Abandoned;
+                }
+
+                if (_hostThreads == 0 && _hostQueue.Count != 0)
+                {
+                    orphans = new List<HostCall>(_hostQueue);
+                    _hostQueue.Clear();
+                }
+            }
+
+            if (orphans != null)
+            {
+                foreach (HostCall orphan in orphans)
+                    RunDestroys(DropAbandoned(orphan));
+            }
+
+            lock (_lock)
+            {
+                Monitor.PulseAll(_lock);
                 while (HasRunningCall())
                 {
                     long left = limit - Environment.TickCount64;
                     if (left <= 0)
                     {
-                        Utils.LogError("[BrovVulk] a parked wait did not end before dispose; its host objects stay alive.");
+                        Utils.LogError("[BrovVulk] a parked call did not end before dispose; its host objects stay alive.");
                         return;
                     }
 
@@ -591,7 +1039,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                     return true;
             }
 
-            return false;
+            return _hostQueue.Count != 0 || _hostIdle != _hostThreads;
         }
 
         private enum FallbackReason
@@ -601,6 +1049,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             TooMany,
             Chain,
             NoThread,
+            HostCallsOff,
+            HostNoPark,
+            NoArena,
+            Closed,
         }
 
         private static class Stats
@@ -612,8 +1064,22 @@ namespace Brovan.Core.Emulation.OS.Windows
             private static long _rearms;
             private static long _consumes;
             private static long _defers;
+            private static long _hostParks;
+            private static long _hostTakes;
+            private static long _abandons;
 
             internal static void Park() => Count(ref _parks);
+
+            internal static void HostPark() => Count(ref _hostParks);
+
+            internal static void HostTake() => Count(ref _hostTakes);
+
+            // An abandon runs outside BrovVulkDevice.Lock, which guards the other counters.
+            internal static void Abandon()
+            {
+                if (Log.Enabled)
+                    Interlocked.Increment(ref _abandons);
+            }
 
             internal static void Rearm() => Count(ref _rearms);
 
@@ -622,6 +1088,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             internal static void Defer() => Count(ref _defers);
 
             internal static void Fallback(FallbackReason reason) => Count(ref Fallbacks[(int)reason]);
+
+            internal static void Report()
+            {
+                if (Log.Enabled)
+                    Log.Report();
+            }
 
             private static void Count(ref long counter)
             {
@@ -634,8 +1106,9 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             private static void Describe(StringBuilder sb)
             {
-                sb.Append(" parks=").Append(_parks).Append(" rearms=").Append(_rearms).Append(" consumes=").Append(_consumes)
-                  .Append(" deferredDestroys=").Append(_defers).Append(" | poll:");
+                sb.Append(" waits: parks=").Append(_parks).Append(" rearms=").Append(_rearms).Append(" consumes=").Append(_consumes)
+                  .Append(" | host calls: parks=").Append(_hostParks).Append(" takes=").Append(_hostTakes)
+                  .Append(" abandons=").Append(Volatile.Read(ref _abandons)).Append(" | deferredDestroys=").Append(_defers).Append(" | not parked:");
                 for (int i = 0; i < Fallbacks.Length; i++)
                     sb.Append(' ').Append((FallbackReason)i).Append('=').Append(Fallbacks[i]);
             }

@@ -308,7 +308,7 @@ namespace Brovan.Core.Emulation.Guests
             }
 
             WinHelper.KernelFiles?.Dispose();
-            WinSysHelper.ReportBrovVulkLock();
+            WinSysHelper.ReportBrovVulk();
         }
 
         public void Shutdown(BinaryEmulator Instance)
@@ -323,6 +323,8 @@ namespace Brovan.Core.Emulation.Guests
 
             using (Instance.KernelLock.EnterScope())
             {
+                foreach (EmulatedThread Thread in Instance.Threads.Values)
+                    WinEmulatedThread.TryGetState(Thread)?.DropHostWork();
                 OS.Windows.RPC.Ports.AudioSrvPortHandler.StopStreams(Instance);
                 AlpcMessaging.ReleaseRemote(Instance);
                 RemoteCalls.Release(Instance);
@@ -783,7 +785,15 @@ namespace Brovan.Core.Emulation.Guests
             bool Cancelled = SameCall && State.SyncIoCancelled;
             State.SyncIoRerun = SameCall && !Cancelled;
             if (!State.SyncIoBetweenRetries)
+            {
+                // A run again that failed before its handler took the host work left it here.
+                if (State.HostWork != null)
+                    State.DropHostWork();
                 return false;
+            }
+
+            if (!State.SyncIoRerun)
+                State.DropHostWork();
 
             State.ResetSyncIo();
             if (!Cancelled)

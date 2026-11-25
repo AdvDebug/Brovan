@@ -37,6 +37,9 @@ namespace Brovan.Core.Emulation.OS.Windows
         public readonly ulong ApcContext;
         public readonly ulong IoStatusBlock;
 
+        // An IRP with no cancel routine.
+        public readonly bool NotCancellable;
+
         public WinPendingIo(in DeviceData Data, int ThreadId, WinEvent? Event)
         {
             File = Data.File;
@@ -47,7 +50,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             IoStatusBlock = Data.IoStatusBlock;
         }
 
-        public WinPendingIo(WinFile File, int ThreadId, WinEvent? Event, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock)
+        public WinPendingIo(WinFile File, int ThreadId, WinEvent? Event, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock, bool NotCancellable = false)
         {
             this.File = File;
             this.ThreadId = ThreadId;
@@ -55,6 +58,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             this.ApcRoutine = ApcRoutine;
             this.ApcContext = ApcContext;
             this.IoStatusBlock = IoStatusBlock;
+            this.NotCancellable = NotCancellable;
         }
     }
 

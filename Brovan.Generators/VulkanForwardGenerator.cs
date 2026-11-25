@@ -652,8 +652,8 @@ namespace Brovan.Generators
         {
             ["vkGetMemoryWin32HandleKHR"] = "BrovVulkGenMemory.GetMemoryWin32Handle",
             ["vkGetMemoryWin32HandlePropertiesKHR"] = "BrovVulkGenMemory.GetMemoryWin32HandleProperties",
-            ["vkWaitForFences"] = "BrovVulkWaits.WaitForFences",
-            ["vkWaitSemaphores"] = "BrovVulkWaits.WaitSemaphores",
+            ["vkWaitForFences"] = "BrovVulkParks.WaitForFences",
+            ["vkWaitSemaphores"] = "BrovVulkParks.WaitSemaphores",
             ["vkQueueSubmit"] = "BrovVulkRetire.QueueSubmit",
             ["vkQueueSubmit2"] = "BrovVulkRetire.QueueSubmit2",
             ["vkQueueBindSparse"] = "BrovVulkRetire.QueueBindSparse",
@@ -689,11 +689,14 @@ namespace Brovan.Generators
         private const uint PostedBatchId = 0xFFFFFFFD;
         private const uint GuestIdBase = 0x80000000;
 
-        // Keep this in step with the handle types that BrovVulkWaits pins.
-        private static readonly HashSet<string> ParkedWaitHandleTypes = new HashSet<string>
+        // Host calls that can run long and end on their own. The guest thread parks while a host thread runs one.
+        private static readonly Dictionary<string, Func<Model, Command, string>> ParkedHostCalls = new Dictionary<string, Func<Model, Command, string>>
         {
-            "VkFence", "VkSemaphore", "VkDevice", "VkInstance",
+            ["vkCreateGraphicsPipelines"] = PipelineParkCondition,
+            ["vkCreateComputePipelines"] = PipelineParkCondition,
         };
+
+        private static readonly Dictionary<string, string> ParkClasses = new Dictionary<string, string>();
 
         // These extensions bypass CPU shader or resource checks.
         private static readonly HashSet<string> CpuWithheldNames = new HashSet<string>(StringComparer.Ordinal)
@@ -1647,6 +1650,129 @@ namespace Brovan.Generators
             return "                if (!st.HasHostIds(" + count + ")) return BrovVulkConstants.VK_ERROR_OUT_OF_HOST_MEMORY;\n";
         }
 
+        private static string PipelineParkCondition(Model m, Command c)
+        {
+            int infoIdx = c.Params.FindIndex(x => x.Type.EndsWith("PipelineCreateInfo", StringComparison.Ordinal) && StructId.ContainsKey(x.Type));
+            int countIdx = c.Params.FindIndex(x => x.Name == "createInfoCount");
+            string cache = Arg(c, "pipelineCache");
+            if (infoIdx < 0 || countIdx < 0 || cache == null)
+                return null;
+
+            string type = c.Params[infoIdx].Type;
+            return "VulkanStandIns.CanParkPipelines(st, " + cache + ", p" + infoIdx + ", p" + countIdx + ", BrovVulkStructMeta.Sizes["
+                + StructId[type] + "], BrovVulkLayout.MemberOffset[\"" + type + ".flags\"])";
+        }
+
+        // Finish runs the checks and the registration when the syscall runs again. The rebuilt structures live only
+        // until the host call ends, so Finish declares no local for them.
+        private static string EmitParkedHostCall(Model m, Command c, int id, string condition, bool fits, List<string> check, List<string> post)
+        {
+            string refuse = "#error BrovVulk: " + c.Name + " is in ParkedHostCalls but has a shape the park cannot carry.\n";
+            if (!fits || condition == null || c.Ret != "VkResult" || c.Params.Count == 0 || c.Params[0].Type != "VkDevice"
+                || ParamKind(m, c.Params[0]) != "HandleIn")
+                return refuse;
+
+            string cls = "Park_" + c.Name;
+            StringBuilder fields = new StringBuilder();
+            StringBuilder ctorParams = new StringBuilder();
+            StringBuilder ctorArgs = new StringBuilder();
+            StringBuilder ctorBody = new StringBuilder();
+            StringBuilder decls = new StringBuilder();
+            List<string> runArgs = new List<string>();
+            string results = null;
+            string destroy = null;
+            for (int i = 0; i < c.Params.Count; i++)
+            {
+                Param p = c.Params[i];
+                string local = "p" + i;
+                string kind = IsCountArrayPair(m, c, i) ? "CountArrayPair" : ParamKind(m, p);
+                if (kind == "HandleIn")
+                {
+                    fields.Append("            private readonly System.IntPtr _").Append(local).Append(";\n");
+                    fields.Append("            private readonly uint _").Append(local).Append("Id;\n");
+                    ctorParams.Append(", System.IntPtr ").Append(local).Append(", uint ").Append(local).Append("Id");
+                    ctorArgs.Append(", ").Append(local).Append(", ").Append(local).Append("Id");
+                    ctorBody.Append("                _").Append(local).Append(" = ").Append(local).Append(";\n");
+                    ctorBody.Append("                _").Append(local).Append("Id = ").Append(local).Append("Id;\n");
+                    decls.Append("                System.IntPtr ").Append(local).Append(" = _").Append(local).Append(";\n");
+                    decls.Append("                uint ").Append(local).Append("Id = _").Append(local).Append("Id;\n");
+                    runArgs.Add("_" + local);
+                }
+                else if (kind == "ScalarIn" && !IsWaitTimeoutParam(m, p))
+                {
+                    string ct = p.Type == "float" || p.Type == "double" ? p.Type : CsType(m, p.Type, 0);
+                    fields.Append("            private readonly ").Append(ct).Append(" _").Append(local).Append(";\n");
+                    ctorParams.Append(", ").Append(ct).Append(' ').Append(local);
+                    ctorArgs.Append(", ").Append(local);
+                    ctorBody.Append("                _").Append(local).Append(" = ").Append(local).Append(";\n");
+                    decls.Append("                ").Append(ct).Append(' ').Append(local).Append(" = _").Append(local).Append(";\n");
+                    runArgs.Add("_" + local);
+                }
+                else if (kind == "AllocatorIn")
+                {
+                    runArgs.Add("System.IntPtr.Zero");
+                }
+                else if (kind == "ArrayIn" && StructId.ContainsKey(p.Type))
+                {
+                    fields.Append("            private readonly System.IntPtr _").Append(local).Append(";\n");
+                    fields.Append("            private readonly uint _").Append(local).Append("n;\n");
+                    ctorParams.Append(", System.IntPtr ").Append(local).Append(", uint ").Append(local).Append("n");
+                    ctorArgs.Append(", ").Append(local).Append(", ").Append(local).Append("n");
+                    ctorBody.Append("                _").Append(local).Append(" = ").Append(local).Append(";\n");
+                    ctorBody.Append("                _").Append(local).Append("n = ").Append(local).Append("n;\n");
+                    decls.Append("                uint ").Append(local).Append("n = _").Append(local).Append("n;\n");
+                    runArgs.Add("_" + local);
+                }
+                else if (kind == "ArrayOut" && results == null && m.Handles.ContainsKey(p.Type) && ParamLenIndex(c, p, i) >= 0
+                    && m.Commands.TryGetValue("vkDestroy" + p.Type.Substring(2), out Command d) && d.Params.Count == 3
+                    && d.Params[0].Type == "VkDevice" && d.Params[1].Type == p.Type && ParamKind(m, d.Params[2]) == "AllocatorIn")
+                {
+                    results = "_" + local;
+                    destroy = d.Name;
+                    fields.Append("            private readonly System.IntPtr[] _").Append(local).Append(";\n");
+                    ctorBody.Append("                _").Append(local).Append(" = new System.IntPtr[p").Append(ParamLenIndex(c, p, i)).Append("];\n");
+                    decls.Append("                System.IntPtr ").Append(local).Append(" = _").Append(local).Append(".Length > 0 ? st.Alloc(BrovVulkGenStruct.CheckedBytes((uint)_")
+                         .Append(local).Append(".Length, 8)) : System.IntPtr.Zero;\n");
+                    decls.Append("                for (int k = 0; k < _").Append(local).Append(".Length; k++) ((System.IntPtr*)").Append(local).Append(")[k] = _").Append(local).Append("[k];\n");
+                    runArgs.Add("(System.IntPtr)results");
+                }
+                else
+                {
+                    return refuse;
+                }
+            }
+
+            if (results == null)
+                return refuse;
+
+            StringBuilder park = new StringBuilder();
+            park.Append("\n        private sealed unsafe class ").Append(cls).Append(" : BrovVulkParks.HostCall\n        {\n");
+            park.Append(fields);
+            park.Append("\n            internal ").Append(cls).Append("(GenState st").Append(ctorParams).Append(") : base(st, p0)\n            {\n");
+            park.Append(ctorBody);
+            park.Append("            }\n\n");
+            park.Append("            internal override uint ResultCount => (uint)").Append(results).Append(".Length;\n\n");
+            park.Append("            internal override int RunHost()\n            {\n");
+            park.Append("                fixed (System.IntPtr* results = ").Append(results).Append(")\n");
+            park.Append("                    return (int)BrovVulkApi.").Append(c.Name).Append("(").Append(string.Join(", ", runArgs)).Append(");\n");
+            park.Append("            }\n\n");
+            park.Append("            internal override void DestroyResults()\n            {\n");
+            park.Append("                for (int k = 0; k < ").Append(results).Append(".Length; k++)\n                {\n");
+            park.Append("                    if (").Append(results).Append("[k] != System.IntPtr.Zero)\n");
+            park.Append("                        BrovVulkApi.").Append(destroy).Append("(Device, ").Append(results).Append("[k], System.IntPtr.Zero);\n");
+            park.Append("                    ").Append(results).Append("[k] = System.IntPtr.Zero;\n                }\n            }\n\n");
+            park.Append("            internal override int Finish(GenBuf w, GenState st, Brovan.Core.Emulation.IGuestMemory inst)\n            {\n");
+            park.Append(decls);
+            park.Append("                int rr = Result;\n");
+            foreach (string s in check) park.Append(s).Append('\n');
+            foreach (string s in post) park.Append(s).Append('\n');
+            park.Append("                return rr;\n            }\n        }\n");
+            ParkClasses[c.Name] = park.ToString();
+
+            return "                if (st.HasBorrowedArena && " + condition + " && st.Parks.TryParkHostCall(st, new " + cls + "(st" + ctorArgs
+                + "), " + id + "u)) return BrovVulkConstants.VK_NOT_READY;\n";
+        }
+
         private static int ParamLenIndex(Command c, Param p, int i)
         {
             if (p.Length == null)
@@ -2168,6 +2294,10 @@ namespace Brovan.Generators
 
                 b.Append("                *(System.UIntPtr*)(p").Append(infoIdx).Append(" + BrovVulkLayout.MemberOffset[\"VkPipelineCacheCreateInfo.initialDataSize\"]) = System.UIntPtr.Zero;\n");
                 b.Append("                *(System.IntPtr*)(p").Append(infoIdx).Append(" + BrovVulkLayout.MemberOffset[\"VkPipelineCacheCreateInfo.pInitialData\"]) = System.IntPtr.Zero;\n");
+                int cacheIdx = c.Params.FindIndex(x => ParamKind(m, x) == "HandleOut");
+                if (cacheIdx < 0)
+                    return null;
+                post.Add("                if (rr >= 0) st.NotePipelineCache(p" + cacheIdx + ", p" + infoIdx + ");");
             }
 
             if (!EmitRenderTracking(m, c, b, post))
@@ -2241,6 +2371,9 @@ namespace Brovan.Generators
             head.Append("            {\n");
             if (c.Name == "vkQueueSubmit" || c.Name == "vkQueueSubmit2")
                 head.Append("                BrovVulkGenMemory.SyncAllMappingsToHost(st, inst);\n");
+            bool parks = ParkedHostCalls.TryGetValue(c.Name, out Func<Model, Command, string> parkCondition);
+            if (parks)
+                head.Append("                st.BeginParkableCall();\n");
             head.Append(b);
             string hostGate = replaced ? null : PhysicalDeviceGate(m, c);
             if (hostGate != null)
@@ -2253,9 +2386,7 @@ namespace Brovan.Generators
             {
                 int parent = DeferredDestroyParentIndex(m, c, forgetIdx);
                 string type = c.Params[forgetIdx].Type;
-                string waits = ParkedWaitHandleTypes.Contains(type)
-                    ? "st.Waits.TryDeferDestroy(" + id + "u, \"" + type + "\", " + (parent >= 0 ? "p" + parent : "System.IntPtr.Zero") + ", p" + forgetIdx + ")"
-                    : null;
+                string waits = "st.Parks.TryDeferDestroy(" + id + "u, \"" + type + "\", " + (parent >= 0 ? "p" + parent : "System.IntPtr.Zero") + ", p" + forgetIdx + ")";
                 string retire = type == "VkDevice" ? "st.Retire.TryDeferDevice(" + id + "u, p" + forgetIdx + ")"
                     : type == "VkInstance" ? "st.Retire.TryDeferInstance(st, " + id + "u, p" + forgetIdx + ", p" + forgetIdx + "Id)"
                     : parent >= 0 && c.Params[parent].Type == "VkDevice"
@@ -2263,10 +2394,13 @@ namespace Brovan.Generators
                     : type == "VkSurfaceKHR" && parent >= 0
                         ? "st.Retire.TryDeferHeld(" + id + "u, \"" + type + "\", p" + parent + ", p" + forgetIdx + ")"
                         : null;
-                string defer = retire == null ? waits : waits == null ? retire : retire + " || " + waits;
-                if (defer != null)
-                    guard = guard == null ? defer : "(" + guard + ") || " + defer;
+                string defer = retire == null ? waits : retire + " || " + waits;
+                guard = guard == null ? defer : "(" + guard + ") || " + defer;
             }
+
+            ParkClasses.Remove(c.Name);
+            if (parks)
+                head.Append(EmitParkedHostCall(m, c, id, parkCondition(m, c), !early && guard == null && !replaced && hostGate == null && guestTimeout == null, check, post));
 
             if (c.Ret == "void")
             {
@@ -2289,7 +2423,7 @@ namespace Brovan.Generators
                 head.Append(early ? "                int rr = early < 0 ? early : (int)" : "                int rr = (int)").Append(call).Append(";\n");
                 // A host answer at timeout 0 is a poll, not the end of the guest's timeout.
                 if (guestTimeout != null)
-                    head.Append("                if (rr == BrovVulkConstants.VK_TIMEOUT && ").Append(guestTimeout).Append(" != 0 && !st.Waits.Waited) rr = BrovVulkConstants.VK_NOT_READY;\n");
+                    head.Append("                if (rr == BrovVulkConstants.VK_TIMEOUT && ").Append(guestTimeout).Append(" != 0 && !st.Parks.Waited) rr = BrovVulkConstants.VK_NOT_READY;\n");
                 foreach (string s in check) head.Append(s).Append("\n");
                 foreach (string s in post) head.Append(s).Append("\n");
                 head.Append("                return rr;\n            }\n");
@@ -4084,6 +4218,8 @@ namespace Brovan.Generators
                 if (hostCase == null)
                     continue;
                 AppendHostCase(db, methodB, c.Name, i, hostCase);
+                if (ParkClasses.TryGetValue(c.Name, out string parkClass))
+                    methodB.Append(parkClass);
                 string deferredDestroy = DeferredDestroyCall(m, c);
                 if (deferredDestroy != null)
                     deferB.Append("            case ").Append(i).Append("u: ").Append(deferredDestroy).Append("; return;\n");

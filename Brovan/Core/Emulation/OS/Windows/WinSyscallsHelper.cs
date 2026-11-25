@@ -319,11 +319,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (State?.HostWork is not T Work)
                 return null;
 
+            if (!State.SyncIoRerun)
+            {
+                State.DropHostWork();
+                return null;
+            }
+
             State.HostWork = null;
-            return State.SyncIoRerun ? Work : null;
+            return Work;
         }
 
-        internal static void EndBrovVulkWaits()
+        internal static void EndBrovVulkParks()
         {
             if (!DeviceRegistry.IsValueCreated)
                 return;
@@ -331,12 +337,13 @@ namespace Brovan.Core.Emulation.OS.Windows
             foreach (IWinDevice Device in DeviceRegistry.Value.Values)
             {
                 if (Device is BrovVulkDevice Vulkan)
-                    Vulkan.GenState.Waits.EndCalls();
+                    Vulkan.GenState.Parks.EndCalls();
             }
         }
 
-        // The emulator's final report does not walk the device lock, which belongs to the process-wide device.
-        internal static void ReportBrovVulkLock()
+        // The emulator's final report does not walk the device lock or the park stats, which belong to the process-wide
+        // device.
+        internal static void ReportBrovVulk()
         {
             if (!DeviceRegistry.IsValueCreated)
                 return;
@@ -344,7 +351,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             foreach (IWinDevice Device in DeviceRegistry.Value.Values)
             {
                 if (Device is BrovVulkDevice Vulkan)
-                    Vulkan.ReportLock();
+                    Vulkan.Report();
             }
         }
 
@@ -375,11 +382,11 @@ namespace Brovan.Core.Emulation.OS.Windows
             Display?.Dispose();
         }
 
-        // I/O that NtCancelSynchronousIoFile can cancel.
-        internal WinPendingIo SynchronousIo(WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock)
+        // I/O that NtCancelSynchronousIoFile finds, and cancels unless it is NotCancellable.
+        internal WinPendingIo SynchronousIo(WinFile File, ulong EventHandle, ulong ApcRoutine, ulong ApcContext, ulong IoStatusBlock, bool NotCancellable = false)
         {
             WinEvent Event = EventHandle == 0 ? null : GetEventByHandle(EventHandle, AccessMask.GiveTemp);
-            return new WinPendingIo(File, Emulator.CurrentThreadId, Event, ApcRoutine, ApcContext, IoStatusBlock);
+            return new WinPendingIo(File, Emulator.CurrentThreadId, Event, ApcRoutine, ApcContext, IoStatusBlock, NotCancellable);
         }
 
         private bool TryParkForSyscallRetry(long Deadline, Task HostWork, WinPendingIo? SyncIo)
@@ -394,7 +401,11 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             State.RetrySyscallNumber = ReadSyscallNumber();
             if (HostWork != null)
+            {
+                if (!ReferenceEquals(State.HostWork, HostWork))
+                    State.DropHostWork();
                 State.HostWork = HostWork;
+            }
             State.ResetSyncIo();
             State.SyncIo = SyncIo;
 
@@ -550,6 +561,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Thread == null || Thread.State != EmulatedThreadState.Terminated)
                 return;
 
+            WinEmulatedThread.TryGetState(Thread)?.DropHostWork();
             Win32kHelper.DropThreadMessages(Emulator, Thread.ThreadId, DestroyThreadWindows(Thread.ThreadId));
             Win32kHelper.DropSendsFrom(Emulator, Thread);
             EndReceivedSends(Thread);

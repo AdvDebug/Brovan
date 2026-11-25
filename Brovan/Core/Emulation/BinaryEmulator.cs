@@ -441,7 +441,7 @@ namespace Brovan.Core.Emulation
 
         private const int IdleWaitBackstopMs = 50;
         private const int SweepIntervalMs = 1;
-        private const int SchedulerThreadStackSize = 4 * 1024 * 1024;
+        internal const int SchedulerThreadStackSize = 4 * 1024 * 1024;
 
         private bool IdleWaitSkipped;
 
@@ -4803,7 +4803,7 @@ namespace Brovan.Core.Emulation
             {
                 WinHelper?.AfdRequests.Dispose();
                 if (WinHelper != null)
-                    OS.Windows.WinSysHelper.EndBrovVulkWaits();
+                    OS.Windows.WinSysHelper.EndBrovVulkParks();
 
                 if (_emulator != null)
                 {

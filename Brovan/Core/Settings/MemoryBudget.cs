@@ -62,6 +62,11 @@ namespace Brovan.Core.Settings
 
         public static int VulkanWaitThreads { get; private set; }
 
+        // Host threads for parked Vulkan calls. A queued or running call holds a 1 MB arena.
+        public static int VulkanHostCallThreads { get; private set; }
+
+        public static int VulkanHostCallQueue { get; private set; }
+
         public static int VulkanRetiredReleases { get; private set; }
 
         public static long VulkanHeldDescriptors { get; private set; }
@@ -180,6 +185,8 @@ namespace Brovan.Core.Settings
             KernelReadViewBytes = (long)Megabytes(Pick(Off: 256, Minimal: 192, Medium: 128, High: 64, Aggressive: 32));
             KernelFileCells = (int)Pick(Off: 512, Minimal: 384, Medium: 256, High: 128, Aggressive: 64);
             VulkanWaitThreads = (int)Pick(Off: 8, Minimal: 8, Medium: 6, High: 4, Aggressive: 2);
+            VulkanHostCallThreads = (int)Pick(Off: 4, Minimal: 4, Medium: 3, High: 2, Aggressive: 1);
+            VulkanHostCallQueue = (int)Pick(Off: 16, Minimal: 16, Medium: 8, High: 4, Aggressive: 2);
             VulkanRetiredReleases = (int)Pick(Off: 65536, Minimal: 32768, Medium: 16384, High: 8192, Aggressive: 4096);
             VulkanHeldDescriptors = (long)Pick(Off: 4194304, Minimal: 4194304, Medium: 2097152, High: 1048576, Aggressive: 524288);
             VulkanRetainedBytes = (long)Megabytes(Pick(Off: 64, Minimal: 48, Medium: 32, High: 16, Aggressive: 8));

@@ -60,6 +60,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (IoRequestToCancel != 0 && Io.IoStatusBlock != IoRequestToCancel)
                 return false;
 
+            // NT: IoCancelIrp's answer is not checked, so an IRP with no cancel routine is found and runs to its end.
+            if (Io.NotCancellable)
+                return true;
+
             State.SyncIoCancelled = true;
             Instance.WinHelper.CompletePendingIo(in Io, NTSTATUS.STATUS_CANCELLED, 0);
             Instance.WakeSignal.Bump();
