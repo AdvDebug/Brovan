@@ -24,8 +24,8 @@ namespace Brovan.Core.Emulation.OS.Windows
             if (Region1.Value.AllocationBase == Region2.Value.AllocationBase)
                 return NTSTATUS.STATUS_SUCCESS;
 
-            WinModule View1 = Instance.WinHelper.FindMappedImageViewByAddress(Address1);
-            WinModule View2 = Instance.WinHelper.FindMappedImageViewByAddress(Address2);
+            WinImageView? View1 = Instance.WinHelper.FindMappedImageViewByAddress(Address1);
+            WinImageView? View2 = Instance.WinHelper.FindMappedImageViewByAddress(Address2);
 
             if (View1 == null || View2 == null)
                 return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
@@ -37,13 +37,8 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            string Path1 = !string.IsNullOrEmpty(View1.CanonicalImagePath)
-                ? View1.CanonicalImagePath
-                : Instance.WinHelper.CanonicalizeImagePath(!string.IsNullOrEmpty(View1.Path) ? View1.Path : View1.Name);
-
-            string Path2 = !string.IsNullOrEmpty(View2.CanonicalImagePath)
-                ? View2.CanonicalImagePath
-                : Instance.WinHelper.CanonicalizeImagePath(!string.IsNullOrEmpty(View2.Path) ? View2.Path : View2.Name);
+            string Path1 = !string.IsNullOrEmpty(View1.CanonicalPath) ? View1.CanonicalPath : Instance.WinHelper.CanonicalizeImagePath(View1.GuestPath);
+            string Path2 = !string.IsNullOrEmpty(View2.CanonicalPath) ? View2.CanonicalPath : Instance.WinHelper.CanonicalizeImagePath(View2.GuestPath);
 
             if (!string.IsNullOrEmpty(Path1) && !string.IsNullOrEmpty(Path2) &&
                 string.Equals(Path1, Path2, StringComparison.OrdinalIgnoreCase))

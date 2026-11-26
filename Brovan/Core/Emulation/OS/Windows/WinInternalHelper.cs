@@ -1245,9 +1245,9 @@ namespace Brovan.Core.Emulation.OS.Windows
                 var existing = WinHelper.WinModules.FirstOrDefault(m => m != null && m.MappedBase == info.DllBase);
                 if (existing == null)
                 {
-                    WinModule MappedView = WinHelper.FindMappedImageViewByAddress(info.DllBase);
-                    if (MappedView != null && MappedView.MappedBase == info.DllBase)
-                        existing = MappedView;
+                    WinImageView? MappedView = WinHelper.FindMappedImageViewByAddress(info.DllBase);
+                    if (MappedView != null && MappedView.Base == info.DllBase)
+                        existing = MappedView.Module;
                 }
 
                 if (existing == null)

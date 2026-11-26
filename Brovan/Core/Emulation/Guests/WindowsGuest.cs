@@ -1249,7 +1249,7 @@ namespace Brovan.Core.Emulation.Guests
                 ObjectNeedsKernelLock,
 
                 // Taken inside a call that runs without it.
-                ViewUnmap,
+                ImageUnmap,
                 SectionRelease,
                 Namespace,
                 HandleChanged,
@@ -2531,6 +2531,7 @@ namespace Brovan.Core.Emulation.Guests
             }
 
             WinHelper.AddModule(MainModule, true);
+            WinHelper.RegisterImageView(MainModule, 0, null, Instance.GuestImagePath ?? string.Empty);
             LoadNtdll(Instance);
             if (IsPeImage && Instance._binary.Architecture != BinaryArchitecture.x64)
             {
@@ -2958,9 +2959,11 @@ namespace Brovan.Core.Emulation.Guests
                     return;
                 }
 
+                string GuestPath = (Instance._binary.Architecture == BinaryArchitecture.x64 ? OS.Windows.KnownDlls.NativeDirectory : OS.Windows.KnownDlls.Wow64Directory)
+                    + "\\ntdll.dll";
                 using (BinaryFile Library = Instance.LoadBinary(NtdllPath))
                 {
-                    _ntdllModule = Instance.LoadWinLibrary(Library, true, MapBySections: false);
+                    _ntdllModule = Instance.LoadWinLibrary(Library, true, GuestPath, MapBySections: false);
                 }
             }
             catch (Exception ex)

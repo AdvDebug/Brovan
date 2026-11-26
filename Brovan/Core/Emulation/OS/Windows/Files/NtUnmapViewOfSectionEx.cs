@@ -1,5 +1,4 @@
 using System;
-using Brovan.Core.Emulation.Guests;
 using Brovan.Core.Helpers;
 using static Brovan.Core.Helpers.BinaryHelpers;
 
@@ -44,19 +43,19 @@ namespace Brovan.Core.Emulation.OS.Windows
                 || Process.PID != Instance.WinHelper.PID)
                 return NTSTATUS.STATUS_INVALID_HANDLE;
 
-            WinSection? Release = null;
+            WinSysHelper.UnmapTail Tail = default;
             try
             {
                 // NT: only a view that replaced a placeholder turns back into one, and only from its base.
                 if ((Flags & MemPreservePlaceholder) != 0)
-                    return UnmapToPlaceholder(Instance, BaseAddress, out Release);
+                    return UnmapToPlaceholder(Instance, BaseAddress, out Tail);
 
-                if (!Unmap(Instance, BaseAddress, out Release))
+                if (!Instance.WinHelper.TryUnmapView(BaseAddress, Images: true, out Tail))
                     return NTSTATUS.STATUS_NOT_MAPPED_VIEW;
             }
             finally
             {
-                ReleaseAfterUnmap(Instance, Release);
+                Instance.WinHelper.FinishUnmap(Tail);
             }
 
             if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
@@ -70,22 +69,9 @@ namespace Brovan.Core.Emulation.OS.Windows
             return NTSTATUS.STATUS_SUCCESS;
         }
 
-        private static bool Unmap(BinaryEmulator Instance, ulong BaseAddress, out WinSection? Release)
+        private static NTSTATUS UnmapToPlaceholder(BinaryEmulator Instance, ulong BaseAddress, out WinSysHelper.UnmapTail Tail)
         {
-            WinSysHelper.ViewUnmap Outcome = Instance.WinHelper.TryUnmapView(BaseAddress, out Release);
-            if (Outcome == WinSysHelper.ViewUnmap.NeedsKernelLock)
-            {
-                WindowsGuest.SyscallDomainStats.FellBack(WindowsGuest.SyscallDomainStats.Reason.ViewUnmap);
-                using (Instance.EnterKernelLockScope())
-                    Outcome = Instance.WinHelper.TryUnmapView(BaseAddress, out Release);
-            }
-
-            return Outcome == WinSysHelper.ViewUnmap.Unmapped;
-        }
-
-        private static NTSTATUS UnmapToPlaceholder(BinaryEmulator Instance, ulong BaseAddress, out WinSection? Release)
-        {
-            Release = null;
+            Tail = default;
             using RankedLock.Scope AddressHold = Instance.AddressSpace.Hold();
             if (!Instance.WinHelper.TryFindSectionView(BaseAddress, out WinSectionView View) || !View.FromPlaceholder || View.Base != BaseAddress)
             {
@@ -93,7 +79,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return IsView ? NTSTATUS.STATUS_CONFLICTING_ADDRESSES : NTSTATUS.STATUS_NOT_MAPPED_VIEW;
             }
 
-            if (Instance.WinHelper.TryUnmapView(View.Base, out Release) != WinSysHelper.ViewUnmap.Unmapped)
+            if (!Instance.WinHelper.TryUnmapView(View.Base, Images: false, out Tail))
                 return NTSTATUS.STATUS_NOT_MAPPED_VIEW;
 
             if (!Instance.ReservePlaceholder(View.Base, View.Size))
@@ -103,18 +89,6 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             return NTSTATUS.STATUS_SUCCESS;
-        }
-
-        // The caller holds no address space scope, so taking KernelLock keeps the lock order.
-        private static void ReleaseAfterUnmap(BinaryEmulator Instance, WinSection? Release)
-        {
-            if (Release == null || !Instance.WinHelper.MayRelease(Release))
-                return;
-
-            if (!Instance.KernelLockCovered)
-                WindowsGuest.SyscallDomainStats.FellBack(WindowsGuest.SyscallDomainStats.Reason.SectionRelease);
-            using (Instance.EnterKernelLockScope())
-                Instance.WinHelper.ReleaseSectionIfUnreferenced(Release);
         }
     }
 }

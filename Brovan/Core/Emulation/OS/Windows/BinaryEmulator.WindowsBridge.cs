@@ -1858,7 +1858,7 @@ namespace Brovan.Core.Emulation
                     continue;
 
                 if (!_emulator.SetMemoryProtection(AlignedBase, AlignedEnd - AlignedBase, Range.Protection))
-                    continue;
+                    return false;
 
                 uint EffectiveWinProtect = Range.WinProtect != 0 ? Range.WinProtect : (WinHelper != null ? (uint)WinHelper.ConvertInternalToWinProtect(Range.Protection) : 0);
                 AlignedRanges.Add((AlignedBase, AlignedEnd, Range.Protection, EffectiveWinProtect));
@@ -2145,7 +2145,9 @@ namespace Brovan.Core.Emulation
             return ApplyWinProtectionRanges(Ranges);
         }
 
-        public WinModule LoadWinLibrary(BinaryFile Library, bool TriggerMessage, bool AddToModuleList = true, ulong RequestedBase = 0, bool MapBySections = false, ulong ImageBase = 0)
+        // Without KernelLock the caller passes the image identity. A null CanonicalPath takes it from a table KernelLock owns.
+        public WinModule LoadWinLibrary(BinaryFile Library, bool TriggerMessage, string GuestPath, bool AddToModuleList = true, ulong RequestedBase = 0,
+            bool MapBySections = false, ulong ImageBase = 0, ulong ImageSectionId = 0, string? CanonicalPath = null)
         {
             if (Library.FileFormat != BinaryFormat.PE)
                 throw new InvalidOperationException("Emulator tried to load a non-valid PE library.");
@@ -2191,7 +2193,8 @@ namespace Brovan.Core.Emulation
             if (BaseAddress == 0)
                 return null;
 
-            // The claimed range is this image's, so the fill reads the file with no address space lock held.
+            // The claimed range is this image's, so the fill reads the file with no address space lock held. NT shows no
+            // image page before its content. The claim stays read-write because a no-access range costs a memslot rebuild on KVM.
             if (Fill && !WritePeImageHeadersAndSections(Library, BaseAddress, ImageSize, Module, Extents))
             {
                 UnmapMemoryRuns(BaseAddress, ImageSize, UnmapImage: true);
@@ -2226,7 +2229,8 @@ namespace Brovan.Core.Emulation
                 return null;
             }
 
-            WinHelper.RegisterMappedImageView(Module, !AddToModuleList);
+            Module.IsSectionView = !AddToModuleList;
+            WinHelper.RegisterImageView(Module, ImageSectionId, CanonicalPath, GuestPath);
 
             if (AddToModuleList)
                 WinHelper.AddModule(Module, TriggerMessage);

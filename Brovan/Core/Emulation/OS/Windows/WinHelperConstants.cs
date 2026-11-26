@@ -192,13 +192,15 @@ namespace Brovan.Core.Emulation.OS.Windows
         public string Path;
         public string CanonicalImagePath;
         public ulong ImageSectionId;
-        public int ImageMapOrdinal;
         public bool IsSectionView;
         public bool Initialized;
         public Dictionary<ulong, string> Exports = new Dictionary<ulong, string>();
         public Dictionary<string, ulong> ExportsByName = new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
         public Dictionary<ulong, PortableBinarySection> Sections = new Dictionary<ulong, PortableBinarySection>();
     }
+
+    // The tracker rewrites Module from the guest's loader list, so only KernelLock callers read it.
+    internal sealed record WinImageView(ulong Base, ulong Size, ulong ImageSectionId, string CanonicalPath, string GuestPath, WinModule Module);
 
     internal readonly struct MappedImage : IImageReader
     {
@@ -2366,6 +2368,8 @@ namespace Brovan.Core.Emulation.OS.Windows
     }
 
     // Views, the view counts, BackingAddress, Storage, SharedMemoryPath and Released change under the address space lock.
+    // An image section's Path, ImageHostPath and identity change under KernelLock and the address space lock, its
+    // ImageBase and Size under the address space lock, so an image map reads them in one hold.
     public class WinSection : IHandleObject
     {
         public string Name;
@@ -2519,6 +2523,8 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         public string MappedImageCanonicalPath;
+
+        public string? ImageHostPath;
 
         public string ObjectId => Name;
         public HandleType ObjectType => HandleType.SectionHandle;

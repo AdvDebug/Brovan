@@ -273,11 +273,11 @@ namespace Brovan.Core.Emulation.OS.Windows
         // NT checks the signing level of the image. Memory outside an image has none, and Brovan passes every image.
         private static NTSTATUS CheckImageRange(BinaryEmulator Instance, ulong Address, uint Size, bool ExecuteRead)
         {
-            NTSTATUS Status = NtQueryVirtualMemory.QueryImageView(Instance, Address, out WinModule? Module);
+            NTSTATUS Status = NtQueryVirtualMemory.QueryImageView(Instance, Address, out WinImageView? View);
             if (Status != NTSTATUS.STATUS_SUCCESS)
                 return Status;
 
-            if (Module == null)
+            if (View == null)
                 return NTSTATUS.STATUS_INVALID_IMAGE_HASH;
 
             return ExecuteRead ? CheckExecuteRead(Instance, Address, Size) : NTSTATUS.STATUS_SUCCESS;
@@ -732,7 +732,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (References == ulong.MaxValue || ++References != 1)
                     return NTSTATUS.STATUS_SUCCESS;
 
-                WinModule? Image = Instance.WinHelper.FindMappedImageViewByAddress(ImageBase);
+                WinImageView? Image = Instance.WinHelper.FindMappedImageViewByAddress(ImageBase);
                 NTSTATUS Status = NTSTATUS.STATUS_SUCCESS;
                 while (Decrypted < Segments.Length)
                 {
@@ -754,7 +754,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if (References == 0 || --References != 0)
                     return NTSTATUS.STATUS_SUCCESS;
 
-                WinModule? Image = Instance.WinHelper.FindMappedImageViewByAddress(ImageBase);
+                WinImageView? Image = Instance.WinHelper.FindMappedImageViewByAddress(ImageBase);
                 while (Decrypted > 0)
                 {
                     NTSTATUS Status = EncryptSegment(Instance, Image, Segments[Decrypted - 1]);
@@ -769,7 +769,7 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             // The image was relocated over the ciphertext, so the first decryption takes the relocations out first and
             // puts them back into the plaintext.
-            private NTSTATUS DecryptSegment(BinaryEmulator Instance, WinModule? Image, in Segment Entry, bool First)
+            private NTSTATUS DecryptSegment(BinaryEmulator Instance, WinImageView? Image, in Segment Entry, bool First)
             {
                 if (First && (Entry.Flags & SkipFirstDecrypt) != 0)
                     return NTSTATUS.STATUS_SUCCESS;
@@ -802,7 +802,7 @@ namespace Brovan.Core.Emulation.OS.Windows
                 return NTSTATUS.STATUS_SUCCESS;
             }
 
-            private NTSTATUS EncryptSegment(BinaryEmulator Instance, WinModule? Image, in Segment Entry)
+            private NTSTATUS EncryptSegment(BinaryEmulator Instance, WinImageView? Image, in Segment Entry)
             {
                 ulong Address = ImageBase + Entry.Rva;
                 bool Code = (Entry.Flags & DataSegment) == 0;
@@ -827,10 +827,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
 
             // NT makes data segments PAGE_READWRITE before it writes them, and locks code segments without a change.
-            private static NTSTATUS OpenSegment(BinaryEmulator Instance, WinModule? Image, ulong Address, uint Size, bool Code)
+            private static NTSTATUS OpenSegment(BinaryEmulator Instance, WinImageView? Image, ulong Address, uint Size, bool Code)
             {
                 NTSTATUS Status;
-                if (Image != null && Address - Image.MappedBase < Image.SizeOfImage)
+                if (Image != null && Address - Image.Base < Image.Size)
                     Status = Code ? CheckExecuteRead(Instance, Address, Size) : NTSTATUS.STATUS_SUCCESS;
                 else
                     Status = CheckImageRange(Instance, Address, Size, Code);

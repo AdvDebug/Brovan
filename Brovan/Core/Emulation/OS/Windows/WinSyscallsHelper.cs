@@ -2796,8 +2796,6 @@ namespace Brovan.Core.Emulation.OS.Windows
         private readonly Dictionary<string, List<WinFile>> OpenFilesByPath = new Dictionary<string, List<WinFile>>(StringComparer.OrdinalIgnoreCase);
         public List<WinMutex> WinMutexes = new List<WinMutex>();
         public List<WinModule> WinModules = new List<WinModule>();
-        public List<WinModule> MappedImageViews = new List<WinModule>();
-        private readonly Dictionary<string, int> ImageViewCountsByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal KuserSharedDataManager KuserSharedData;
         internal RPC.Ports.BaseSrvNlsUserInfo NlsUserInfo;
         internal Warbird? Warbird;
@@ -3815,10 +3813,12 @@ namespace Brovan.Core.Emulation.OS.Windows
             View,
             Backing,
             System,
+            Image,
         }
 
-        // The one index from an address to its section. Section is null only for a system view.
-        private readonly record struct SectionRange(ulong Base, ulong End, SectionRangeKind Kind, bool GuestUnmaps, WinSection? Section);
+        // The one index from an address to its section or image. Section is null for a system view and an image.
+        private readonly record struct SectionRange(ulong Base, ulong End, SectionRangeKind Kind, bool GuestUnmaps, WinSection? Section,
+            WinImageView? Image = null);
 
         // Sorted by base and disjoint. The address space lock covers it, the section views and their counts.
         private readonly List<SectionRange> SectionRanges = new();
@@ -3847,14 +3847,15 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Found;
         }
 
-        internal void TrackSectionRange(ulong Base, ulong Size, SectionRangeKind Kind, WinSection? Section = null, bool GuestUnmaps = false)
+        internal void TrackSectionRange(ulong Base, ulong Size, SectionRangeKind Kind, WinSection? Section = null, bool GuestUnmaps = false,
+            WinImageView? Image = null)
         {
             using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
             int Index = FindSectionRangeIndex(Base);
             if (Index >= 0 && SectionRanges[Index].Base == Base)
                 return;
 
-            SectionRanges.Insert(Index + 1, new SectionRange(Base, Base + Size, Kind, GuestUnmaps, Section));
+            SectionRanges.Insert(Index + 1, new SectionRange(Base, Base + Size, Kind, GuestUnmaps, Section, Image));
         }
 
         private bool TryFindSectionRange(ulong Address, out int Index)
@@ -3917,8 +3918,21 @@ namespace Brovan.Core.Emulation.OS.Windows
         public bool IsSectionViewAddress(ulong Address)
         {
             using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
-            return TryFindSectionRange(Address, out _);
+            return TryFindSectionRange(Address, out int Index) && SectionRanges[Index].Kind != SectionRangeKind.Image;
         }
+
+        // A gap between the image's regions can hold a private allocation, which is not part of the view.
+        internal WinImageView? FindMappedImageViewByAddress(ulong Address)
+        {
+            using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
+            return TryFindSectionRange(Address, out int Index) && SectionRanges[Index].Image is WinImageView View
+                && Emulator.TryFindMemoryRegion(Address, out MemoryRegion Region) && IsRegionOfImage(Region, View)
+                ? View
+                : null;
+        }
+
+        private static bool IsRegionOfImage(in MemoryRegion Region, WinImageView View)
+            => (Region.Flags & AllocationType.Image) != 0 && Region.AllocationBase == View.Base;
 
         // NT: a section view, data or image, of any kind; Region is the region at Address.
         internal bool IsViewAddress(ulong Address, in MemoryRegion Region)
@@ -3986,73 +4000,84 @@ namespace Brovan.Core.Emulation.OS.Windows
             }
         }
 
-        internal enum ViewUnmap
-        {
-            Unmapped,
-            NotMapped,
-            NeedsKernelLock,
-        }
+        // What an unmap leaves for after its address space scope, both under KernelLock: the release of a section that
+        // lost a view, and the module list and loader tracker of an image.
+        internal readonly record struct UnmapTail(WinSection? Section, WinImageView? Image);
 
-        // For a caller under KernelLock, which releases a section that lost its last view at once.
+        // For a caller under KernelLock that unmaps a view it made. An image at the address is not such a view.
         public bool UnmapViewOfSection(ulong BaseAddress)
         {
-            ViewUnmap Outcome = TryUnmapView(BaseAddress, out WinSection? Release);
-            if (Release != null)
-                ReleaseSectionIfUnreferenced(Release);
-            return Outcome == ViewUnmap.Unmapped;
+            bool Unmapped = TryUnmapView(BaseAddress, Images: false, out UnmapTail Tail);
+            FinishUnmap(Tail);
+            return Unmapped;
         }
 
-        // The index kinds need only the address space, anything else needs KernelLock. The caller releases Release once
-        // it holds no address space scope.
-        internal ViewUnmap TryUnmapView(ulong BaseAddress, out WinSection? Release)
+        // Every kind needs only the address space. The caller runs FinishUnmap once it holds no address space scope.
+        internal bool TryUnmapView(ulong BaseAddress, bool Images, out UnmapTail Tail)
         {
             using RankedLock.Scope AddressHold = Emulator.AddressSpace.Hold();
-            Release = null;
-            if (BaseAddress == 0)
-                return ViewUnmap.NotMapped;
+            Tail = default;
+            if (BaseAddress == 0 || !TryFindSectionRange(BaseAddress, out int RangeIndex))
+                return false;
 
-            if (TryFindSectionRange(BaseAddress, out int RangeIndex))
-                return UnmapIndexedView(BaseAddress, RangeIndex, out Release);
+            if (SectionRanges[RangeIndex].Kind != SectionRangeKind.Image)
+                return UnmapIndexedView(BaseAddress, RangeIndex, out Tail);
 
-            if (!Emulator.KernelLockCovered)
-                return ViewUnmap.NeedsKernelLock;
-
-            WinModule Module = FindMappedImageViewByAddress(BaseAddress);
-            return Module != null && UnmapImageView(Module) ? ViewUnmap.Unmapped : ViewUnmap.NotMapped;
+            return Images && Emulator.TryFindMemoryRegion(BaseAddress, out MemoryRegion Region) && IsRegionOfImage(Region, SectionRanges[RangeIndex].Image!)
+                && UnmapImageView(RangeIndex, out Tail);
         }
 
-        private ViewUnmap UnmapIndexedView(ulong BaseAddress, int RangeIndex, out WinSection? Release)
+        internal void FinishUnmap(in UnmapTail Tail)
         {
-            Release = null;
+            if (Tail.Section != null && MayRelease(Tail.Section))
+            {
+                if (!Emulator.KernelLockCovered)
+                    WindowsGuest.SyscallDomainStats.FellBack(WindowsGuest.SyscallDomainStats.Reason.SectionRelease);
+                using (Emulator.EnterKernelLockScope())
+                    ReleaseSectionIfUnreferenced(Tail.Section);
+            }
+
+            if (Tail.Image != null)
+            {
+                if (!Emulator.KernelLockCovered)
+                    WindowsGuest.SyscallDomainStats.FellBack(WindowsGuest.SyscallDomainStats.Reason.ImageUnmap);
+                using (Emulator.EnterKernelLockScope())
+                    ForgetUnmappedImage(Tail.Image);
+            }
+        }
+
+        private bool UnmapIndexedView(ulong BaseAddress, int RangeIndex, out UnmapTail Tail)
+        {
+            Tail = default;
             SectionRange Range = SectionRanges[RangeIndex];
             if (Range.Kind == SectionRangeKind.System)
             {
                 if (!Range.GuestUnmaps)
-                    return ViewUnmap.NotMapped;
+                    return false;
 
                 RemoveSystemView(RangeIndex);
-                return ViewUnmap.Unmapped;
+                return true;
             }
 
             WinSection Section = Range.Section!;
             if (Range.Kind == SectionRangeKind.Backing)
             {
                 if (Section.BackingViewCount == 0)
-                    return ViewUnmap.NotMapped;
+                    return false;
 
                 Section.BackingViewCount--;
                 if (Section.MappedViewCount > 0)
                     Section.MappedViewCount--;
 
                 ForgetLockedPages(Section.BackingAddress, Section.BackingAddress + Section.Size);
-                Release = Section;
-                return ViewUnmap.Unmapped;
+                Tail = new UnmapTail(Section, null);
+                return true;
             }
 
             // A section that keeps its storage in the views themselves has to forget the range as it goes
             // away, or a later view of the same section offset would alias pages that are no longer mapped.
             if (!Section.RemoveViewContaining(BaseAddress, out WinSectionView Removed))
-                return ViewUnmap.NotMapped;
+                return false;
 
             UntrackSectionRange(Removed.Base);
 
@@ -4064,16 +4089,17 @@ namespace Brovan.Core.Emulation.OS.Windows
 
             bool UnmappedView = Emulator.UnmapMemoryRuns(Removed.Base, Removed.Size);
             ForgetLockedPages(Removed.Base, Removed.Base + Removed.Size);
-            Release = Section;
-            return UnmappedView ? ViewUnmap.Unmapped : ViewUnmap.NotMapped;
+            Tail = new UnmapTail(Section, null);
+            return UnmappedView;
         }
 
-        private bool UnmapImageView(WinModule Module)
+        private bool UnmapImageView(int RangeIndex, out UnmapTail Tail)
         {
-            ulong ViewBase = Module.MappedBase;
-            ulong End = ViewBase + Module.SizeOfImage;
+            Tail = default;
+            WinImageView View = SectionRanges[RangeIndex].Image!;
+            ulong End = View.Base + View.Size;
 
-            int First = Emulator.FindFirstRegionStartingBefore(ViewBase) + 1;
+            int First = Emulator.FindFirstRegionStartingBefore(View.Base) + 1;
             int Last = Emulator.FindFirstRegionStartingBefore(End) + 1;
 
             bool UnmappedAny = false;
@@ -4081,7 +4107,7 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 MemoryRegion Region = Emulator._memory[i];
                 ulong Size = Region.Size != 0 ? Region.Size : (Region.RequestedSize + 0xFFF) & ~0xFFFUL;
-                if (Size == 0)
+                if (Size == 0 || !IsRegionOfImage(Region, View))
                     continue;
 
                 if (Emulator._emulator.UnmapMemory(Region.BaseAddress, Size))
@@ -4095,22 +4121,34 @@ namespace Brovan.Core.Emulation.OS.Windows
                 }
             }
 
-            if (UnmappedAny)
+            if (!UnmappedAny)
+                return false;
+
+            SectionRanges.RemoveAt(RangeIndex);
+            ForgetLockedPages(View.Base, End);
+            Tail = new UnmapTail(null, View);
+            return true;
+        }
+
+        // A load that took the base again before this ran keeps its module marked loaded. A view the guest's loader list
+        // never held changes nothing the tracker mirrors.
+        private void ForgetUnmappedImage(WinImageView View)
+        {
+            if (View.Module.IsSectionView)
+                return;
+
+            bool Reused;
+            using (Emulator.AddressSpace.Hold())
+                Reused = TryFindSectionRange(View.Base, out int Index) && SectionRanges[Index].Kind == SectionRangeKind.Image;
+
+            if (!Reused)
             {
-                ForgetLockedPages(ViewBase, End);
-                UnregisterMappedImageView(Module);
-
-                if (!Module.IsSectionView)
-                {
-                    WinModule LoadedModule = WinModules?.FirstOrDefault(M => M != null && M.MappedBase == Module.MappedBase);
-                    if (LoadedModule != null)
-                        LoadedModule.Initialized = false;
-                }
-
-                LdrTracker?.NotifyImageMapped();
+                WinModule? Loaded = WinModules.FirstOrDefault(M => M != null && M.MappedBase == View.Base);
+                if (Loaded != null)
+                    Loaded.Initialized = false;
             }
 
-            return UnmappedAny;
+            LdrTracker?.NotifyImageMapped();
         }
 
         // A section that lost its last view and has no handle left; the release itself needs KernelLock.
@@ -4891,82 +4929,24 @@ namespace Brovan.Core.Emulation.OS.Windows
             return Slash >= 0 ? Path.Substring(Slash + 1) : Path;
         }
 
-        /// <param name="IsSectionView">Whether the image was mapped by NtMapViewOfSection rather than initial emulator loading.</param>
-        /// <returns>One-based mapping ordinal for this canonical image path.</returns>
-        public int RegisterMappedImageView(WinModule Module, bool IsSectionView)
+        // NT binds an image section to its file when the section is made, with the creator's WOW64 redirection.
+        internal static string? ImageHostPathOf(WindowsFileStream Stream) => Stream.ExistsAsFile ? Stream.EffectiveReadHostPath : null;
+
+        internal void RegisterImageView(WinModule Module, ulong ImageSectionId, string? CanonicalPath, string GuestPath)
         {
-            if (Module == null)
-                return 0;
-
-            string CanonicalPath = CanonicalizeImagePath(!string.IsNullOrEmpty(Module.Path) ? Module.Path : Module.Name);
-            Module.CanonicalImagePath = CanonicalPath;
-            if (Module.ImageSectionId == 0 && !string.IsNullOrEmpty(CanonicalPath))
-                AttachImageSectionIdentity(Module, CanonicalPath);
-            Module.IsSectionView = IsSectionView;
-
-            int Ordinal = 1;
-            if (!string.IsNullOrEmpty(CanonicalPath))
+            if (CanonicalPath == null)
             {
-                ImageViewCountsByPath.TryGetValue(CanonicalPath, out int ExistingCount);
-                Ordinal = ExistingCount + 1;
-                ImageViewCountsByPath[CanonicalPath] = Ordinal;
-            }
+                if (RankedLock.OrderChecked && !Emulator.KernelLockCovered)
+                    RankedLock.FailOrder("An image identity is taken from its path without KernelLock.");
 
-            Module.ImageMapOrdinal = Ordinal;
-            MappedImageViews.Add(Module);
-            return Ordinal;
-        }
-
-        public void UnregisterMappedImageView(WinModule Module)
-        {
-            if (Module == null)
-                return;
-
-            MappedImageViews.RemoveAll(M => ReferenceEquals(M, Module) ||
-                                            (M != null && M.MappedBase == Module.MappedBase));
-
-            string CanonicalPath = Module.CanonicalImagePath;
-            if (string.IsNullOrEmpty(CanonicalPath))
                 CanonicalPath = CanonicalizeImagePath(!string.IsNullOrEmpty(Module.Path) ? Module.Path : Module.Name);
-
-            if (!string.IsNullOrEmpty(CanonicalPath))
-            {
-                int ActiveCount = MappedImageViews.Count(M => M != null &&
-                                                              !string.IsNullOrEmpty(M.CanonicalImagePath) &&
-                                                              string.Equals(M.CanonicalImagePath, CanonicalPath, StringComparison.OrdinalIgnoreCase));
-
-                if (ActiveCount == 0)
-                    ImageViewCountsByPath.Remove(CanonicalPath);
-                else
-                    ImageViewCountsByPath[CanonicalPath] = ActiveCount;
-            }
-        }
-
-        public WinModule FindMappedImageViewByAddress(ulong Address)
-        {
-            for (int Index = MappedImageViews.Count - 1; Index >= 0; Index--)
-            {
-                WinModule Module = MappedImageViews[Index];
-                if (Module == null || Module.MappedBase == 0 || Module.SizeOfImage == 0)
-                    continue;
-
-                ulong End = Module.MappedBase + Module.SizeOfImage;
-                if (Address >= Module.MappedBase && Address < End)
-                    return Module;
+                ImageSectionId = string.IsNullOrEmpty(CanonicalPath) ? 0 : GetOrCreateImageSectionId(CanonicalPath);
             }
 
-            for (int Index = WinModules.Count - 1; Index >= 0; Index--)
-            {
-                WinModule Module = WinModules[Index];
-                if (Module == null || !Module.Initialized || Module.MappedBase == 0 || Module.SizeOfImage == 0)
-                    continue;
-
-                ulong End = Module.MappedBase + Module.SizeOfImage;
-                if (Address >= Module.MappedBase && Address < End)
-                    return Module;
-            }
-
-            return null;
+            Module.CanonicalImagePath = CanonicalPath;
+            Module.ImageSectionId = ImageSectionId;
+            WinImageView View = new WinImageView(Module.MappedBase, Module.SizeOfImage, ImageSectionId, CanonicalPath, GuestPath, Module);
+            TrackSectionRange(View.Base, View.Size, SectionRangeKind.Image, Image: View);
         }
 
         public void AddModule(WinModule Module, bool TriggerMessage)
@@ -4999,7 +4979,6 @@ namespace Brovan.Core.Emulation.OS.Windows
                     Existing.Path = Module.Path;
                     Existing.CanonicalImagePath = Module.CanonicalImagePath;
                     Existing.ImageSectionId = Module.ImageSectionId;
-                    Existing.ImageMapOrdinal = Module.ImageMapOrdinal;
                     Existing.IsSectionView = Module.IsSectionView;
                     Existing.Initialized = Module.Initialized;
                     Existing.Exports = Module.Exports;
@@ -11828,7 +11807,10 @@ namespace Brovan.Core.Emulation.OS.Windows
             };
 
             if (Sec.IsImage && !string.IsNullOrEmpty(Path))
+            {
                 AttachImageSectionIdentity(Sec, Path);
+                Sec.ImageHostPath = ImageHostPathOf(Sec.FileStream!);
+            }
 
             WinSections.Add(Sec);
             if (BackingAddress != 0)

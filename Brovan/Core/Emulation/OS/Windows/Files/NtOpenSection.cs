@@ -62,9 +62,17 @@ namespace Brovan.Core.Emulation.OS.Windows
             {
                 if (Existing.IsImage && Existing.ImageSectionId == 0 && !string.IsNullOrEmpty(ResolvedKnownDllBackingPath))
                 {
-                    Existing.Path = ResolvedKnownDllBackingPath;
-                    Existing.FileStream = WindowsFileStream.FromGuestPath(ResolvedKnownDllBackingPath);
-                    Instance.WinHelper.AttachImageSectionIdentity(Existing, ResolvedKnownDllBackingPath);
+                    WindowsFileStream KnownDllStream = WindowsFileStream.FromGuestPath(ResolvedKnownDllBackingPath);
+                    string? HostPath = WinSysHelper.ImageHostPathOf(KnownDllStream);
+                    using (Instance.AddressSpace.Hold())
+                    {
+                        Existing.Path = ResolvedKnownDllBackingPath;
+                        Existing.ImageHostPath = HostPath;
+                        Instance.WinHelper.AttachImageSectionIdentity(Existing, ResolvedKnownDllBackingPath);
+                    }
+
+                    Existing.FileStream?.Dispose();
+                    Existing.FileStream = KnownDllStream;
                 }
 
                 WinHandle ExistingHandle = Instance.WinHelper.HandleManager.AddHandle(Existing, DesiredAccess);

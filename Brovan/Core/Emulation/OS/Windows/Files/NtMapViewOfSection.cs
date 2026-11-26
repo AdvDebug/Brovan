@@ -185,12 +185,12 @@ namespace Brovan.Core.Emulation.OS.Windows
         public WinSyscallDomain ResolveDomain(BinaryEmulator Instance) =>
             ResolveMapDomain(Instance, Instance.WinHelper.GetArg(0), Instance.WinHelper.GetArg(1));
 
-        // A data view of this process needs only the address space. Anything else takes KernelLock.
+        // A data or image view of this process needs only the address space. Anything else takes KernelLock.
         internal static WinSyscallDomain ResolveMapDomain(BinaryEmulator Instance, ulong SectionHandle, ulong ProcessHandle)
         {
             if (Instance.WinHelper.ResolveAddressSpaceCall(ProcessHandle, AccessMask.ProcessVMOperation) != WinSyscallDomain.Self
                 || Instance.WinHelper.ReferenceObjectByHandle(SectionHandle, AccessMask.None, out WinSection Section, out AccessMask Granted) != NTSTATUS.STATUS_SUCCESS
-                || Section.IsImage || NtOpenSection.IsWindowsSharedSection(Section.Name))
+                || NtOpenSection.IsWindowsSharedSection(Section.Name))
                 return WinSyscallDomain.KernelLock;
 
             Instance.WinHelper.SetResolvedObject(SectionHandle, Section, Granted);
@@ -307,24 +307,41 @@ namespace Brovan.Core.Emulation.OS.Windows
                 if ((Win32Protect & WinSysHelper.PageTargetsInvalid) != 0)
                     return NTSTATUS.STATUS_INVALID_PARAMETER;
 
-                if (SectionOffset > Section.Size)
-                    return NTSTATUS.STATUS_INVALID_PARAMETER;
+                string GuestPath;
+                ulong SectionImageBase;
+                ulong ImageSectionId;
+                string CanonicalPath;
+                string? SectionHostPath;
+                using (Instance.AddressSpace.Hold())
+                {
+                    if (Section.Released)
+                        return NTSTATUS.STATUS_INVALID_HANDLE;
 
-                WindowsFileStream Stream = Section.GetFileStream();
-                if (Stream == null || !Stream.ExistsAsFile)
+                    if (SectionOffset > Section.Size)
+                        return NTSTATUS.STATUS_INVALID_PARAMETER;
+
+                    GuestPath = Section.Path;
+                    SectionImageBase = Section.ImageBase;
+                    ImageSectionId = Section.ImageSectionId;
+                    CanonicalPath = Section.MappedImageCanonicalPath ?? string.Empty;
+                    SectionHostPath = Section.ImageHostPath;
+                }
+
+                if (string.IsNullOrEmpty(GuestPath) || string.IsNullOrEmpty(SectionHostPath))
                     return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
-
-                string SectionHostPath = Stream.EffectiveReadHostPath;
-                if (string.IsNullOrEmpty(SectionHostPath))
-                    return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
-
-                string IdentityPath = !string.IsNullOrEmpty(Section.Path) ? Section.Path : SectionHostPath;
-                Instance.WinHelper.AttachImageSectionIdentity(Section, IdentityPath);
 
                 BinaryFile Image = null;
                 try
                 {
-                    Image = Instance.LoadBinary(SectionHostPath);
+                    try
+                    {
+                        Image = Instance.LoadBinary(SectionHostPath);
+                    }
+                    catch (System.IO.FileNotFoundException)
+                    {
+                        return NTSTATUS.STATUS_OBJECT_NAME_NOT_FOUND;
+                    }
+
                     if (Image.FileFormat != BinaryFormat.PE)
                         return NTSTATUS.STATUS_INVALID_IMAGE_FORMAT;
 
@@ -333,33 +350,33 @@ namespace Brovan.Core.Emulation.OS.Windows
                     bool MachineMismatch = Image.Architecture != Instance._binary.Architecture;
 
                     ulong ImageSize = BinaryEmulator.GetPeImageSize(Image);
-                    Section.Size = ImageSize;
+                    using (Instance.AddressSpace.Hold())
+                        Section.Size = ImageSize;
                     if (RequestedBase != 0 && Instance.IsRegionInUse(RequestedBase, ImageSize))
                         return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
                     // NT relocates an ASLR image once per section, and all views share it. Other images keep their preferred base.
                     bool Relocatable = !Image.PE.ILOnly && BinaryEmulator.IsDynamicallyRelocatable(Image);
-                    ulong SectionBase = Section.ImageBase != 0 ? Section.ImageBase : Relocatable ? 0 : Image.PE.ImageBase;
+                    ulong SectionBase = SectionImageBase != 0 ? SectionImageBase : Relocatable ? 0 : Image.PE.ImageBase;
 
-                    WinModule Module = Instance.LoadWinLibrary(Image, false, false, RequestedBase, ImageBase: SectionBase);
+                    WinModule Module = Instance.LoadWinLibrary(Image, false, GuestPath, false, RequestedBase, ImageBase: SectionBase,
+                        ImageSectionId: ImageSectionId, CanonicalPath: CanonicalPath);
                     Image = null;
 
                     if (Module == null)
                         return NTSTATUS.STATUS_CONFLICTING_ADDRESSES;
 
-                    if (Section.ImageBase == 0)
-                        Section.ImageBase = SectionBase != 0 ? SectionBase : Module.MappedBase;
-
-                    if (Section.ImageSectionId != 0)
-                    {
-                        Module.ImageSectionId = Section.ImageSectionId;
-                        Module.CanonicalImagePath = Section.MappedImageCanonicalPath;
-                    }
-
-                    Section.MappedImageCanonicalPath = Module.CanonicalImagePath;
-
                     ReturnedBase = Module.MappedBase;
                     ReturnedSize = Module.SizeOfImage;
+
+                    // Two first maps of one section can both find no base. The one that sets it first is at base.
+                    ulong ViewImageBase;
+                    using (Instance.AddressSpace.Hold())
+                    {
+                        if (Section.ImageBase == 0)
+                            Section.ImageBase = SectionBase != 0 ? SectionBase : ReturnedBase;
+                        ViewImageBase = Section.ImageBase;
+                    }
 
                     if (RequestedSize != 0 && RequestedSize < ReturnedSize)
                         ReturnedSize = BinaryEmulator.AlignUp(RequestedSize, PageSize);
@@ -371,12 +388,12 @@ namespace Brovan.Core.Emulation.OS.Windows
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
                     NTSTATUS Status = MachineMismatch ? NTSTATUS.STATUS_IMAGE_MACHINE_TYPE_MISMATCH
-                        : ReturnedBase != Section.ImageBase ? NTSTATUS.STATUS_IMAGE_NOT_AT_BASE
+                        : ReturnedBase != ViewImageBase ? NTSTATUS.STATUS_IMAGE_NOT_AT_BASE
                         : NTSTATUS.STATUS_SUCCESS;
 
                     if ((Instance.Settings.Flags & LogFlags.Syscall) != 0)
                         Instance.TriggerEventMessage(
-                        $"[+] NtMapViewOfSection: Section=0x{SectionHandle:X}, Base=0x{ReturnedBase:X}, Size=0x{ReturnedSize:X}, Image=1, ImageSectionId=0x{Module.ImageSectionId:X}, Prot=0x{Win32Protect:X}, MapOrdinal={Module.ImageMapOrdinal}, Status={Status}.",
+                        $"[+] NtMapViewOfSection: Section=0x{SectionHandle:X}, Base=0x{ReturnedBase:X}, Size=0x{ReturnedSize:X}, Image=1, ImageSectionId=0x{ImageSectionId:X}, Prot=0x{Win32Protect:X}, Status={Status}.",
                         LogFlags.Syscall);
 
                     return Status;

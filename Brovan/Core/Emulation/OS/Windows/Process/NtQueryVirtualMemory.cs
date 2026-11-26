@@ -403,14 +403,14 @@ namespace Brovan.Core.Emulation.OS.Windows
                     if (!Instance.IsRegionMapped(MemoryInformation, RequiredLength))
                         return NTSTATUS.STATUS_ACCESS_VIOLATION;
 
-                    NTSTATUS ImageStatus = QueryImageView(Instance, Address, out WinModule? Module);
+                    NTSTATUS ImageStatus = QueryImageView(Instance, Address, out WinImageView? View);
                     if (ImageStatus != NTSTATUS.STATUS_SUCCESS)
                         return ImageStatus;
 
                     MEMORY_IMAGE_INFORMATION Info = new MEMORY_IMAGE_INFORMATION
                     {
-                        ImageBase = Module?.MappedBase ?? 0,
-                        SizeOfImage = Module?.SizeOfImage ?? 0,
+                        ImageBase = View?.Base ?? 0,
+                        SizeOfImage = View?.Size ?? 0,
                         Flags = 0
                     };
 
@@ -445,10 +445,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         }
 
         // NT gives allocated memory outside an image an empty record, and fails free memory.
-        internal static NTSTATUS QueryImageView(BinaryEmulator Instance, ulong Address, out WinModule? Module)
+        internal static NTSTATUS QueryImageView(BinaryEmulator Instance, ulong Address, out WinImageView? View)
         {
-            Module = Instance.WinHelper.FindMappedImageViewByAddress(Address);
-            if (Module != null)
+            View = Instance.WinHelper.FindMappedImageViewByAddress(Address);
+            if (View != null)
                 return NTSTATUS.STATUS_SUCCESS;
 
             NTSTATUS Status = BuildBasicInformation(Instance, Address, out MEMORY_BASIC_INFORMATION Info);
@@ -554,13 +554,10 @@ namespace Brovan.Core.Emulation.OS.Windows
         {
             Path = null;
 
-            WinModule Module = Instance.WinHelper.FindMappedImageViewByAddress(Address);
-            if (Module != null)
+            WinImageView? View = Instance.WinHelper.FindMappedImageViewByAddress(Address);
+            if (View != null)
             {
-                Path = !string.IsNullOrEmpty(Module.Path) ? Module.Path : Module.CanonicalImagePath;
-                if (string.IsNullOrEmpty(Path))
-                    Path = Module.Name;
-
+                Path = View.GuestPath;
                 return string.IsNullOrEmpty(Path) ? NTSTATUS.STATUS_INVALID_ADDRESS : NTSTATUS.STATUS_SUCCESS;
             }
 
