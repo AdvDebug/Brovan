@@ -21,7 +21,6 @@ namespace BrovanGUI.ViewModels
 
             LaunchCommand = new AsyncCommand(() => Owner.Launch(this), Owner.ReportError, () => !ExecutableMissing);
             StopCommand = new RelayCommand(() => Owner.Stop(this));
-            RemoveCommand = Owner.RemoveSelectedCommand;
             ShowOutputCommand = new RelayCommand(() => Owner.Output.IsOpen = true);
             ToggleRunsCommand = new RelayCommand(() =>
             {
@@ -49,7 +48,7 @@ namespace BrovanGUI.ViewModels
         public Profile Model { get; }
         public AsyncCommand LaunchCommand { get; }
         public RelayCommand StopCommand { get; }
-        public RelayCommand RemoveCommand { get; }
+        public RelayCommand RemoveCommand => Owner.RemoveSelectedCommand;
         public RelayCommand ShowOutputCommand { get; }
         public RelayCommand ToggleRunsCommand { get; }
         public AsyncCommand BrowseExecutableCommand { get; }
