@@ -82,6 +82,10 @@ namespace BrovanGUI.ViewModels
             private set => Set(ref Overridden, value);
         }
 
+        public string? ApplyNote => SettingLabels.BackendNote(Key, Scope.Effective(BrovanHost.BackendKey))
+            ?? (Key == "net.allow" && Scope.Effective("net.mode").Trim().ToLowerInvariant() == "full" ? "No effect with full access" : null);
+        public bool IsInactive => ApplyNote != null;
+
         public void Refresh()
         {
             Loading = true;
@@ -94,6 +98,14 @@ namespace BrovanGUI.ViewModels
             {
                 Loading = false;
             }
+
+            RefreshNote();
+        }
+
+        public void RefreshNote()
+        {
+            Raise(nameof(ApplyNote));
+            Raise(nameof(IsInactive));
         }
 
         protected abstract void Load(string Text);
@@ -107,12 +119,26 @@ namespace BrovanGUI.ViewModels
             IsOverridden = true;
         }
 
+        private const string CoresKey = SettingLabels.CoresKey;
+
+        private static Choice[] CoreChoices()
+        {
+            int Processors = Environment.ProcessorCount;
+            Choice[] Items = new Choice[Processors + 1];
+            Items[0] = new Choice("0", "Automatic (" + Math.Max(1, Processors - 1) + ")");
+            for (int i = 1; i <= Processors; i++)
+                Items[i] = new Choice(i.ToString(CultureInfo.InvariantCulture), i == 1 ? "1 core" : i + " cores");
+
+            return Items;
+        }
+
         public static SettingRow Create(SettingEntry Entry, SettingsScope Scope, MainViewModel Owner)
         {
             SettingRow Row = Entry.Type switch
             {
                 "boolean" => new ToggleRow(Entry, Scope),
                 "choice" => new ChoiceRow(Entry, Scope, Owner.Setup.HypervisorAvailable),
+                "integer" when Entry.Key == CoresKey => new ChoiceRow(Entry, Scope, CoreChoices()),
                 "integer" or "real" => new NumberRow(Entry, Scope),
                 "list" => new ListRow(Entry, Scope),
                 _ => new TextRow(Entry, Scope, Owner),
@@ -150,6 +176,11 @@ namespace BrovanGUI.ViewModels
     public sealed class ChoiceRow : SettingRow
     {
         private Choice? Selected;
+
+        public ChoiceRow(SettingEntry Entry, SettingsScope Scope, Choice[] Items) : base(Entry, Scope)
+        {
+            Choices = Items;
+        }
 
         public ChoiceRow(SettingEntry Entry, SettingsScope Scope, bool HypervisorAvailable) : base(Entry, Scope)
         {
@@ -272,7 +303,10 @@ namespace BrovanGUI.ViewModels
         public ListRow(SettingEntry Entry, SettingsScope Scope) : base(Entry, Scope)
         {
             Help = (Help.Length == 0 ? string.Empty : Help + " ") + "One per line.";
+            Placeholder = Entry.Key == "net.allow" ? "e.g. 192.168.1.20" : "None";
         }
+
+        public string Placeholder { get; }
 
         public string TextValue
         {
@@ -298,25 +332,120 @@ namespace BrovanGUI.ViewModels
         Bad,
     }
 
-    public sealed class CategoryViewModel
+    public sealed class CategoryViewModel : ObservableObject
     {
-        public CategoryViewModel(string Title, List<SettingRow> Rows)
+        private bool Expanded;
+
+        public CategoryViewModel(string Title, List<SettingRow> Rows, bool IsCollapsible = false)
         {
             this.Title = Title;
             this.Rows = Rows;
+            this.IsCollapsible = IsCollapsible;
+            Expanded = !IsCollapsible || ChangedCount != 0;
+            ToggleCommand = new RelayCommand(() => IsExpanded = !IsExpanded);
+            ResetAllCommand = new RelayCommand(() =>
+            {
+                foreach (SettingRow Row in Rows)
+                {
+                    if (Row.IsOverridden)
+                        Row.ResetCommand.Execute(null);
+                }
+            });
+
+            foreach (SettingRow Row in Rows)
+            {
+                Row.PropertyChanged += (_, Event) =>
+                {
+                    if (Event.PropertyName != nameof(SettingRow.IsOverridden))
+                        return;
+
+                    Raise(nameof(HasChanges));
+                    Raise(nameof(ChangedText));
+                    Raise(nameof(ShowHeaderBar));
+                };
+            }
         }
 
         public string Title { get; }
+        public string Heading => Title.ToUpperInvariant();
         public List<SettingRow> Rows { get; }
+        public RelayCommand ResetAllCommand { get; }
+        public RelayCommand ToggleCommand { get; }
+        public bool IsCollapsible { get; }
+        public string ToggleLabel => Expanded ? "Hide settings" : "Show settings";
+        public string CountText => Rows.Count + " settings";
+        public bool ShowHeaderBar => HasChanges && !Expanded;
+        public string Summary
+        {
+            get
+            {
+                const int Named = 2;
+                List<string> Names = new List<string>();
+                for (int i = 0; i < Rows.Count && i < Named; i++)
+                {
+                    string Label = Rows[i].Label;
+                    Names.Add(i == 0 || Label.Length == 0 ? Label : char.ToLowerInvariant(Label[0]) + Label.Substring(1));
+                }
+
+                string Text = string.Join(", ", Names);
+                return Rows.Count > Named ? Text + " and " + (Rows.Count - Named) + " more" : Text;
+            }
+        }
+
+        public bool IsExpanded
+        {
+            get => Expanded;
+            set
+            {
+                if (!Set(ref Expanded, value))
+                    return;
+
+                Raise(nameof(ToggleLabel));
+                Raise(nameof(ShowHeaderBar));
+            }
+        }
+        public bool HasChanges => ChangedCount != 0;
+        public string ChangedText => ChangedCount + " changed";
+
+        private int ChangedCount
+        {
+            get
+            {
+                int Count = 0;
+                foreach (SettingRow Row in Rows)
+                {
+                    if (Row.IsOverridden)
+                        Count++;
+                }
+
+                return Count;
+            }
+        }
     }
 
     // A key with no entry here still renders, from its own name.
     public static class SettingLabels
     {
+        public const string CoresKey = "backend.cores";
+
         private static readonly string[] CategoryOrder = { "backend", "graphics", "platform", "network", "input", "diagnostics" };
 
         // Keys with no meaning for a user to change.
         private static readonly string[] Hidden = { "backend.quick" };
+
+        private static readonly string[] Advanced = { "backend.guest-kernel", "backend.hooks", "jit.cache", "jit.cache-dir", "jit.stats", "log.silent" };
+
+        public static string? BackendNote(string Key, string Backend)
+        {
+            bool Hypervisor = Backend.Trim().ToLowerInvariant() is "whp" or "kvm";
+            if (Key.StartsWith("jit.", StringComparison.Ordinal))
+                return Hypervisor ? "Unicorn only" : null;
+
+            if (Key is "backend.smp" or "backend.guest-kernel" or CoresKey)
+                return Hypervisor ? null : "Hypervisor only";
+
+            return null;
+        }
 
         public static string Label(string Key)
         {
@@ -418,7 +547,7 @@ namespace BrovanGUI.ViewModels
                         || !Entry.AppliesToHost || Array.IndexOf(Hidden, Entry.Key) >= 0)
                         continue;
 
-                    if (Entry.IsGlobal && !IncludeGlobal)
+                    if (Entry.IsGlobal && !IncludeGlobal || Array.IndexOf(Advanced, Entry.Key) >= 0)
                         continue;
 
                     Rows.Add(SettingRow.Create(Entry, Scope, Owner));
@@ -427,6 +556,19 @@ namespace BrovanGUI.ViewModels
                 if (Rows.Count != 0)
                     Result.Add(new CategoryViewModel(CategoryTitle(Category), Rows));
             }
+
+            List<SettingRow> Expert = new List<SettingRow>();
+            foreach (string Key in Advanced)
+            {
+                foreach (SettingEntry Entry in Schema)
+                {
+                    if (Entry.Key == Key && Entry.AppliesToHost && (!Entry.IsGlobal || IncludeGlobal))
+                        Expert.Add(SettingRow.Create(Entry, Scope, Owner));
+                }
+            }
+
+            if (Expert.Count != 0)
+                Result.Add(new CategoryViewModel("Advanced", Expert, true));
 
             return Result;
         }

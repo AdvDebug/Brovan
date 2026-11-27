@@ -35,7 +35,25 @@ namespace BrovanGUI.ViewModels
         public RelayCommand ResetDefaultsCommand { get; }
         public RelayCommand OpenLibraryFolderCommand { get; }
         public string LibraryPath => LibraryStore.FilePath;
+        public string LibraryShortPath
+        {
+            get
+            {
+                string AppData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                if (OperatingSystem.IsWindows() && AppData.Length != 0 && LibraryStore.FilePath.StartsWith(AppData, StringComparison.OrdinalIgnoreCase))
+                    return "%AppData%" + LibraryStore.FilePath.Substring(AppData.Length);
+
+                return BrovanHost.ShortPath(LibraryStore.FilePath);
+            }
+        }
         public string SchemaStatus => Owner.SchemaStatus;
+
+        public string ResetPrompt => Owner.Library.Defaults.Count switch
+        {
+            0 => "Nothing on this page is changed from Brovan's defaults.",
+            1 => "Reset 1 changed setting to its default? Profile settings stay.",
+            int Count => "Reset " + Count + " changed settings to their defaults? Profile settings stay.",
+        };
 
         public string BackendWarning
         {
@@ -83,6 +101,7 @@ namespace BrovanGUI.ViewModels
                     Row.Refresh();
 
             BackendWarning = Owner.BackendWarning(null);
+            Raise(nameof(ResetPrompt));
         }
     }
 }

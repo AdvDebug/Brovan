@@ -5,29 +5,24 @@
              x:Class="BrovanGUI.Views.SettingsPage"
              x:DataType="vm:SettingsViewModel">
 
-    <ScrollViewer>
-        <StackPanel Margin="40,16,40,32" Spacing="24" MaxWidth="1000" HorizontalAlignment="Left">
+    <Grid RowDefinitions="Auto,*">
+        <Border x:Name="HeaderBar" Classes="pinned" Padding="40,12,40,8">
+            <StackPanel Spacing="4" MaxWidth="1000">
+                <TextBlock Classes="h1 headtitle" Text="Settings" />
+                <TextBlock Classes="muted headdetail" FontSize="13" Text="Defaults for every program. A profile can override any of them." />
+            </StackPanel>
+        </Border>
 
-            <Grid ColumnDefinitions="*,Auto">
-                <StackPanel Spacing="4" VerticalAlignment="Center">
-                    <TextBlock Classes="h1" Text="Settings" />
-                    <TextBlock Classes="muted" Text="Defaults for every program. A profile can override any of them." />
-                </StackPanel>
-                <Button Grid.Column="1" Classes="secondary" x:Name="ResetButton" VerticalAlignment="Center">
-                    <Button.Flyout>
-                        <Flyout Placement="BottomEdgeAlignedRight">
-                            <StackPanel Spacing="12" Width="260">
-                                <TextBlock Text="Undo every change made on this page? Settings a profile sets for itself stay." TextWrapping="Wrap" />
-                                <Button Classes="danger" Content="Reset" HorizontalAlignment="Right" Click="ResetClick" />
-                            </StackPanel>
-                        </Flyout>
-                    </Button.Flyout>
-                    <StackPanel Orientation="Horizontal" Spacing="8">
-                        <Path Classes="icon" Width="14" Height="14" Data="{StaticResource IconReset}" />
-                        <TextBlock Text="Reset defaults" VerticalAlignment="Center" />
-                    </StackPanel>
-                </Button>
-            </Grid>
+    <ScrollViewer Grid.Row="1" x:Name="Scroller">
+            <ScrollViewer.OpacityMask>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                    <GradientStop Color="Transparent" Offset="0" />
+                    <GradientStop Color="Black" Offset="0.025" />
+                    <GradientStop Color="Black" Offset="0.975" />
+                    <GradientStop Color="Transparent" Offset="1" />
+                </LinearGradientBrush>
+            </ScrollViewer.OpacityMask>
+        <StackPanel Margin="40,16,40,32" Spacing="28" MaxWidth="1000">
 
             <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="{Binding SchemaStatus}"
                             IsVisible="{Binding SchemaStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
@@ -35,32 +30,68 @@
                             IsVisible="{Binding BackendWarning, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
 
             <StackPanel>
-                <TextBlock Classes="group" Text="Appearance" />
-                <views:SettingCard Header="Theme" Description="How this window looks.">
-                    <ComboBox Classes="setting" ItemsSource="{Binding Themes}" SelectedItem="{Binding SelectedTheme}">
-                        <ComboBox.ItemTemplate>
-                            <DataTemplate DataType="vm:Choice">
-                                <TextBlock Text="{Binding Label}" />
-                            </DataTemplate>
-                        </ComboBox.ItemTemplate>
-                    </ComboBox>
-                </views:SettingCard>
+                <TextBlock Classes="group" Text="APPEARANCE" />
+                <Border Classes="groupcard">
+                    <views:SettingCard Header="Theme" Description="How this window looks.">
+                        <ComboBox Classes="setting" ItemsSource="{Binding Themes}" SelectedItem="{Binding SelectedTheme}">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate DataType="vm:Choice">
+                                    <TextBlock Text="{Binding Label}" />
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
+                    </views:SettingCard>
+                </Border>
             </StackPanel>
 
             <ItemsControl ItemsSource="{Binding Categories}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
-                        <StackPanel Spacing="24" />
+                        <StackPanel Spacing="28" />
                     </ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
             </ItemsControl>
 
             <StackPanel>
-                <TextBlock Classes="group" Text="Library" />
-                <views:SettingCard Header="Library file" Description="{Binding LibraryPath}">
-                    <Button Classes="secondary" Command="{Binding OpenLibraryFolderCommand}" Content="Open folder" />
-                </views:SettingCard>
+                <TextBlock Classes="group" Text="LIBRARY" />
+                <Border Classes="groupcard">
+                    <StackPanel>
+                        <views:SettingCard Header="Library file" Description="{Binding LibraryShortPath}" ToolTip.Tip="{Binding LibraryPath}">
+                            <Button Classes="secondary ghost" Command="{Binding OpenLibraryFolderCommand}">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Path Classes="icon" Width="14" Height="14" Data="{StaticResource IconFolder}" />
+                                    <TextBlock Text="Open folder" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                        </views:SettingCard>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <StackPanel>
+                <TextBlock Classes="group" Text="RESET" />
+                <Border Classes="groupcard">
+                    <StackPanel>
+                        <views:SettingCard Header="Reset all settings to defaults" Description="Restores Brovan's defaults on this page. Profile overrides are kept.">
+                            <Button Classes="secondary" x:Name="ResetButton">
+                                <Button.Flyout>
+                                    <Flyout Placement="TopEdgeAlignedRight">
+                                        <StackPanel Spacing="12" Width="260">
+                                            <TextBlock Text="{Binding ResetPrompt}" TextWrapping="Wrap" />
+                                            <Button Classes="danger" Content="Reset" HorizontalAlignment="Right" Click="ResetClick" />
+                                        </StackPanel>
+                                    </Flyout>
+                                </Button.Flyout>
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Path Classes="icon" Width="14" Height="14" Data="{StaticResource IconReset}" />
+                                    <TextBlock Text="Reset" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                        </views:SettingCard>
+                    </StackPanel>
+                </Border>
             </StackPanel>
         </StackPanel>
     </ScrollViewer>
+    </Grid>
 </UserControl>

@@ -13,6 +13,15 @@ namespace BrovanGUI.Models
         public string WorkingDirectory { get; set; } = string.Empty;
         public Dictionary<string, string> Settings { get; set; } = new();
         public DateTime? LastLaunched { get; set; }
+        public List<RunRecord> Runs { get; set; } = new();
+    }
+
+    public sealed class RunRecord
+    {
+        public DateTime Started { get; set; }
+        public double Seconds { get; set; }
+        public int ExitCode { get; set; }
+        public bool Stopped { get; set; }
     }
 
     public sealed class LibraryDocument
@@ -24,6 +33,7 @@ namespace BrovanGUI.Models
         public double OutputHeight { get; set; } = 260;
         public bool LicenseAccepted { get; set; }
         public bool WelcomeDone { get; set; }
+        public bool SortByRecent { get; set; }
         public Dictionary<string, string> Defaults { get; set; } = new();
         public List<Profile> Profiles { get; set; } = new();
 
@@ -104,6 +114,8 @@ namespace BrovanGUI.Models
                 Profile.Arguments ??= string.Empty;
                 Profile.WorkingDirectory ??= string.Empty;
                 Profile.Settings = WithoutNulls(Profile.Settings);
+                Profile.Runs ??= new();
+                Profile.Runs.RemoveAll(Run => Run == null);
             }
 
             return Document;

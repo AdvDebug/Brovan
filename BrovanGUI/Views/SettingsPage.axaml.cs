@@ -9,6 +9,7 @@ namespace BrovanGUI.Views
         public SettingsPage()
         {
             InitializeComponent();
+            Scroller.ScrollChanged += (_, _) => HeaderBar.Classes.Set("scrolled", Scroller.Offset.Y > 0.5);
         }
 
         private void ResetClick(object? Sender, RoutedEventArgs Event)

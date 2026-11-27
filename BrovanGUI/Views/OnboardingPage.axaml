@@ -11,53 +11,8 @@
             <Setter Property="Padding" Value="14,7" />
             <Setter Property="CornerRadius" Value="6" />
         </Style>
-        <Style Selector="Button.secondary">
-            <Setter Property="Background" Value="{DynamicResource BgButton}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource BorderStrong}" />
-            <Setter Property="BorderThickness" Value="1" />
-        </Style>
         <Style Selector="Button:disabled">
             <Setter Property="Opacity" Value="0.45" />
-        </Style>
-        <Style Selector="Button.link">
-            <Setter Property="Background" Value="Transparent" />
-            <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="FontWeight" Value="Normal" />
-        </Style>
-        <Style Selector="Button.link:pointerover /template/ ContentPresenter#PART_ContentPresenter, Button.link:disabled /template/ ContentPresenter#PART_ContentPresenter">
-            <Setter Property="Background" Value="Transparent" />
-        </Style>
-        <Style Selector="Button.link:pointerover TextBlock">
-            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
-            <Setter Property="TextDecorations" Value="Underline" />
-        </Style>
-        <Style Selector="Button.dropzone">
-            <Setter Property="Background" Value="Transparent" />
-            <Setter Property="BorderThickness" Value="0" />
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="Height" Value="112" />
-            <Setter Property="FontWeight" Value="Normal" />
-            <Setter Property="HorizontalAlignment" Value="Stretch" />
-            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-            <Setter Property="VerticalContentAlignment" Value="Stretch" />
-            <Setter Property="Margin" Value="0,4,0,0" />
-        </Style>
-        <Style Selector="Button.dropzone:pointerover /template/ ContentPresenter#PART_ContentPresenter">
-            <Setter Property="Background" Value="{DynamicResource AccentSoft}" />
-        </Style>
-        <Style Selector="Button.dropzone Rectangle.dash">
-            <Setter Property="Stroke" Value="{DynamicResource TextTertiary}" />
-            <Setter Property="Opacity" Value="0.5" />
-        </Style>
-        <Style Selector="Button.dropzone.over Rectangle.dash">
-            <Setter Property="Opacity" Value="1" />
-        </Style>
-        <Style Selector="Button.dropzone.over Rectangle.dash">
-            <Setter Property="Stroke" Value="{DynamicResource Accent}" />
-        </Style>
-        <Style Selector="Button.dropzone.over /template/ ContentPresenter#PART_ContentPresenter">
-            <Setter Property="Background" Value="{DynamicResource AccentSoft}" />
         </Style>
         <Style Selector="Button.accent:disabled /template/ ContentPresenter#PART_ContentPresenter">
             <Setter Property="Background" Value="{DynamicResource Accent}" />
@@ -234,8 +189,7 @@
                     </views:StepCard>
                 </StackPanel>
 
-                <Button x:Name="DropZone" Classes="dropzone" Command="{Binding AddProgramCommand}" IsVisible="{Binding Setup.IsInitialized}"
-                        DragDrop.AllowDrop="True">
+                <views:DropZone Classes="dropzone" Height="112" Margin="0,4,0,0" Command="{Binding AddProgramCommand}" IsVisible="{Binding Setup.IsInitialized}">
                     <Panel>
                         <Rectangle Classes="dash" StrokeThickness="1.5" StrokeDashArray="4,3" RadiusX="10" RadiusY="10" />
                         <StackPanel Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
@@ -244,7 +198,7 @@
                             <TextBlock Text="A Windows .exe or a Linux program" FontSize="12" Foreground="{DynamicResource TextTertiary}" HorizontalAlignment="Center" />
                         </StackPanel>
                     </Panel>
-                </Button>
+                </views:DropZone>
             </StackPanel>
         </ScrollViewer>
 

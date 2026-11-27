@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Text;
 using Avalonia;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
@@ -10,6 +11,10 @@ namespace BrovanGUI.Models
     {
         private const int RtIcon = 3;
         private const int RtGroupIcon = 14;
+        private const int RtVersion = 16;
+        private const int VersionBlockHeader = 6;
+        private const int StringFileInfoDepth = 1;
+        private const int VersionStringDepth = 3;
         private const int PreferredSize = 48;
         private const int MaxIconSize = 1024;
         private const int MaxResourceData = 8 * 1024 * 1024;
@@ -21,6 +26,13 @@ namespace BrovanGUI.Models
                 byte[]? Icon;
                 using (SafeFileHandle Handle = File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
                     Icon = ReadIcon(Handle);
+
+                string Resources = SystemResourcesFor(Path);
+                if (Icon == null && File.Exists(Resources))
+                {
+                    using SafeFileHandle Handle = File.OpenHandle(Resources, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    Icon = ReadIcon(Handle);
+                }
 
                 if (Icon == null)
                     return null;
@@ -36,61 +48,90 @@ namespace BrovanGUI.Models
             }
         }
 
-        private static byte[]? ReadIcon(SafeFileHandle Handle)
+        // Windows 11 keeps the icons of its own programs in SystemResources\<file>.mun, a resource-only image.
+        private static string SystemResourcesFor(string Program)
         {
-            Span<byte> Dos = stackalloc byte[0x40];
-            if (RandomAccess.Read(Handle, Dos, 0) != Dos.Length || Dos[0] != 'M' || Dos[1] != 'Z')
-                return null;
+            string Windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            if (Windows.Length == 0 || !Program.StartsWith(Windows, StringComparison.OrdinalIgnoreCase))
+                return string.Empty;
 
-            int PeOffset = BinaryPrimitives.ReadInt32LittleEndian(Dos.Slice(0x3C));
-            if (PeOffset <= 0)
-                return null;
+            return System.IO.Path.Combine(Windows, "SystemResources", System.IO.Path.GetFileName(Program) + ".mun");
+        }
 
-            Span<byte> Coff = stackalloc byte[24];
-            if (RandomAccess.Read(Handle, Coff, PeOffset) != Coff.Length || Coff[0] != 'P' || Coff[1] != 'E')
-                return null;
-
-            int SectionCount = BinaryPrimitives.ReadUInt16LittleEndian(Coff.Slice(6));
-            int OptionalSize = BinaryPrimitives.ReadUInt16LittleEndian(Coff.Slice(20));
-            if (SectionCount == 0 || SectionCount > 96 || OptionalSize < 0x70)
-                return null;
-
-            byte[] Headers = new byte[OptionalSize + SectionCount * 40];
-            if (RandomAccess.Read(Handle, Headers, (long)PeOffset + 24) != Headers.Length)
-                return null;
-
-            ushort Magic = BinaryPrimitives.ReadUInt16LittleEndian(Headers);
-            int DirectoryOffset = (Magic == 0x20B ? 0x70 : 0x60) + 2 * 8;
-            if (DirectoryOffset + 8 > OptionalSize)
-                return null;
-
-            uint ResourceRva = BinaryPrimitives.ReadUInt32LittleEndian(Headers.AsSpan(DirectoryOffset));
-            if (ResourceRva == 0)
-                return null;
-
-            uint SectionVa = 0;
-            uint SectionRaw = 0;
-            uint SectionSize = 0;
-            for (int i = 0; i < SectionCount; i++)
+        public static string?[] VersionNames(string Path)
+        {
+            string?[] Names = new string?[2];
+            try
             {
-                ReadOnlySpan<byte> Entry = Headers.AsSpan(OptionalSize + i * 40, 40);
-                uint VirtualSize = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(8));
-                uint VirtualAddress = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(12));
-                uint RawSize = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(16));
-                uint RawPointer = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(20));
-                if (ResourceRva >= VirtualAddress && ResourceRva < (ulong)VirtualAddress + Math.Max(VirtualSize, RawSize))
-                {
-                    SectionVa = VirtualAddress;
-                    SectionRaw = RawPointer;
-                    SectionSize = RawSize;
-                    break;
-                }
+                using SafeFileHandle Handle = File.OpenHandle(Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                if (!TryOpenResources(Handle, out ResourceSection Section))
+                    return Names;
+
+                byte[]? Data = Section.ReadData(Section.FirstChild(Section.FirstChild(Section.FindChild(Section.Root, RtVersion))));
+                if (Data != null)
+                    CollectNames(Data, 0, Data.Length, 0, Names);
+            }
+            catch (Exception)
+            {
             }
 
-            if (SectionSize == 0)
+            return Names;
+        }
+
+        // VS_VERSIONINFO, StringFileInfo, StringTable and String share one layout: length, value length, type,
+        // a UTF-16 key, then the value and the children, each aligned to 4 bytes.
+        private static void CollectNames(byte[] Data, int At, int End, int Depth, string?[] Names)
+        {
+            while (At + VersionBlockHeader <= End)
+            {
+                int BlockLength = BinaryPrimitives.ReadUInt16LittleEndian(Data.AsSpan(At));
+                if (BlockLength < VersionBlockHeader || At + BlockLength > End)
+                    return;
+
+                int BlockEnd = At + BlockLength;
+                int KeyStart = At + VersionBlockHeader;
+                int KeyEnd = Utf16End(Data, KeyStart, BlockEnd);
+                string Key = Encoding.Unicode.GetString(Data, KeyStart, KeyEnd - KeyStart);
+                bool Text = BinaryPrimitives.ReadUInt16LittleEndian(Data.AsSpan(At + 4)) == 1;
+                int ValueLength = BinaryPrimitives.ReadUInt16LittleEndian(Data.AsSpan(At + 2)) * (Text ? 2 : 1);
+                int Value = Math.Min(Align4(KeyEnd + 2), BlockEnd);
+                int ValueEnd = Math.Min(Value + ValueLength, BlockEnd);
+
+                if (Depth == VersionStringDepth)
+                    StoreName(Key, Data, Value, ValueEnd, Names);
+                else if (Depth != StringFileInfoDepth || Key == "StringFileInfo")
+                    CollectNames(Data, Math.Min(Align4(ValueEnd), BlockEnd), BlockEnd, Depth + 1, Names);
+
+                At = Align4(BlockEnd);
+            }
+        }
+
+        private static void StoreName(string Key, byte[] Data, int From, int To, string?[] Names)
+        {
+            int Slot = Key == "FileDescription" ? 0 : Key == "ProductName" ? 1 : -1;
+            if (Slot < 0 || Names[Slot] != null)
+                return;
+
+            string Value = Encoding.Unicode.GetString(Data, From, Utf16End(Data, From, To) - From).Trim();
+            if (Value.Length != 0)
+                Names[Slot] = Value;
+        }
+
+        private static int Utf16End(byte[] Data, int From, int To)
+        {
+            while (From + 2 <= To && BinaryPrimitives.ReadUInt16LittleEndian(Data.AsSpan(From)) != 0)
+                From += 2;
+
+            return From;
+        }
+
+        private static int Align4(int At) => (At + 3) & ~3;
+
+        private static byte[]? ReadIcon(SafeFileHandle Handle)
+        {
+            if (!TryOpenResources(Handle, out ResourceSection Section))
                 return null;
 
-            ResourceSection Section = new ResourceSection(Handle, SectionRaw, SectionSize, SectionVa, ResourceRva - SectionVa);
             long GroupDirectory = Section.FindChild(Section.Root, RtGroupIcon);
             long GroupLanguages = Section.FirstChild(GroupDirectory);
             byte[]? Group = Section.ReadData(Section.FirstChild(GroupLanguages));
@@ -125,6 +166,59 @@ namespace BrovanGUI.Models
             long IconDirectory = Section.FindChild(Section.Root, RtIcon);
             long IconEntry = Section.FindChild(IconDirectory, BestId);
             return Section.ReadData(Section.FirstChild(IconEntry));
+        }
+
+        private static bool TryOpenResources(SafeFileHandle Handle, out ResourceSection Section)
+        {
+            Section = default;
+            Span<byte> Dos = stackalloc byte[0x40];
+            if (RandomAccess.Read(Handle, Dos, 0) != Dos.Length || Dos[0] != 'M' || Dos[1] != 'Z')
+                return false;
+
+            int PeOffset = BinaryPrimitives.ReadInt32LittleEndian(Dos.Slice(0x3C));
+            if (PeOffset <= 0)
+                return false;
+
+            Span<byte> Coff = stackalloc byte[24];
+            if (RandomAccess.Read(Handle, Coff, PeOffset) != Coff.Length || Coff[0] != 'P' || Coff[1] != 'E')
+                return false;
+
+            int SectionCount = BinaryPrimitives.ReadUInt16LittleEndian(Coff.Slice(6));
+            int OptionalSize = BinaryPrimitives.ReadUInt16LittleEndian(Coff.Slice(20));
+            if (SectionCount == 0 || SectionCount > 96 || OptionalSize < 0x70)
+                return false;
+
+            byte[] Headers = new byte[OptionalSize + SectionCount * 40];
+            if (RandomAccess.Read(Handle, Headers, (long)PeOffset + 24) != Headers.Length)
+                return false;
+
+            ushort Magic = BinaryPrimitives.ReadUInt16LittleEndian(Headers);
+            int DirectoryOffset = (Magic == 0x20B ? 0x70 : 0x60) + 2 * 8;
+            if (DirectoryOffset + 8 > OptionalSize)
+                return false;
+
+            uint ResourceRva = BinaryPrimitives.ReadUInt32LittleEndian(Headers.AsSpan(DirectoryOffset));
+            if (ResourceRva == 0)
+                return false;
+
+            for (int i = 0; i < SectionCount; i++)
+            {
+                ReadOnlySpan<byte> Entry = Headers.AsSpan(OptionalSize + i * 40, 40);
+                uint VirtualSize = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(8));
+                uint VirtualAddress = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(12));
+                uint RawSize = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(16));
+                uint RawPointer = BinaryPrimitives.ReadUInt32LittleEndian(Entry.Slice(20));
+                if (ResourceRva >= VirtualAddress && ResourceRva < (ulong)VirtualAddress + Math.Max(VirtualSize, RawSize))
+                {
+                    if (RawSize == 0)
+                        return false;
+
+                    Section = new ResourceSection(Handle, RawPointer, RawSize, VirtualAddress, ResourceRva - VirtualAddress);
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         // True colour first, then the smallest size that is still sharp at 200% scale, then depth.

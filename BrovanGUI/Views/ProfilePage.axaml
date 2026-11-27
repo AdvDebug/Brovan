@@ -5,83 +5,209 @@
              x:Class="BrovanGUI.Views.ProfilePage"
              x:DataType="vm:ProfileViewModel">
 
-    <ScrollViewer>
-        <StackPanel Margin="40,16,40,32" Spacing="24" MaxWidth="1000" HorizontalAlignment="Left">
+    <Grid RowDefinitions="Auto,*">
+        <Border x:Name="HeaderBar" Classes="pinned" Padding="40,12,40,8">
+            <Panel MaxWidth="1000">
+                <Grid ColumnDefinitions="Auto,*,Auto">
+                    <Border Classes="headtile" Classes.letter="{Binding !HasIcon}" ClipToBounds="True" VerticalAlignment="Center">
+                        <Panel>
+                            <TextBlock Text="{Binding Initial}" FontSize="24" FontWeight="SemiBold" Foreground="{DynamicResource AccentText}"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="{Binding !HasIcon}" />
+                            <Image Classes="headicon" Source="{Binding Icon}" IsVisible="{Binding HasIcon}" RenderOptions.BitmapInterpolationMode="HighQuality" />
+                        </Panel>
+                    </Border>
+                    <StackPanel Grid.Column="1" Spacing="6" VerticalAlignment="Center" Margin="18,0,24,0">
+                        <Grid ColumnDefinitions="*,Auto" HorizontalAlignment="Left">
+                            <TextBlock Classes="h1 headtitle" Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                            <Border Grid.Column="1" Classes="chip" Classes.good="{Binding StatusGood}" Classes.warn="{Binding StatusWarn}" VerticalAlignment="Center"
+                                    IsVisible="{Binding ShowChip}" Margin="12,0,0,0">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{DynamicResource Brand}" IsVisible="{Binding StatusGood}" />
+                                    <Ellipse Width="6" Height="6" VerticalAlignment="Center" Fill="{DynamicResource Fail}" IsVisible="{Binding StatusWarn}" />
+                                    <TextBlock Text="{Binding StatusText}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Opacity="0.85" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                        <TextBlock Classes="headdetail" Text="{Binding HeaderDetail}" FontSize="13" Foreground="{DynamicResource TextSecondary}"
+                                   TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Executable}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <Panel>
+                            <Button Classes="accent launch headbutton" Command="{Binding LaunchCommand}" IsVisible="{Binding CanLaunch}" ToolTip.Tip="Launch (Ctrl+Enter)">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Path Classes="icon fill onaccent" Width="11" Height="11" Data="{StaticResource IconPlay}" />
+                                    <TextBlock Text="Launch" Foreground="White" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                            <Button Classes="accent launch headbutton" Command="{Binding BrowseExecutableCommand}" IsVisible="{Binding CanLocate}">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Path Classes="icon onaccent" Width="14" Height="14" Data="{StaticResource IconFolder}" />
+                                    <TextBlock Text="Locate program" Foreground="White" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                            <Button Classes="danger launch headbutton" Command="{Binding StopCommand}" IsVisible="{Binding IsRunning}" ToolTip.Tip="Stop (Shift+F5)">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Path Classes="icon fill onaccent" Width="11" Height="11" Data="{StaticResource IconStop}" />
+                                    <TextBlock Text="Stop" Foreground="White" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                        </Panel>
+                        <Button x:Name="MoreButton" Classes="secondary headmore" Padding="0" ToolTip.Tip="More">
+                            <Button.Flyout>
+                                <Flyout Placement="BottomEdgeAlignedRight">
+                                    <StackPanel Width="250" Spacing="4">
+                                        <Button Classes="menuitem" Click="OpenFolderClick" IsEnabled="{Binding !ExecutableMissing}">
+                                            <StackPanel Orientation="Horizontal" Spacing="10">
+                                                <Path Classes="icon" Width="14" Height="14" Data="{StaticResource IconFolder}" />
+                                                <TextBlock Text="Open file location" VerticalAlignment="Center" />
+                                            </StackPanel>
+                                        </Button>
+                                        <Separator Margin="0,4" />
+                                        <TextBlock Text="KEYBOARD SHORTCUTS" Classes="group" Margin="10,2,0,2" />
+                                        <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto" Margin="10,0,10,2">
+                                            <Grid.Styles>
+                                                <Style Selector="TextBlock">
+                                                    <Setter Property="FontSize" Value="12" />
+                                                    <Setter Property="Margin" Value="0,2" />
+                                                </Style>
+                                                <Style Selector="TextBlock.key">
+                                                    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+                                                </Style>
+                                            </Grid.Styles>
+                                            <TextBlock Text="Launch" />
+                                            <TextBlock Grid.Column="1" Classes="key" Text="Ctrl+Enter or F5" />
+                                            <TextBlock Grid.Row="1" Text="Stop" />
+                                            <TextBlock Grid.Row="1" Grid.Column="1" Classes="key" Text="Shift+F5" />
+                                            <TextBlock Grid.Row="2" Text="Add a program" />
+                                            <TextBlock Grid.Row="2" Grid.Column="1" Classes="key" Text="Ctrl+N" />
+                                            <TextBlock Grid.Row="3" Text="Filter the library" />
+                                            <TextBlock Grid.Row="3" Grid.Column="1" Classes="key" Text="Ctrl+F" />
+                                            <TextBlock Grid.Row="4" Text="Show or hide the output" />
+                                            <TextBlock Grid.Row="4" Grid.Column="1" Classes="key" Text="Ctrl+`" />
+                                        </Grid>
+                                        <Separator Margin="0,4" />
+                                        <TextBlock Text="Remove this program from the library? Its files stay where they are." FontSize="12"
+                                                   Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="10,2,10,4" />
+                                        <Button Classes="danger" Content="Remove from library" HorizontalAlignment="Right" Margin="0,0,4,4" Click="RemoveClick" />
+                                    </StackPanel>
+                                </Flyout>
+                            </Button.Flyout>
+                            <Path Classes="icon fill" Width="14" Height="4" Data="{StaticResource IconMore}" HorizontalAlignment="Center" />
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Panel>
+        </Border>
 
-            <Grid ColumnDefinitions="*,Auto">
-                <StackPanel Spacing="4" VerticalAlignment="Center" Margin="0,0,24,0">
-                    <TextBlock Classes="h1">
-                        <Run Text="Profile: &quot;" /><Run Text="{Binding Name}" /><Run Text="&quot;" />
-                    </TextBlock>
-                    <TextBlock Classes="muted" Text="{Binding Executable}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Executable}" />
-                </StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                    <Button Classes="accent launch" Command="{Binding LaunchCommand}" IsVisible="{Binding !IsRunning}">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Path Classes="icon fill onaccent" Width="11" Height="11" Data="{StaticResource IconPlay}" />
-                            <TextBlock Text="Launch" Foreground="White" VerticalAlignment="Center" />
-                        </StackPanel>
-                    </Button>
-                    <Button Classes="danger launch" Command="{Binding StopCommand}" IsVisible="{Binding IsRunning}">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Path Classes="icon fill onaccent" Width="11" Height="11" Data="{StaticResource IconStop}" />
-                            <TextBlock Text="Stop" Foreground="White" VerticalAlignment="Center" />
-                        </StackPanel>
-                    </Button>
-                </StackPanel>
-            </Grid>
+    <ScrollViewer Grid.Row="1" x:Name="Scroller">
+            <ScrollViewer.OpacityMask>
+                <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                    <GradientStop Color="Transparent" Offset="0" />
+                    <GradientStop Color="Black" Offset="0.025" />
+                    <GradientStop Color="Black" Offset="0.975" />
+                    <GradientStop Color="Transparent" Offset="1" />
+                </LinearGradientBrush>
+            </ScrollViewer.OpacityMask>
+        <StackPanel Margin="40,16,40,32" Spacing="28" MaxWidth="1000">
 
-            <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="The program file was not found. Pick it again below."
-                            IsVisible="{Binding ExecutableMissing}" />
-            <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="{Binding SchemaStatus}"
-                            IsVisible="{Binding SchemaStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
-            <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="{Binding BackendWarning}"
-                            IsVisible="{Binding BackendWarning, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            <StackPanel Spacing="10" IsVisible="{Binding HasNotice}">
+                <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="This file was moved or deleted. Locate it to launch again." IsVisible="{Binding CanLocate}" />
+                <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="{Binding SchemaStatus}"
+                                IsVisible="{Binding SchemaStatus, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                <ContentControl ContentTemplate="{StaticResource WarningBanner}" Content="{Binding BackendWarning}"
+                                IsVisible="{Binding BackendWarning, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+            </StackPanel>
+
+            <StackPanel IsVisible="{Binding HasRuns}">
+                <Grid ColumnDefinitions="*,Auto">
+                    <TextBlock Classes="group" Text="RECENT RUNS" />
+                    <Button Grid.Column="1" Classes="link" Command="{Binding ToggleRunsCommand}" IsVisible="{Binding HasMoreRuns}" Margin="0,0,2,10">
+                        <TextBlock Text="{Binding RunsToggleText}" FontSize="12" Foreground="{DynamicResource AccentText}" />
+                    </Button>
+                </Grid>
+                <Border Classes="groupcard">
+                    <ItemsControl ItemsSource="{Binding RecentRuns}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="vm:RunRow">
+                                <Border Classes="runrow" Background="Transparent" ToolTip.Tip="{Binding Tip}">
+                                    <Grid ColumnDefinitions="Auto,*,Auto">
+                                        <Panel Width="8" Height="8" Margin="0,0,14,0" VerticalAlignment="Center">
+                                            <Ellipse Fill="{DynamicResource Good}" IsVisible="{Binding Finished}" />
+                                            <Ellipse Fill="{DynamicResource Fail}" IsVisible="{Binding Failed}" />
+                                            <Ellipse Fill="{DynamicResource Brand}" IsVisible="{Binding Live}" />
+                                            <Ellipse Stroke="{DynamicResource TextTertiary}" StrokeThickness="2" IsVisible="{Binding Stopped}" />
+                                        </Panel>
+                                        <TextBlock Grid.Column="1" FontSize="13" VerticalAlignment="Center" TextTrimming="CharacterEllipsis">
+                                            <Run Text="{Binding When}" /><Run Text="  &#183;  " Foreground="{DynamicResource TextTertiary}" /><Run Text="{Binding Duration}" Foreground="{DynamicResource TextSecondary}" />
+                                        </TextBlock>
+                                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                                            <Button Classes="link" Command="{Binding ShowOutputCommand}" IsVisible="{Binding CanShowOutput}" VerticalAlignment="Center">
+                                                <TextBlock Text="View output &#8594;" FontSize="13" Foreground="{DynamicResource AccentText}" />
+                                            </Button>
+                                            <TextBlock Text="{Binding Result}" FontSize="13" Classes.failtext="{Binding Failed}" Classes.brandtext="{Binding Live}" Foreground="{DynamicResource TextSecondary}"
+                                                       VerticalAlignment="Center" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </Border>
+            </StackPanel>
 
             <StackPanel>
-                <TextBlock Classes="group" Text="Program" />
-                <StackPanel Spacing="4">
-                    <views:SettingCard Header="Name" Description="Shown in the library.">
-                        <TextBox Classes="form" Text="{Binding Name}" />
-                    </views:SettingCard>
-                    <views:SettingCard Header="Executable" Description="The Windows or Linux program Brovan runs.">
-                        <TextBox Classes="form" Text="{Binding Executable}">
-                            <TextBox.InnerRightContent>
-                                <StackPanel Orientation="Horizontal">
-                                    <Button Classes="iconbtn inner" Command="{Binding OpenFolderCommand}" IsEnabled="{Binding !ExecutableMissing}" ToolTip.Tip="Open the program's folder">
-                                        <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconExternal}" />
-                                    </Button>
-                                    <Button Classes="iconbtn inner" Command="{Binding BrowseExecutableCommand}" ToolTip.Tip="Browse">
-                                        <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconFolder}" />
-                                    </Button>
-                                </StackPanel>
-                            </TextBox.InnerRightContent>
-                        </TextBox>
-                    </views:SettingCard>
-                    <views:SettingCard Header="Arguments" Description="Command line passed to the program.">
-                        <TextBox Classes="form" Text="{Binding Arguments}" PlaceholderText="None" />
-                    </views:SettingCard>
-                    <views:SettingCard Header="Start in" Description="The folder the program starts in.">
-                        <TextBox Classes="form" Text="{Binding WorkingDirectory}" PlaceholderText="The program's own folder">
-                            <TextBox.InnerRightContent>
-                                <Button Classes="iconbtn inner" Command="{Binding BrowseWorkingDirectoryCommand}" ToolTip.Tip="Browse">
-                                    <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconFolder}" />
-                                </Button>
-                            </TextBox.InnerRightContent>
-                        </TextBox>
-                    </views:SettingCard>
-                </StackPanel>
+                <TextBlock Classes="group" Text="PROGRAM" />
+                <Border Classes="groupcard">
+                    <StackPanel>
+                        <views:SettingCard Header="Name" Description="Shown in the library.">
+                            <TextBox Classes="form" Text="{Binding Name}" />
+                        </views:SettingCard>
+                        <views:SettingCard Header="Executable" Description="The Windows or Linux program Brovan runs.">
+                            <Panel>
+                                <TextBox x:Name="ExecutableBox" Classes="form pathfield" Classes.missing="{Binding CanLocate}" Text="{Binding Executable}" ToolTip.Tip="{Binding Executable}">
+                                    <TextBox.InnerRightContent>
+                                        <Button Classes="iconbtn inner" Command="{Binding BrowseExecutableCommand}" ToolTip.Tip="Browse">
+                                            <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconFolder}" />
+                                        </Button>
+                                    </TextBox.InnerRightContent>
+                                </TextBox>
+                                <Border Width="{Binding #ExecutableBox.Bounds.Width}" HorizontalAlignment="Left" IsHitTestVisible="False"
+                                        IsVisible="{Binding !#ExecutableBox.IsKeyboardFocusWithin}">
+                                    <TextBlock Classes="pathshow" Text="{Binding Executable}" />
+                                </Border>
+                            </Panel>
+                        </views:SettingCard>
+                        <views:SettingCard Header="Arguments" Description="Command line passed to the program.">
+                            <TextBox Classes="form" Text="{Binding Arguments}" PlaceholderText="None" />
+                        </views:SettingCard>
+                        <views:SettingCard Header="Start in" Description="The folder the program starts in.">
+                            <Panel>
+                                <TextBox x:Name="StartInBox" Classes="form pathfield" Text="{Binding WorkingDirectory}" PlaceholderText="The program's own folder"
+                                         ToolTip.Tip="{Binding WorkingDirectory}">
+                                    <TextBox.InnerRightContent>
+                                        <Button Classes="iconbtn inner" Command="{Binding BrowseWorkingDirectoryCommand}" ToolTip.Tip="Browse">
+                                            <Path Classes="icon muted" Width="15" Height="15" Data="{StaticResource IconFolder}" />
+                                        </Button>
+                                    </TextBox.InnerRightContent>
+                                </TextBox>
+                                <Border Width="{Binding #StartInBox.Bounds.Width}" HorizontalAlignment="Left" IsHitTestVisible="False"
+                                        IsVisible="{Binding !#StartInBox.IsKeyboardFocusWithin}">
+                                    <TextBlock Classes="pathshow" Text="{Binding WorkingDirectory}" />
+                                </Border>
+                            </Panel>
+                        </views:SettingCard>
+                    </StackPanel>
+                </Border>
             </StackPanel>
 
             <ItemsControl ItemsSource="{Binding Categories}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
-                        <StackPanel Spacing="24" />
+                        <StackPanel Spacing="28" />
                     </ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
             </ItemsControl>
-
-            <TextBlock Classes="muted" Text="A setting with the reset arrow next to it is set for this profile only. The rest follow the defaults in Settings." />
         </StackPanel>
     </ScrollViewer>
+    </Grid>
 </UserControl>

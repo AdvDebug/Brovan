@@ -71,6 +71,17 @@ namespace BrovanGUI.Models
             return State;
         }
 
+        public static string ShortPath(string Full)
+        {
+            string[] Parts = Full.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+            if (Full.Length <= 56 || Parts.Length <= 3)
+                return Full;
+
+            char Separator = Path.DirectorySeparatorChar;
+            string Head = Full.Substring(0, Full.IndexOf(Separator, (Path.GetPathRoot(Full)?.Length ?? 0) + 1));
+            return Head + Separator + "..." + Separator + Parts[^2] + Separator + Parts[^1];
+        }
+
         public static string HypervisorName => OperatingSystem.IsWindows() ? "Windows Hypervisor Platform" : "KVM";
 
         public static string? HypervisorProblem()
@@ -162,6 +173,69 @@ namespace BrovanGUI.Models
         public static bool IsLinuxProgram(string Path)
         {
             return ReadMagic(Path) == ElfMagic;
+        }
+
+        private const int MinNameKey = 3;
+
+        // A launcher can carry its engine's name, so a resource name is used only when it matches the folder or file name.
+        public static string ProgramName(string Path)
+        {
+            string Stem = System.IO.Path.GetFileNameWithoutExtension(Path);
+            string FileKey = NameKey(Stem);
+            string FolderKey = NameKey(System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(Path)) ?? string.Empty);
+            string? Chosen = null;
+            foreach (string? Candidate in PeIcon.VersionNames(Path))
+            {
+                if (Candidate == null)
+                    continue;
+
+                string Key = NameKey(Candidate);
+                bool Same = Key.Length >= MinNameKey && (Related(Key, FolderKey) || Related(Key, FileKey));
+                if (Same && (Chosen == null || Candidate.Length < Chosen.Length))
+                    Chosen = Candidate;
+            }
+
+            return Chosen ?? ReadableName(Stem);
+        }
+
+        private static string ReadableName(string Name)
+        {
+            if (Name.Contains(' '))
+                return Name;
+
+            string[] Words = Name.Split(new[] { '.', '_' }, StringSplitOptions.RemoveEmptyEntries);
+            if (Words.Length < 2)
+                return Name;
+
+            int End = Words.Length;
+            for (int i = Words.Length - 1; i > 0; i--)
+            {
+                string Word = Words[i];
+                if (Word.Length > 1 && (Word[0] == 'v' || Word[0] == 'V') && Word.AsSpan(1).IndexOfAnyExceptInRange('0', '9') < 0)
+                {
+                    End = i;
+                    break;
+                }
+            }
+
+            return string.Join(' ', Words, 0, End);
+        }
+
+        private static bool Related(string Key, string Other)
+        {
+            return Other.Length >= MinNameKey && (Key.StartsWith(Other, StringComparison.Ordinal) || Other.StartsWith(Key, StringComparison.Ordinal));
+        }
+
+        private static string NameKey(string Name)
+        {
+            StringBuilder Key = new StringBuilder(Name.Length);
+            foreach (char C in Name)
+            {
+                if (char.IsLetterOrDigit(C))
+                    Key.Append(char.ToLowerInvariant(C));
+            }
+
+            return Key.ToString();
         }
 
         private static uint ReadMagic(string Path)

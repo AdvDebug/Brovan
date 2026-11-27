@@ -22,6 +22,8 @@ namespace BrovanGUI.ViewModels
         private readonly DispatcherTimer SaveTimer;
         private Process? Tool;
         private string? ToolTitle;
+        private string? LastRun;
+        private bool LastRunFailed;
         private ProfileViewModel? Selected;
         private PageKind Page;
         private SettingEntry[] Schema = Array.Empty<SettingEntry>();
@@ -65,6 +67,30 @@ namespace BrovanGUI.ViewModels
                 ReportProblem(LibraryProblem);
 
             Profiles = new ObservableCollection<ProfileViewModel>();
+            Profiles.CollectionChanged += (_, Event) =>
+            {
+                Raise(nameof(HasProfiles));
+                if (Event.NewItems != null)
+                {
+                    foreach (ProfileViewModel Added in Event.NewItems)
+                    {
+                        Added.PropertyChanged += (_, Change) =>
+                        {
+                            if (Change.PropertyName == nameof(ProfileViewModel.Name) && !Library.SortByRecent)
+                                RefreshVisible();
+                        };
+                    }
+                }
+
+                RefreshVisible();
+            };
+            SortByNameCommand = new RelayCommand(() => SetSort(false));
+            ClearFilterCommand = new RelayCommand(() =>
+            {
+                FilterText = string.Empty;
+                FilterOpen = false;
+            });
+            SortByRecentCommand = new RelayCommand(() => SetSort(true));
             foreach (Profile Model in Library.Profiles)
                 Profiles.Add(new ProfileViewModel(Model, this));
 
@@ -152,6 +178,8 @@ namespace BrovanGUI.ViewModels
 
                 if (Changed)
                     Raise(nameof(HasSelection));
+                Raise(nameof(CanSendInput));
+                Raise(nameof(InputPlaceholder));
 
                 CurrentPageKind = PageKind.Profile;
                 Raise(nameof(CurrentPage));
@@ -159,6 +187,76 @@ namespace BrovanGUI.ViewModels
         }
 
         public bool HasSelection => Selected != null;
+        public bool HasProfiles => Profiles.Count != 0;
+        public bool HasVisibleProfiles => VisibleProfiles.Count != 0;
+        public bool ShowFilter => Profiles.Count > FilterThreshold || Opened || Filter.Length != 0;
+        public bool HasFilter => Filter.Length != 0;
+        public string SortTip => Library.SortByRecent ? "Sort: last launched" : "Sort: name";
+        public RelayCommand ClearFilterCommand { get; }
+        private bool Opened;
+
+        public bool FilterOpen
+        {
+            get => Opened;
+            set
+            {
+                if (Set(ref Opened, value))
+                    Raise(nameof(ShowFilter));
+            }
+        }
+        public bool IsProfilePage => Page == PageKind.Profile;
+        public string EmptyLibraryText => HasProfiles ? "No programs match" : "No programs yet";
+        public ObservableCollection<ProfileViewModel> VisibleProfiles { get; } = new ObservableCollection<ProfileViewModel>();
+        public RelayCommand SortByNameCommand { get; }
+        public RelayCommand SortByRecentCommand { get; }
+
+        private const int FilterThreshold = 5;
+        private string Filter = string.Empty;
+
+        public string FilterText
+        {
+            get => Filter;
+            set
+            {
+                if (Set(ref Filter, value ?? string.Empty))
+                {
+                    Raise(nameof(HasFilter));
+                    RefreshVisible();
+                }
+            }
+        }
+
+        private void RefreshVisible()
+        {
+            List<ProfileViewModel> Matching = new List<ProfileViewModel>();
+            foreach (ProfileViewModel Profile in Profiles)
+            {
+                if (Filter.Length == 0 || Profile.Name.Contains(Filter, StringComparison.OrdinalIgnoreCase))
+                    Matching.Add(Profile);
+            }
+
+            if (Library.SortByRecent)
+                Matching.Sort((Left, Right) => Nullable.Compare(Right.Model.LastLaunched, Left.Model.LastLaunched));
+            else
+                Matching.Sort((Left, Right) => string.Compare(Left.Name, Right.Name, StringComparison.CurrentCultureIgnoreCase));
+
+            VisibleProfiles.Clear();
+            foreach (ProfileViewModel Profile in Matching)
+                VisibleProfiles.Add(Profile);
+
+            Raise(nameof(HasVisibleProfiles));
+            Raise(nameof(EmptyLibraryText));
+            Raise(nameof(ShowFilter));
+            Raise(nameof(ListSelection));
+        }
+
+        private void SetSort(bool Recent)
+        {
+            Library.SortByRecent = Recent;
+            Save();
+            Raise(nameof(SortTip));
+            RefreshVisible();
+        }
 
         // Null while another page is shown, so clicking the selected profile still counts as a selection.
         public ProfileViewModel? ListSelection
@@ -188,6 +286,7 @@ namespace BrovanGUI.ViewModels
                 Raise(nameof(IsSetupPage));
                 Raise(nameof(IsSettingsPage));
                 Raise(nameof(IsOnboarding));
+                Raise(nameof(IsProfilePage));
                 Raise(nameof(ShowOutputBar));
                 Raise(nameof(ListSelection));
             }
@@ -365,7 +464,7 @@ namespace BrovanGUI.ViewModels
         {
             Profile Model = new Profile
             {
-                Name = System.IO.Path.GetFileNameWithoutExtension(Path),
+                Name = BrovanHost.ProgramName(Path),
                 Executable = Path,
             };
             Library.Profiles.Add(Model);
@@ -478,7 +577,13 @@ namespace BrovanGUI.ViewModels
             Process? Child = StartBrovan(BrovanExecutable!, Arguments, BackendWarning(Profile.Model), Code =>
             {
                 Running.Remove(Profile);
+                bool Stopped = StoppedByUser.Remove(Profile);
                 Profile.IsRunning = false;
+                Profile.RecordRun(Code, Stopped);
+                Profile.LastExitCode = Stopped ? 0 : Code;
+                LastRunFailed = !Stopped && Code != 0;
+                string At = " at " + DateTime.Now.ToString("HH:mm");
+                LastRun = Stopped ? Profile.Name + " stopped" + At : Code == 0 ? Profile.Name + " finished" + At : Profile.Name + " exited with code " + Code + At;
                 Output.WriteLine(Code == 0 ? "[*] " + Profile.Name + " finished." : "[-] " + Profile.Name + " exited with code " + Code + ".");
                 if (Code != 0)
                     Output.IsOpen = true;
@@ -491,8 +596,10 @@ namespace BrovanGUI.ViewModels
                 return;
 
             Running[Profile] = Child;
-            Profile.IsRunning = true;
             Profile.Model.LastLaunched = DateTime.Now;
+            Profile.IsRunning = true;
+            if (Library.SortByRecent)
+                RefreshVisible();
             Save();
             UpdateStatus();
         }
@@ -523,12 +630,18 @@ namespace BrovanGUI.ViewModels
         private void UpdateStatus()
         {
             if (Running.Count == 0)
-                Output.Status = ToolTitle ?? "Idle";
+                Output.Status = ToolTitle ?? LastRun ?? OutputViewModel.NoOutput;
             else
                 Output.Status = (ToolTitle != null ? ToolTitle + ". " : string.Empty) + "Running " + string.Join(", ", RunningNames());
+
+            Output.StatusIsProblem = Running.Count == 0 && ToolTitle == null && LastRunFailed;
+            Raise(nameof(CanSendInput));
+            Raise(nameof(InputPlaceholder));
         }
 
         public bool HasRunning => Running.Count != 0 || Tool != null;
+        public bool CanSendInput => InputTarget() != null;
+        public string InputPlaceholder => CanSendInput ? "Type a line for the program and press Enter" : "Start the program to send it input";
 
         private List<string> RunningNames()
         {
@@ -550,8 +663,20 @@ namespace BrovanGUI.ViewModels
 
         public void Stop(ProfileViewModel Profile)
         {
-            if (Running.TryGetValue(Profile, out Process? Child))
-                Kill(Child);
+            if (!Running.TryGetValue(Profile, out Process? Child))
+                return;
+
+            StoppedByUser.Add(Profile);
+            Kill(Child);
+        }
+
+        private readonly HashSet<ProfileViewModel> StoppedByUser = new HashSet<ProfileViewModel>();
+
+        public string BackendLabel(Profile Model)
+        {
+            string Value = BrovanHost.ChosenValue(Model, Library.Defaults, BrovanHost.BackendKey)
+                ?? BrovanHost.LauncherDefault(BrovanHost.BackendKey, Setup.HypervisorAvailable) ?? string.Empty;
+            return Value.Trim().ToLowerInvariant() is "whp" or "kvm" ? "Hypervisor" : "Unicorn";
         }
 
         // A child with no window of its own cannot be reached once the launcher goes.

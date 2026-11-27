@@ -49,12 +49,14 @@ namespace BrovanGUI.ViewModels
         public bool BrovanFound => State.Executable != null;
         public string BrovanPath => State.Executable ?? "Not found. Put BrovanGUI next to " + BrovanHost.ExecutableName + " or locate it here.";
         public StatusKind BrovanStatus => BrovanFound ? StatusKind.Good : StatusKind.Bad;
+        public string BrovanShortPath => State.Executable != null ? BrovanHost.ShortPath(State.Executable) : BrovanPath;
 
         public bool NeedsSystemFiles => HostIsLinux && !State.SystemFiles;
         public bool SystemFilesReady => State.SystemFiles;
         public bool RuntimesReady => State.Runtimes;
         public bool RegistryReady => State.Registry;
         public string? DxvkVersion => State.DxvkVersion;
+        public bool DxvkInstalled => State.DxvkVersion != null;
         public bool IsInitialized => BrovanFound && (HostIsWindows ? State.Registry : State.SystemFiles);
 
         public StatusKind SystemFilesStatus => State.SystemFiles ? StatusKind.Good : StatusKind.Bad;
@@ -69,21 +71,21 @@ namespace BrovanGUI.ViewModels
 
         public StatusKind RegistryStatus => State.Registry ? StatusKind.Good : StatusKind.Warn;
         public string RegistryDescription => State.Registry
-            ? "Ready."
-            : "Copied from this Windows installation on the first launch, which asks for administrator rights once.";
+            ? "Copied from this PC"
+            : "Programs read settings from a private copy of this PC's registry. Windows asks for administrator approval once.";
 
         public bool HypervisorAvailable => HypervisorProblemValue == null;
         public string HypervisorName => BrovanHost.HypervisorName;
         public StatusKind HypervisorStatus => HypervisorAvailable ? StatusKind.Good : StatusKind.Warn;
         public string HypervisorDescription => HypervisorAvailable
-            ? "Available, and programs run on it unless a profile or Settings picks another backend. Games run at near native speed on it."
+            ? HypervisorName + " is on \u00b7 Programs run at near native speed"
             : "Not available, so programs run on Unicorn, the slower software backend. " + HypervisorProblemValue;
 
         public string HypervisorProblem => HypervisorProblemValue ?? string.Empty;
 
         public StatusKind DxvkStatus => State.DxvkVersion != null ? StatusKind.Good : StatusKind.Warn;
         public string DxvkDescription => State.DxvkVersion != null
-            ? State.DxvkVersion + " installed. Direct3D 8 to 11 programs are translated to Vulkan through it."
+            ? State.DxvkVersion + " installed \u00b7 Direct3D 8 to 11 through Vulkan"
             : "Not installed. Most Windows games draw with Direct3D and need it.";
 
         public bool LogExists => State.Directory != null && File.Exists(Path.Combine(State.Directory, "error_log.log"));
@@ -156,6 +158,7 @@ namespace BrovanGUI.ViewModels
             Raise(nameof(HostIsLinux));
             Raise(nameof(BrovanFound));
             Raise(nameof(BrovanPath));
+            Raise(nameof(BrovanShortPath));
             Raise(nameof(BrovanStatus));
             Raise(nameof(SystemFilesStatus));
             Raise(nameof(SystemFilesDescription));
@@ -170,6 +173,7 @@ namespace BrovanGUI.ViewModels
             Raise(nameof(RuntimesReady));
             Raise(nameof(RegistryReady));
             Raise(nameof(DxvkVersion));
+            Raise(nameof(DxvkInstalled));
             Raise(nameof(IsInitialized));
             RefreshCommands();
         }
@@ -372,15 +376,7 @@ namespace BrovanGUI.ViewModels
             if (Path.TrimEndingDirectorySeparator(Folder) == Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory))
                 return "Found next to this app.";
 
-            string[] Parts = Folder.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
-            if (Folder.Length > 56 && Parts.Length > 3)
-            {
-                char Separator = Path.DirectorySeparatorChar;
-                string Head = Folder.Substring(0, Folder.IndexOf(Separator, (Path.GetPathRoot(Folder)?.Length ?? 0) + 1));
-                Folder = Head + Separator + "..." + Separator + Parts[^2] + Separator + Parts[^1];
-            }
-
-            return "Found in " + Folder;
+            return "Found in " + BrovanHost.ShortPath(Folder);
         }
     }
 }

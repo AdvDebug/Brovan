@@ -16,9 +16,16 @@ namespace BrovanGUI.Views
         public static readonly StyledProperty<StatusKind> StatusProperty =
             AvaloniaProperty.Register<SettingCard, StatusKind>(nameof(Status));
 
+        public static readonly StyledProperty<bool> IsChangedProperty =
+            AvaloniaProperty.Register<SettingCard, bool>(nameof(IsChanged));
+
+        public static readonly StyledProperty<string?> NoteProperty =
+            AvaloniaProperty.Register<SettingCard, string?>(nameof(Note));
+
         static SettingCard()
         {
             StatusProperty.Changed.AddClassHandler<SettingCard>((Card, _) => Card.UpdateStatusClasses());
+            IsChangedProperty.Changed.AddClassHandler<SettingCard>((Card, _) => Card.PseudoClasses.Set(":changed", Card.IsChanged));
         }
 
         public string? Header
@@ -39,6 +46,18 @@ namespace BrovanGUI.Views
             set => SetValue(StatusProperty, value);
         }
 
+        public bool IsChanged
+        {
+            get => GetValue(IsChangedProperty);
+            set => SetValue(IsChangedProperty, value);
+        }
+
+        public string? Note
+        {
+            get => GetValue(NoteProperty);
+            set => SetValue(NoteProperty, value);
+        }
+
         private void UpdateStatusClasses()
         {
             PseudoClasses.Set(":good", Status == StatusKind.Good);
@@ -51,9 +70,6 @@ namespace BrovanGUI.Views
     {
         public static readonly StyledProperty<string?> NumberProperty =
             AvaloniaProperty.Register<StepCard, string?>(nameof(Number));
-
-        public static readonly StyledProperty<string?> NoteProperty =
-            AvaloniaProperty.Register<StepCard, string?>(nameof(Note));
 
         public static readonly StyledProperty<bool> IsDoneProperty =
             AvaloniaProperty.Register<StepCard, bool>(nameof(IsDone));
@@ -82,12 +98,6 @@ namespace BrovanGUI.Views
         {
             get => GetValue(NumberProperty);
             set => SetValue(NumberProperty, value);
-        }
-
-        public string? Note
-        {
-            get => GetValue(NoteProperty);
-            set => SetValue(NoteProperty, value);
         }
 
         public bool IsDone

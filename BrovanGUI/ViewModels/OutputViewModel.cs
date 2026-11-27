@@ -96,13 +96,25 @@ namespace BrovanGUI.ViewModels
         private readonly DispatcherTimer Timer;
         private readonly Action Persist;
         private bool TimerArmed;
-        private string StatusValue = "Idle";
+        public const string NoOutput = "No output yet";
+
+        private string StatusValue = NoOutput;
+        private bool StatusProblem;
+        private bool HadLines;
         private string InputValue = string.Empty;
         private bool Open;
         private double HeightValue;
 
         public OutputViewModel(bool Open, double Height, Action Persist)
         {
+            Lines.Changed += () =>
+            {
+                if (HadLines == (Lines.Count != 0))
+                    return;
+
+                HadLines = Lines.Count != 0;
+                Raise(nameof(HasLines));
+            };
             this.Open = Open;
             HeightValue = Math.Max(MinHeight, Height);
             this.Persist = Persist;
@@ -122,6 +134,14 @@ namespace BrovanGUI.ViewModels
         {
             get => StatusValue;
             set => Set(ref StatusValue, value);
+        }
+
+        public bool HasLines => Lines.Count != 0;
+
+        public bool StatusIsProblem
+        {
+            get => StatusProblem;
+            set => Set(ref StatusProblem, value);
         }
 
         public string Input

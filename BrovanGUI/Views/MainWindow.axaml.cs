@@ -16,6 +16,7 @@ namespace BrovanGUI.Views
     public partial class MainWindow : Window
     {
         private const double MinPageHeight = 240;
+        private const double NarrowWidth = 1000;
 
         private readonly MainViewModel ViewModel;
         private bool CloseConfirmed;
@@ -44,7 +45,14 @@ namespace BrovanGUI.Views
             AddHandler(DragDrop.DragOverEvent, DragOver);
             AddHandler(DragDrop.DropEvent, Drop);
             ProfileList.DoubleTapped += ProfileDoubleTapped;
+            AddHandler(KeyDownEvent, ShortcutKeyDown, RoutingStrategies.Tunnel);
             ContentHost.SizeChanged += (_, _) => OutputPane.MaxHeight = OutputLimit();
+            SizeChanged += (_, _) =>
+            {
+                bool Narrow = Bounds.Width < NarrowWidth;
+                Classes.Set("narrow", Narrow);
+                Sidebar.Width = Narrow ? 216 : 256;
+            };
 
             Opened += (_, _) => BrovanHost.EnterEfficiencyMode();
             Closing += (_, Event) =>
@@ -69,12 +77,6 @@ namespace BrovanGUI.Views
                 Dispatcher.UIThread.Post(Log.ScrollToEnd, DispatcherPriority.Background);
         }
 
-        private void RemoveClick(object? Sender, RoutedEventArgs Event)
-        {
-            RemoveButton.Flyout?.Hide();
-            ViewModel.RemoveSelectedCommand.Execute(null);
-        }
-
         private void ProfileDoubleTapped(object? Sender, TappedEventArgs Event)
         {
             if (Event.Source is Visual Source && Source.FindAncestorOfType<ListBoxItem>(true)?.DataContext is ProfileViewModel Profile
@@ -85,6 +87,49 @@ namespace BrovanGUI.Views
         private void CancelCloseClick(object? Sender, RoutedEventArgs Event)
         {
             SetCloseOverlay(false);
+        }
+
+        private void ShortcutKeyDown(object? Sender, KeyEventArgs Event)
+        {
+            if (CloseOverlay.IsVisible)
+                return;
+
+            bool Control = Event.KeyModifiers == KeyModifiers.Control;
+            ProfileViewModel? Profile = ViewModel.IsProfilePage ? ViewModel.SelectedProfile : null;
+
+            if ((Control && Event.Key == Key.Enter || Event.KeyModifiers == KeyModifiers.None && Event.Key == Key.F5)
+                && Profile != null && Profile.CanLaunch && Profile.LaunchCommand.CanExecute(null))
+                Profile.LaunchCommand.Execute(null);
+            else if (Event.KeyModifiers == KeyModifiers.Shift && Event.Key == Key.F5 && Profile != null && Profile.IsRunning)
+                Profile.StopCommand.Execute(null);
+            else if (Control && Event.Key == Key.N)
+                ViewModel.AddProfileCommand.Execute(null);
+            else if (Control && Event.Key == Key.F && ViewModel.HasProfiles)
+            {
+                ViewModel.FilterOpen = true;
+                Dispatcher.UIThread.Post(() => FilterBox.Focus(NavigationMethod.Tab), DispatcherPriority.Loaded);
+            }
+            else if (Control && Event.Key == Key.Oem3)
+                ViewModel.Output.ToggleCommand.Execute(null);
+            else
+                return;
+
+            Event.Handled = true;
+        }
+
+        private void FilterKeyDown(object? Sender, KeyEventArgs Event)
+        {
+            if (Event.Key == Key.Escape)
+            {
+                ViewModel.ClearFilterCommand.Execute(null);
+                ProfileList.Focus(NavigationMethod.Tab);
+                Event.Handled = true;
+            }
+            else if (Event.Key == Key.Down && ViewModel.HasVisibleProfiles)
+            {
+                ProfileList.Focus(NavigationMethod.Tab);
+                Event.Handled = true;
+            }
         }
 
         private void CloseOverlayKeyDown(object? Sender, KeyEventArgs Event)

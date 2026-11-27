@@ -60,6 +60,8 @@ namespace BrovanGUI.Views
         private double ViewportLinesValue = 1;
         private double HorizontalMaximumValue;
         private double LineHeight = 18;
+        private double TextHeight = 14;
+        private const double LineSpacing = 1.4;
         private double CharWidth = 7;
         private bool Follow = true;
         private bool Dragging;
@@ -224,7 +226,8 @@ namespace BrovanGUI.Views
         private void MeasureFont()
         {
             using TextLayout Sample = new TextLayout("Mg", new Typeface(FontFamily), FontSize, Brushes.Black);
-            LineHeight = Math.Ceiling(Sample.Height);
+            TextHeight = Sample.Height;
+            LineHeight = Math.Ceiling(Sample.Height * LineSpacing);
             CharWidth = Sample.WidthIncludingTrailingWhitespace / 2;
         }
 
@@ -268,7 +271,7 @@ namespace BrovanGUI.Views
                 if (Text.Length != 0)
                 {
                     using TextLayout Layout = new TextLayout(Text, Face, FontSize, BrushFor(Text));
-                    Layout.Draw(Context, new Point(X, Y));
+                    Layout.Draw(Context, new Point(X, Y + Math.Floor((LineHeight - TextHeight) / 2)));
                 }
 
                 Y += LineHeight;

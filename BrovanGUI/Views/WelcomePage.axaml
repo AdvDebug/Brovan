@@ -1,21 +1,37 @@
 <UserControl xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="using:BrovanGUI.ViewModels"
+             xmlns:views="using:BrovanGUI.Views"
              x:Class="BrovanGUI.Views.WelcomePage"
              x:DataType="vm:WelcomeViewModel">
 
-    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="14" MaxWidth="420">
-        <TextBlock Classes="h1" Text="Add a program to get started" HorizontalAlignment="Center" />
-        <TextBlock Classes="muted" TextAlignment="Center" FontSize="13"
-                   Text="Pick a Windows or Linux executable. It gets a profile with its own settings, and Brovan runs it from here. You can also drop programs onto this window." />
-        <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center" Margin="0,10,0,0">
+    <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="20" Width="520" Margin="32">
+        <Image Source="/Assets/brovan.ico" Width="56" Height="56" HorizontalAlignment="Center" RenderOptions.BitmapInterpolationMode="HighQuality" />
+        <StackPanel Spacing="8">
+            <TextBlock Classes="h1" Text="Your library is empty" HorizontalAlignment="Center" />
+            <TextBlock Text="Add a Windows or Linux program. Each one gets a profile with its own settings, and Brovan launches it from here."
+                       FontSize="14" LineHeight="21" Foreground="{DynamicResource TextSecondary}" TextAlignment="Center" TextWrapping="Wrap" />
+        </StackPanel>
+        <views:DropZone Classes="dropzone" Height="150" Command="{Binding AddProgramCommand}">
+            <Panel>
+                <Rectangle Classes="dash" StrokeThickness="1.5" StrokeDashArray="4,3" RadiusX="10" RadiusY="10" />
+                <StackPanel Spacing="6" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Path Classes="icon muted" Width="24" Height="24" Data="{StaticResource IconDownload}" HorizontalAlignment="Center" />
+                    <TextBlock Text="Drop a program here" FontSize="14" HorizontalAlignment="Center" />
+                    <TextBlock Text="A Windows .exe or a Linux program" FontSize="12" Foreground="{DynamicResource TextTertiary}" HorizontalAlignment="Center" />
+                </StackPanel>
+            </Panel>
+        </views:DropZone>
+        <StackPanel Orientation="Horizontal" Spacing="20" HorizontalAlignment="Center">
             <Button Classes="accent launch" Command="{Binding AddProgramCommand}">
                 <StackPanel Orientation="Horizontal" Spacing="8">
-                    <Path Classes="icon onaccent" Width="14" Height="14" Data="{StaticResource IconPlus}" />
+                    <Path Classes="icon onaccent" Width="13" Height="13" Data="{StaticResource IconPlus}" />
                     <TextBlock Text="Add a program" Foreground="White" VerticalAlignment="Center" />
                 </StackPanel>
             </Button>
-            <Button Classes="launch" Command="{Binding OpenSetupCommand}" Content="Open setup" />
+            <Button Classes="link" Command="{Binding OpenSetupCommand}" VerticalAlignment="Center">
+                <TextBlock Text="Open Setup &#8594;" FontSize="13" Foreground="{DynamicResource AccentText}" />
+            </Button>
         </StackPanel>
     </StackPanel>
 </UserControl>

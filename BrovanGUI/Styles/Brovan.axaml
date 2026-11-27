@@ -1,13 +1,15 @@
 <Styles xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="using:BrovanGUI.Views">
 
     <Style Selector="TextBlock">
         <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
     </Style>
 
     <Style Selector="TextBlock.h1">
-        <Setter Property="FontSize" Value="24" />
+        <Setter Property="FontSize" Value="28" />
         <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="LetterSpacing" Value="-0.4" />
     </Style>
 
     <Style Selector="TextBlock.muted">
@@ -23,15 +25,275 @@
     </Style>
 
     <Style Selector="TextBlock.group">
-        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontSize" Value="11" />
         <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="Margin" Value="2,0,0,8" />
+        <Setter Property="LetterSpacing" Value="0.8" />
+        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+        <Setter Property="Margin" Value="2,0,0,10" />
     </Style>
 
     <Style Selector="Border.banner">
         <Setter Property="Background" Value="{DynamicResource WarnBanner}" />
-        <Setter Property="CornerRadius" Value="8" />
-        <Setter Property="Padding" Value="14,10" />
+        <Setter Property="BorderBrush" Value="{DynamicResource WarnBorder}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="10" />
+        <Setter Property="Padding" Value="14,11" />
+    </Style>
+
+    <Style Selector="Border.groupcard">
+        <Setter Property="Background" Value="{DynamicResource BgCard}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderStrong}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="10" />
+        <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+
+    <Style Selector="Border.groupcard views|SettingCard">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtle}" />
+        <Setter Property="BorderThickness" Value="0,1,0,0" />
+        <Setter Property="CornerRadius" Value="0" />
+        <Setter Property="MinHeight" Value="64" />
+    </Style>
+
+    <Style Selector="Border.groupcard ContentPresenter:nth-child(1) > views|SettingCard, Border.groupcard StackPanel > views|SettingCard:nth-child(1)">
+        <Setter Property="BorderThickness" Value="0" />
+    </Style>
+
+    <Style Selector="views|SettingCard.inactive /template/ TextBlock#PART_Title, views|SettingCard.inactive /template/ TextBlock#PART_Description, views|SettingCard.inactive /template/ ContentPresenter#PART_Content">
+        <Setter Property="Opacity" Value="0.6" />
+    </Style>
+
+    <Style Selector="TextBox.missing">
+        <Setter Property="BorderBrush" Value="{DynamicResource Warn}" />
+    </Style>
+
+    <Style Selector="Button.secondary:disabled /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <Style Selector="Button.secondary:disabled">
+        <Setter Property="Opacity" Value="0.45" />
+    </Style>
+
+    <Style Selector="Button.menuitem">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="HorizontalContentAlignment" Value="Left" />
+        <Setter Property="Padding" Value="10,8" />
+        <Setter Property="CornerRadius" Value="6" />
+    </Style>
+
+    <Style Selector="Button.menuitem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource BgHover}" />
+    </Style>
+
+    <Style Selector="Button.menuitem:disabled /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <Style Selector="Border.navbar">
+        <Setter Property="Width" Value="3" />
+        <Setter Property="Height" Value="18" />
+        <Setter Property="CornerRadius" Value="2" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Background">
+            <LinearGradientBrush StartPoint="0%,0%" EndPoint="0%,100%">
+                <GradientStop Color="#3DD5DE" Offset="0" />
+                <GradientStop Color="#6D4AF0" Offset="1" />
+            </LinearGradientBrush>
+        </Setter>
+    </Style>
+
+    <Style Selector="TextBlock.warntext">
+        <Setter Property="Foreground" Value="{DynamicResource WarnText}" />
+    </Style>
+
+    <Style Selector="TextBlock.failtext">
+        <Setter Property="Foreground" Value="{DynamicResource FailText}" />
+    </Style>
+
+    <Style Selector="TextBlock.brandtext">
+        <Setter Property="Foreground" Value="{DynamicResource BrandText}" />
+    </Style>
+
+    <Style Selector="TextBox.pathfield">
+        <Setter Property="Foreground" Value="Transparent" />
+    </Style>
+
+    <Style Selector="TextBox.pathfield:focus-within">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+    </Style>
+
+    <Style Selector="TextBlock.pathshow">
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="Margin" Value="11,0,42,0" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="TextTrimming" Value="PathSegmentEllipsis" />
+        <Setter Property="IsHitTestVisible" Value="False" />
+    </Style>
+
+    <Style Selector="views|SettingCard.inactive ToggleSwitch:checked /template/ Border#SwitchKnobBounds">
+        <Setter Property="Background" Value="{DynamicResource BorderStrong}" />
+    </Style>
+
+    <Style Selector="Button.expander">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtle}" />
+        <Setter Property="CornerRadius" Value="0" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="Padding" Value="18,10" />
+        <Setter Property="MinHeight" Value="48" />
+        <Setter Property="FontWeight" Value="Normal" />
+    </Style>
+
+    <Style Selector="Button.expander.open">
+        <Setter Property="BorderThickness" Value="0,0,0,1" />
+    </Style>
+
+    <Style Selector="Button.expander:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource BgHover}" />
+    </Style>
+
+    <Style Selector="Border.pinned">
+        <Setter Property="BorderBrush" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0,0,0,1" />
+    </Style>
+
+    <Style Selector="Border.pinned.scrolled">
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtle}" />
+        <Setter Property="Padding" Value="40,10,40,10" />
+    </Style>
+
+    <Style Selector="Border.headtile">
+        <Setter Property="Background" Value="{DynamicResource BgTile}" />
+        <Setter Property="Width" Value="56" />
+        <Setter Property="Height" Value="56" />
+        <Setter Property="CornerRadius" Value="14" />
+        <Setter Property="Transitions">
+            <Transitions>
+                <DoubleTransition Property="Width" Duration="0:0:0.16" Easing="CubicEaseOut" />
+                <DoubleTransition Property="Height" Duration="0:0:0.16" Easing="CubicEaseOut" />
+            </Transitions>
+        </Setter>
+    </Style>
+
+    <Style Selector="TextBlock.headtitle">
+        <Setter Property="Transitions">
+            <Transitions>
+                <DoubleTransition Property="FontSize" Duration="0:0:0.16" Easing="CubicEaseOut" />
+            </Transitions>
+        </Setter>
+    </Style>
+
+    <Style Selector="Border.headtile.letter">
+        <Setter Property="Background" Value="{DynamicResource TileLetter}" />
+    </Style>
+
+    <Style Selector="Border.runrow">
+        <Setter Property="Padding" Value="18,0" />
+        <Setter Property="Height" Value="44" />
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtle}" />
+        <Setter Property="BorderThickness" Value="0,1,0,0" />
+    </Style>
+
+    <Style Selector="ContentPresenter:nth-child(1) > Border.runrow">
+        <Setter Property="BorderThickness" Value="0" />
+    </Style>
+
+    <Style Selector="ItemsControl.rows">
+        <Setter Property="Opacity" Value="0" />
+        <Setter Property="Transitions">
+            <Transitions>
+                <DoubleTransition Property="Opacity" Duration="0:0:0.15" />
+            </Transitions>
+        </Setter>
+    </Style>
+
+    <Style Selector="ItemsControl.rows.open">
+        <Setter Property="Opacity" Value="1" />
+    </Style>
+
+    <Style Selector="Button, ToggleSwitch, ComboBox, ListBoxItem">
+        <Setter Property="FocusAdorner" Value="{x:Null}" />
+    </Style>
+
+    <Style Selector="Button:focus-visible /template/ ContentPresenter#PART_ContentPresenter, ListBoxItem:focus-visible /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="BoxShadow" Value="inset 0 0 0 2 #BFDBFE" />
+    </Style>
+
+    <Style Selector="ComboBox:focus-visible /template/ Border#Background, ToggleSwitch:focus-visible /template/ Border#OuterBorder">
+        <Setter Property="BoxShadow" Value="inset 0 0 0 2 #BFDBFE" />
+    </Style>
+
+    <Style Selector="Button.headbutton">
+        <Setter Property="MinHeight" Value="40" />
+    </Style>
+
+    <Style Selector="Button.headmore">
+        <Setter Property="Width" Value="40" />
+        <Setter Property="Height" Value="40" />
+    </Style>
+
+    <Style Selector="Border.pinned.scrolled Button.headbutton">
+        <Setter Property="MinHeight" Value="34" />
+        <Setter Property="Padding" Value="16,5" />
+    </Style>
+
+    <Style Selector="Border.pinned.scrolled Button.headmore">
+        <Setter Property="Width" Value="34" />
+        <Setter Property="Height" Value="34" />
+    </Style>
+
+    <Style Selector="Path.chevron">
+        <Setter Property="RenderTransform" Value="rotate(0deg)" />
+        <Setter Property="Transitions">
+            <Transitions>
+                <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.18" Easing="CubicEaseOut" />
+            </Transitions>
+        </Setter>
+    </Style>
+
+    <Style Selector="Button.expander.open Path.chevron">
+        <Setter Property="RenderTransform" Value="rotate(180deg)" />
+    </Style>
+
+    <Style Selector="TextBox.filter">
+        <Setter Property="MinHeight" Value="32" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="Image.headicon">
+        <Setter Property="Width" Value="40" />
+        <Setter Property="Height" Value="40" />
+    </Style>
+
+    <Style Selector="Border.pinned.scrolled Border.headtile">
+        <Setter Property="Width" Value="36" />
+        <Setter Property="Height" Value="36" />
+        <Setter Property="CornerRadius" Value="9" />
+    </Style>
+
+    <Style Selector="Border.pinned.scrolled Image.headicon">
+        <Setter Property="Width" Value="26" />
+        <Setter Property="Height" Value="26" />
+    </Style>
+
+    <Style Selector="Border.pinned.scrolled TextBlock.headtitle">
+        <Setter Property="FontSize" Value="20" />
+    </Style>
+
+    <Style Selector="Border.pinned.scrolled :is(Control).headdetail">
+        <Setter Property="IsVisible" Value="False" />
+    </Style>
+
+    <Style Selector="Button.square">
+        <Setter Property="Height" Value="36" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
     </Style>
 
     <Style Selector="Path.icon">
@@ -121,6 +383,10 @@
         <Setter Property="CornerRadius" Value="4" />
     </Style>
 
+    <Style Selector="Button.iconbtn:disabled /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="Transparent" />
+    </Style>
+
     <Style Selector="Button.iconbtn:pressed /template/ ContentPresenter#PART_ContentPresenter">
         <Setter Property="Background" Value="{DynamicResource BgSelected}" />
     </Style>
@@ -152,6 +418,63 @@
     <Style Selector="Button.secondary">
         <Setter Property="Padding" Value="14,7" />
         <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Background" Value="{DynamicResource BgButton}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderStrong}" />
+        <Setter Property="BorderThickness" Value="1" />
+    </Style>
+
+    <Style Selector="Button.link">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="FontWeight" Value="Normal" />
+    </Style>
+
+    <Style Selector="Button.link:pointerover /template/ ContentPresenter#PART_ContentPresenter, Button.link:disabled /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="Transparent" />
+    </Style>
+
+    <Style Selector="Button.link:pointerover TextBlock">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+        <Setter Property="TextDecorations" Value="Underline" />
+    </Style>
+
+    <Style Selector="Button.dropzone">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="HorizontalAlignment" Value="Stretch" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="VerticalContentAlignment" Value="Stretch" />
+    </Style>
+
+    <Style Selector="Button.dropzone:pointerover /template/ ContentPresenter#PART_ContentPresenter, Button.dropzone.over /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource AccentSoft}" />
+    </Style>
+
+    <Style Selector="Button.dropzone Rectangle.dash">
+        <Setter Property="Stroke" Value="{DynamicResource TextTertiary}" />
+        <Setter Property="Opacity" Value="0.5" />
+    </Style>
+
+    <Style Selector="Button.dropzone.over Rectangle.dash">
+        <Setter Property="Stroke" Value="{DynamicResource Accent}" />
+        <Setter Property="Opacity" Value="1" />
+    </Style>
+
+    <Style Selector="Border.chip">
+        <Setter Property="CornerRadius" Value="10" />
+        <Setter Property="Padding" Value="9,2" />
+        <Setter Property="Background" Value="{DynamicResource BgTile}" />
+    </Style>
+
+    <Style Selector="Border.chip.good">
+        <Setter Property="Background" Value="{DynamicResource BrandSoft}" />
+    </Style>
+
+    <Style Selector="Border.chip.warn">
+        <Setter Property="Background" Value="{DynamicResource FailSoft}" />
     </Style>
 
     <Style Selector="ComboBox.setting">
@@ -168,7 +491,8 @@
 
     <Style Selector="TextBox.list">
         <Setter Property="Width" Value="280" />
-        <Setter Property="MinHeight" Value="64" />
+        <Setter Property="MinHeight" Value="36" />
+        <Setter Property="MaxHeight" Value="120" />
         <Setter Property="AcceptsReturn" Value="True" />
         <Setter Property="TextWrapping" Value="Wrap" />
     </Style>
@@ -178,9 +502,37 @@
     </Style>
 
     <Style Selector="TextBox.output">
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="PlaceholderForeground" Value="{DynamicResource TextSecondary}" />
+        <Setter Property="MinHeight" Value="32" />
+        <Setter Property="VerticalContentAlignment" Value="Center" />
+    </Style>
+
+    <Style Selector="TextBlock.mono">
         <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, DejaVu Sans Mono, Menlo, monospace" />
-        <Setter Property="FontSize" Value="12" />
-        <Setter Property="MinHeight" Value="28" />
+    </Style>
+
+    <Style Selector="Button.ghost">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+    </Style>
+
+    <Style Selector="Button.ghost:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+        <Setter Property="Background" Value="{DynamicResource BgHover}" />
+    </Style>
+
+
+    <Style Selector=":is(Window).narrow TextBox.form">
+        <Setter Property="Width" Value="260" />
+    </Style>
+
+    <Style Selector=":is(Window).narrow ComboBox.setting">
+        <Setter Property="Width" Value="190" />
+    </Style>
+
+    <Style Selector=":is(Window).narrow TextBox.setting, :is(Window).narrow TextBox.list">
+        <Setter Property="Width" Value="220" />
     </Style>
 
 </Styles>

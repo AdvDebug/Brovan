@@ -33,7 +33,7 @@
                     <SolidColorBrush x:Key="Good" Color="#4ADE80" />
                     <SolidColorBrush x:Key="Warn" Color="#FBBF24" />
                     <SolidColorBrush x:Key="Bad" Color="#F87171" />
-                    <SolidColorBrush x:Key="WarnBanner" Color="#33FBBF24" />
+                    <SolidColorBrush x:Key="WarnBanner" Color="#14FBBF24" />
                     <SolidColorBrush x:Key="AccentSoft" Color="#333B82F6" />
                     <SolidColorBrush x:Key="AccentText" Color="#BFDBFE" />
                     <SolidColorBrush x:Key="AccentBorder" Color="#993B82F6" />
@@ -44,7 +44,32 @@
                     <SolidColorBrush x:Key="WarnSoft" Color="#33FBBF24" />
                     <SolidColorBrush x:Key="WarnBorder" Color="#59FBBF24" />
                     <SolidColorBrush x:Key="WelcomeTint" Color="Transparent" />
+                    <SolidColorBrush x:Key="TileLetter" Color="#333B82F6" />
+                    <SolidColorBrush x:Key="Brand" Color="#3DD5DE" />
+                    <SolidColorBrush x:Key="Fail" Color="#FB923C" />
+                    <SolidColorBrush x:Key="FailText" Color="#FB923C" />
+                    <SolidColorBrush x:Key="BrandText" Color="#3DD5DE" />
+                    <SolidColorBrush x:Key="WarnText" Color="#FBBF24" />
+                    <SolidColorBrush x:Key="FailSoft" Color="#29FB923C" />
+                    <SolidColorBrush x:Key="BrandSoft" Color="#243DD5DE" />
+                    <SolidColorBrush x:Key="SystemControlFocusVisualPrimaryBrush" Color="#93C5FD" />
+                    <SolidColorBrush x:Key="SystemControlFocusVisualSecondaryBrush" Color="Transparent" />
                     <SolidColorBrush x:Key="TextTertiary" Color="#7C7C7C" />
+                    <SolidColorBrush x:Key="BadSoft" Color="#33F87171" />
+                    <SolidColorBrush x:Key="TextControlBorderBrush" Color="#3A3A3A" />
+                    <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="#4C4C4C" />
+                    <SolidColorBrush x:Key="ComboBoxBorderBrush" Color="#3A3A3A" />
+                    <SolidColorBrush x:Key="ComboBoxBorderBrushPointerOver" Color="#4C4C4C" />
+                    <SolidColorBrush x:Key="RepeatButtonBackgroundDisabled" Color="Transparent" />
+                    <SolidColorBrush x:Key="ToggleSwitchStrokeOff" Color="#6E6E6E" />
+                    <SolidColorBrush x:Key="ToggleSwitchStrokeOffPointerOver" Color="#8C8C8C" />
+                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOff" Color="#A0A0A0" />
+                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOffPointerOver" Color="#C2C2C2" />
+                    <RadialGradientBrush x:Key="PageGlow" Center="35%,0%" GradientOrigin="35%,0%" RadiusX="55%" RadiusY="100%">
+                        <GradientStop Color="#1F6D4AF0" Offset="0" />
+                        <GradientStop Color="#0A3DD5DE" Offset="0.55" />
+                        <GradientStop Color="#003DD5DE" Offset="1" />
+                    </RadialGradientBrush>
                     <RadialGradientBrush x:Key="WelcomeGlow" Center="27%,18%" GradientOrigin="27%,18%" RadiusX="34%" RadiusY="80%">
                         <GradientStop Color="#383DD5DE" Offset="0" />
                         <GradientStop Color="#296D4AF0" Offset="0.5" />
@@ -53,10 +78,10 @@
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
                     <SolidColorBrush x:Key="BgWindow" Color="#F3F3F3" />
-                    <SolidColorBrush x:Key="BgSidebar" Color="#EAEAEA" />
+                    <SolidColorBrush x:Key="BgSidebar" Color="#E6E8EC" />
                     <SolidColorBrush x:Key="BgCard" Color="#FFFFFF" />
-                    <SolidColorBrush x:Key="BgHover" Color="#E0E0E0" />
-                    <SolidColorBrush x:Key="BgSelected" Color="#D6D6D6" />
+                    <SolidColorBrush x:Key="BgHover" Color="#DCDFE5" />
+                    <SolidColorBrush x:Key="BgSelected" Color="#D8E3F8" />
                     <SolidColorBrush x:Key="BgTile" Color="#E4E4E4" />
                     <SolidColorBrush x:Key="BgOutput" Color="#FAFAFA" />
                     <SolidColorBrush x:Key="BorderSubtle" Color="#DCDCDC" />
@@ -66,7 +91,7 @@
                     <SolidColorBrush x:Key="Good" Color="#16A34A" />
                     <SolidColorBrush x:Key="Warn" Color="#D97706" />
                     <SolidColorBrush x:Key="Bad" Color="#DC2626" />
-                    <SolidColorBrush x:Key="WarnBanner" Color="#33D97706" />
+                    <SolidColorBrush x:Key="WarnBanner" Color="#14D97706" />
                     <SolidColorBrush x:Key="AccentSoft" Color="#1F2563EB" />
                     <SolidColorBrush x:Key="AccentText" Color="#1D4ED8" />
                     <SolidColorBrush x:Key="AccentBorder" Color="#992563EB" />
@@ -77,7 +102,28 @@
                     <SolidColorBrush x:Key="WarnSoft" Color="#33D97706" />
                     <SolidColorBrush x:Key="WarnBorder" Color="#66D97706" />
                     <SolidColorBrush x:Key="WelcomeTint" Color="#086D4AF0" />
+                    <SolidColorBrush x:Key="TileLetter" Color="#402563EB" />
+                    <SolidColorBrush x:Key="Brand" Color="#0E9AA7" />
+                    <SolidColorBrush x:Key="Fail" Color="#EA580C" />
+                    <SolidColorBrush x:Key="FailText" Color="#C2410C" />
+                    <SolidColorBrush x:Key="BrandText" Color="#0E7490" />
+                    <SolidColorBrush x:Key="WarnText" Color="#B45309" />
+                    <SolidColorBrush x:Key="FailSoft" Color="#1FEA580C" />
+                    <SolidColorBrush x:Key="BrandSoft" Color="#1F0E9AA7" />
+                    <SolidColorBrush x:Key="SystemControlFocusVisualPrimaryBrush" Color="#3B82F6" />
+                    <SolidColorBrush x:Key="SystemControlFocusVisualSecondaryBrush" Color="Transparent" />
                     <SolidColorBrush x:Key="TextTertiary" Color="#6B7280" />
+                    <SolidColorBrush x:Key="BadSoft" Color="#26DC2626" />
+                    <SolidColorBrush x:Key="TextControlBorderBrush" Color="#C9CED6" />
+                    <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="#AEB4BE" />
+                    <SolidColorBrush x:Key="ComboBoxBorderBrush" Color="#C9CED6" />
+                    <SolidColorBrush x:Key="ComboBoxBorderBrushPointerOver" Color="#AEB4BE" />
+                    <SolidColorBrush x:Key="RepeatButtonBackgroundDisabled" Color="Transparent" />
+                    <RadialGradientBrush x:Key="PageGlow" Center="35%,0%" GradientOrigin="35%,0%" RadiusX="55%" RadiusY="100%">
+                        <GradientStop Color="#0D2563EB" Offset="0" />
+                        <GradientStop Color="#0A3DD5DE" Offset="0.55" />
+                        <GradientStop Color="#003DD5DE" Offset="1" />
+                    </RadialGradientBrush>
                     <RadialGradientBrush x:Key="WelcomeGlow" Center="30%,0%" GradientOrigin="30%,0%" RadiusX="70%" RadiusY="100%">
                         <GradientStop Color="#306D4AF0" Offset="0" />
                         <GradientStop Color="#143DD5DE" Offset="0.55" />
@@ -88,40 +134,78 @@
 
             <ControlTheme x:Key="{x:Type views:SettingCard}" TargetType="views:SettingCard">
                 <Setter Property="Background" Value="{DynamicResource BgCard}" />
-                <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtle}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource BorderStrong}" />
                 <Setter Property="BorderThickness" Value="1" />
-                <Setter Property="CornerRadius" Value="6" />
-                <Setter Property="Padding" Value="16,11" />
-                <Setter Property="MinHeight" Value="60" />
+                <Setter Property="CornerRadius" Value="10" />
+                <Setter Property="Padding" Value="18,12" />
+                <Setter Property="MinHeight" Value="62" />
                 <Setter Property="HorizontalAlignment" Value="Stretch" />
                 <Setter Property="Template">
                     <ControlTemplate>
                         <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}"
                                 Padding="{TemplateBinding Padding}" MinHeight="{TemplateBinding MinHeight}">
-                            <Grid ColumnDefinitions="Auto,*,Auto">
-                                <Ellipse Name="PART_Status" Width="8" Height="8" Margin="0,0,14,0" VerticalAlignment="Center" IsVisible="False" />
-                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,24,0" Spacing="2">
-                                    <TextBlock Text="{TemplateBinding Header}" FontSize="14" Foreground="{DynamicResource TextPrimary}" TextWrapping="Wrap" />
-                                    <TextBlock Text="{TemplateBinding Description}" FontSize="12" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap"
-                                               IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent}, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
-                                </StackPanel>
-                                <ContentPresenter Grid.Column="2" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" VerticalAlignment="Center" />
-                            </Grid>
+                            <Panel>
+                                <Border Name="PART_Bar" Width="3" HorizontalAlignment="Left" Margin="-18,-12,0,-12"
+                                        Background="{DynamicResource Accent}" IsVisible="False" />
+                                <Grid ColumnDefinitions="Auto,*,Auto">
+                                    <Panel Name="PART_Status" Width="28" Height="28" Margin="0,0,14,0" VerticalAlignment="Center" IsVisible="False">
+                                        <Ellipse Name="PART_StatusFill" />
+                                        <Path Name="PART_StatusCheck" Data="{DynamicResource IconCheck}" Width="12" Height="8.3" Stretch="Uniform"
+                                              Stroke="{DynamicResource Good}" StrokeThickness="2.5" StrokeLineCap="Round" StrokeJoin="Round"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="False" />
+                                        <TextBlock Name="PART_StatusAlert" Text="!" FontSize="15" FontWeight="Bold"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center" IsVisible="False" />
+                                    </Panel>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,24,0" Spacing="3">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <TextBlock Name="PART_Title" Text="{TemplateBinding Header}" FontSize="14" FontWeight="Medium" Foreground="{DynamicResource TextPrimary}" TextWrapping="Wrap" VerticalAlignment="Center" />
+                                            <Border CornerRadius="9" Padding="7,0" VerticalAlignment="Center" BorderThickness="1" BorderBrush="{DynamicResource BorderStrong}"
+                                                    Background="Transparent" ToolTip.Tip="Has no effect with the current choice above. It still saves, and applies once that changes."
+                                                    IsVisible="{Binding Note, RelativeSource={RelativeSource TemplatedParent}, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                                <TextBlock Text="{TemplateBinding Note}" FontSize="11" Foreground="{DynamicResource TextSecondary}" />
+                                            </Border>
+                                        </StackPanel>
+                                        <TextBlock Name="PART_Description" Text="{TemplateBinding Description}" FontSize="12" LineHeight="17" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap"
+                                                   IsVisible="{Binding Description, RelativeSource={RelativeSource TemplatedParent}, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+                                    </StackPanel>
+                                    <ContentPresenter Name="PART_Content" Grid.Column="2" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" VerticalAlignment="Center" />
+                                </Grid>
+                            </Panel>
                         </Border>
                     </ControlTemplate>
                 </Setter>
-                <Style Selector="^:good /template/ Ellipse#PART_Status">
+                <Style Selector="^:changed /template/ Border#PART_Bar">
                     <Setter Property="IsVisible" Value="True" />
-                    <Setter Property="Fill" Value="{DynamicResource Good}" />
                 </Style>
-                <Style Selector="^:warn /template/ Ellipse#PART_Status">
+                <Style Selector="^:good /template/ Panel#PART_Status">
                     <Setter Property="IsVisible" Value="True" />
-                    <Setter Property="Fill" Value="{DynamicResource Warn}" />
                 </Style>
-                <Style Selector="^:bad /template/ Ellipse#PART_Status">
+                <Style Selector="^:good /template/ Ellipse#PART_StatusFill">
+                    <Setter Property="Fill" Value="{DynamicResource GoodSoft}" />
+                </Style>
+                <Style Selector="^:good /template/ Path#PART_StatusCheck">
                     <Setter Property="IsVisible" Value="True" />
-                    <Setter Property="Fill" Value="{DynamicResource Bad}" />
+                </Style>
+                <Style Selector="^:warn /template/ Panel#PART_Status">
+                    <Setter Property="IsVisible" Value="True" />
+                </Style>
+                <Style Selector="^:warn /template/ Ellipse#PART_StatusFill">
+                    <Setter Property="Fill" Value="{DynamicResource WarnSoft}" />
+                </Style>
+                <Style Selector="^:warn /template/ TextBlock#PART_StatusAlert">
+                    <Setter Property="IsVisible" Value="True" />
+                    <Setter Property="Foreground" Value="{DynamicResource Warn}" />
+                </Style>
+                <Style Selector="^:bad /template/ Panel#PART_Status">
+                    <Setter Property="IsVisible" Value="True" />
+                </Style>
+                <Style Selector="^:bad /template/ Ellipse#PART_StatusFill">
+                    <Setter Property="Fill" Value="{DynamicResource BadSoft}" />
+                </Style>
+                <Style Selector="^:bad /template/ TextBlock#PART_StatusAlert">
+                    <Setter Property="IsVisible" Value="True" />
+                    <Setter Property="Foreground" Value="{DynamicResource Bad}" />
                 </Style>
             </ControlTheme>
 
@@ -275,6 +359,11 @@
             <StreamGeometry x:Key="IconTerminal">M4 17l6-6-6-6M12 19h8</StreamGeometry>
             <StreamGeometry x:Key="IconExternal">M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6M15 3h6v6M10 14L21 3</StreamGeometry>
             <StreamGeometry x:Key="IconRefresh">M23 4v6h-6M1 20v-6h6M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15</StreamGeometry>
+            <StreamGeometry x:Key="IconClear">M12 22a10 10 0 100-20 10 10 0 000 20zM4.93 4.93l14.14 14.14</StreamGeometry>
+            <StreamGeometry x:Key="IconSort">M7 4v16M3 8l4-4 4 4M17 20V4M13 16l4 4 4-4</StreamGeometry>
+            <StreamGeometry x:Key="IconClose">M18 6L6 18M6 6l12 12</StreamGeometry>
+            <StreamGeometry x:Key="IconSearch">M11 19a8 8 0 100-16 8 8 0 000 16zM21 21l-4.35-4.35</StreamGeometry>
+            <StreamGeometry x:Key="IconMore">M2 2a2 2 0 1 0 0.01 0zM12 2a2 2 0 1 0 0.01 0zM22 2a2 2 0 1 0 0.01 0z</StreamGeometry>
             <StreamGeometry x:Key="IconCheck">M20 6L9 17l-5-5</StreamGeometry>
             <StreamGeometry x:Key="IconShield">M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z</StreamGeometry>
             <StreamGeometry x:Key="IconBolt">M13 2L3 14h9l-1 8 10-12h-9l1-8z</StreamGeometry>

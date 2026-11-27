@@ -98,23 +98,23 @@ namespace Brovan.Core.Settings
     public sealed partial class BrovanSettings
     {
         [Setting("backend.kind", SettingCategory.Backend, Cli = "--backend",
-            Help = "Emulation backend.")]
+            Help = "Hypervisor runs programs at near native speed. Unicorn works in software on any computer.")]
         public EmulationBackendKind Backend { get; set; } = EmulationBackendKind.Unicorn;
 
         [Setting("backend.smp", SettingCategory.Backend, CliNegated = "--no-smp",
-            Help = "Run guest threads at once on a hypervisor backend.")]
+            Help = "Run several guest threads at the same time.")]
         public bool Smp { get; set; } = true;
 
         [Setting("backend.guest-kernel", SettingCategory.Backend, CliNegated = "--no-guest-kernel",
-            Help = "Serve some system calls inside the guest on a hypervisor backend, without leaving the guest.")]
+            Help = "Handle some system calls inside the virtual machine instead of the host, which is faster.")]
         public bool GuestKernel { get; set; } = true;
 
         [Setting("backend.cores", SettingCategory.Backend, Cli = "--cores", Min = 0, Max = 4096,
-            Help = "Guest threads a hypervisor backend runs at once. 0 picks host processors minus one.")]
+            Help = "How many guest threads run at once. Automatic uses all but one of this computer's processors.")]
         public int Cores { get; set; }
 
         [Setting("backend.hooks", SettingCategory.Backend, CliNegated = "--no-hooks",
-            Help = "Instrumentation hooks. Turning them off trades visibility for speed.")]
+            Help = "Per-instruction hooks for tracing and debugging. Programs run faster with them off.")]
         public bool Hooks { get; set; } = true;
 
         [Setting("backend.quick", SettingCategory.Backend, Cli = "--quick", CliShort = "-q",
@@ -123,19 +123,19 @@ namespace Brovan.Core.Settings
 
         [Setting("jit.cache", SettingCategory.Backend, Cli = "--jit-cache", CliNegated = "--no-jit-cache",
             CliValueSets = "jit.cache-dir",
-            Help = "Reuse a persisted Unicorn code cache instead of translating on every launch.")]
+            Help = "Keep the code Unicorn translates on disk, so later launches start faster.")]
         public bool JitCache { get; set; } = true;
 
         [Setting("jit.cache-dir", SettingCategory.Backend, Scope = SettingScope.Global,
-            Help = "Where the persisted code cache lives. Empty means .jitcache next to Brovan.")]
+            Help = "Where translated code is saved. By default, next to Brovan.")]
         public string JitCacheDirectory { get; set; } = string.Empty;
 
         [Setting("jit.stats", SettingCategory.Diagnostics, Cli = "--jit-cache-stats",
-            Help = "Print code cache statistics when the emulated program exits.")]
+            Help = "Add a summary of the translated code to the output when the program exits.")]
         public bool JitCacheStats { get; set; }
 
         [Setting("graphics.relax-vulkan", SettingCategory.Graphics,
-            Help = "Claim the core Vulkan features nothing stands in for.")]
+            Help = "Report core Vulkan features the GPU lacks as supported. Some games start only with this, but may draw wrongly.")]
         public bool RelaxVulkan { get; set; }
 
         [Setting("graphics.render-scale", SettingCategory.Graphics, Cli = "--render-scale", Min = 0.25, Max = 1.0,
@@ -144,19 +144,19 @@ namespace Brovan.Core.Settings
         public float RenderScale { get; set; } = 1f;
 
         [Setting("platform.low-memory", SettingCategory.Platform, Cli = "--low-memory",
-            Help = "How hard to trade throughput for a smaller footprint. Each step shrinks the caches and pools further and tells the program the machine has less memory.")]
+            Help = "Use less memory at some cost in speed. Higher levels save more.")]
         public MemoryProfile LowMemory { get; set; }
 
         [Setting("net.mode", SettingCategory.Network, Cli = "--net",
-            Help = "Host networking policy.")]
+            Help = "What the program can reach over the network.")]
         public NetworkAccessMode NetworkMode { get; set; } = NetworkAccessMode.Loopback;
 
         [Setting("net.allow", SettingCategory.Network, Cli = "--net-allow", Repeatable = true,
-            Help = "Addresses allowed on top of the selected policy.")]
+            Help = "Extra addresses the program may reach.")]
         public string[] NetworkAllow { get; set; } = Array.Empty<string>();
 
         [Setting("log.silent", SettingCategory.Diagnostics, Cli = "--silent", CliShort = "-s",
-            Help = "Show only output coming from the emulated program.")]
+            Help = "Hide Brovan's own messages in the output. Turn this off when reporting a problem.")]
         public bool Silent { get; set; }
     }
 }
